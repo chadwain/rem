@@ -7,8 +7,49 @@ const Allocator = std.mem.Allocator;
 const EOF = '\u{5FFFE}';
 const REPLACEMENT_CHARACTER = '\u{FFFD}';
 
-test "" {
+test {
     std.testing.refAllDecls(@This());
+}
+
+test "tokenize sample html text" {
+    @setEvalBranchQuota(5000);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer assert(!gpa.deinit());
+    var tokenizer = Tokenizer{
+        .allocator = &gpa.allocator,
+        .input = &decodeComptimeString(
+            \\<html>
+            \\	<head>
+            \\		<style>
+            \\			div {
+            \\				width: 200px;
+            \\				height: 100px;
+            \\			}
+            \\		</style>
+            \\	</head>
+            \\	<body>
+            \\		<div>
+            \\			Text goes here.
+            \\		</div>
+            \\	</body>
+            \\</html>
+        ),
+    };
+    defer tokenizer.deinit();
+
+    while (!tokenizer.reached_eof) {
+        try tokenize(&tokenizer);
+    }
+
+    std.debug.print("\nTokens:\n", .{});
+    for (tokenizer.tokens.items) |t| {
+        std.debug.print("{any}\n", .{t});
+    }
+
+    std.debug.print("\nParse errors:\n", .{});
+    for (tokenizer.parse_errors.items) |e| {
+        std.debug.print("{any}\n", .{e});
+    }
 }
 
 const TokenizerState = enum {
@@ -137,6 +178,7 @@ const ParseError = enum {
     SurrogateCharacterReference,
     NoncharacterCharacterReference,
     ControlCharacterReference,
+    DuplicateAttribute,
 };
 
 const TokenDOCTYPE = struct {
@@ -177,6 +219,101 @@ const Token = union(enum) {
     comment: TokenComment,
     character: TokenCharacter,
     eof: TokenEOF,
+
+    fn deinit(self: *@This(), allocator: *Allocator) void {
+        switch (self.*) {
+            .doctype => |d| {
+                if (d.name) |name| allocator.free(name);
+                if (d.public_identifier) |public_identifier| allocator.free(public_identifier);
+                if (d.system_identifier) |system_identifier| allocator.free(system_identifier);
+            },
+            .start_tag, .end_tag => |*t| {
+                allocator.free(t.name);
+                var attr_it = t.attributes.iterator();
+                while (attr_it.next()) |entry| {
+                    allocator.free(entry.key_ptr.*);
+                    allocator.free(entry.value_ptr.*);
+                }
+                t.attributes.deinit(allocator);
+            },
+            .comment => |c| {
+                allocator.free(c.data);
+            },
+            .character => {},
+            .eof => {},
+        }
+    }
+
+    pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        const write = (struct {
+            fn f(w: anytype, s: []const u21) !void {
+                var code_units: [4]u8 = undefined;
+                for (s) |c| {
+                    const len = std.unicode.utf8Encode(c, &code_units) catch unreachable;
+                    try w.writeAll(code_units[0..len]);
+                }
+            }
+        }).f;
+
+        switch (value) {
+            .doctype => |d| {
+                try writer.writeAll("DOCTYPE (");
+                if (d.name) |name| try write(writer, name);
+                if (d.public_identifier) |pi| try write(writer, pi);
+                if (d.system_identifier) |si| try write(writer, si);
+                try writer.writeAll(")");
+            },
+            .start_tag => |t| {
+                try writer.writeAll("Start tag ");
+                if (t.self_closing) try writer.writeAll("(self closing) ");
+                try writer.writeAll("\"");
+                try write(writer, t.name);
+                try writer.writeAll("\" [");
+                var it = t.attributes.iterator();
+                while (it.next()) |entry| {
+                    try writer.writeAll("\"");
+                    try write(writer, entry.key_ptr.*);
+                    try writer.writeAll("\": \"");
+                    try write(writer, entry.value_ptr.*);
+                    try writer.writeAll("\"");
+                }
+                try writer.writeAll("]");
+            },
+            .end_tag => |t| {
+                try writer.writeAll("End tag ");
+                if (t.self_closing) try writer.writeAll("(self closing) ");
+                try writer.writeAll("\"");
+                try write(writer, t.name);
+                try writer.writeAll("\" [");
+                var it = t.attributes.iterator();
+                while (it.next()) |entry| {
+                    try writer.writeAll("\"");
+                    try write(writer, entry.key_ptr.*);
+                    try writer.writeAll("\": \"");
+                    try write(writer, entry.value_ptr.*);
+                    try writer.writeAll("\"");
+                }
+                try writer.writeAll("]");
+            },
+            .comment => |c| {
+                try writer.writeAll("Comment (");
+                try write(writer, c.data);
+                try writer.writeAll(")");
+            },
+            .character => |c| {
+                try writer.writeAll("Character (");
+                switch (c.data) {
+                    '\n' => try writer.writeAll("<newline>"),
+                    '\t' => try writer.writeAll("<tab>"),
+                    else => try write(writer, &.{c.data}),
+                }
+                try writer.writeAll(")");
+            },
+            .eof => {
+                try writer.writeAll("End of file");
+            },
+        }
+    }
 };
 
 const Tokenizer = struct {
@@ -203,8 +340,9 @@ const Tokenizer = struct {
     adjusted_current_node_is_in_html_namespace: bool = true,
 
     input: []const u21,
-    position: usize,
-    prev_position: usize,
+    position: usize = 0,
+    prev_position: usize = 0,
+    reached_eof: bool = false,
 
     tokens: ArrayListUnmanaged(Token) = .{},
     parse_errors: ArrayListUnmanaged(ParseError) = .{},
@@ -212,17 +350,52 @@ const Tokenizer = struct {
 
     const Self = @This();
 
+    fn deinit(self: *Self) void {
+        self.current_tag_name.deinit(self.allocator);
+        var attr_it = self.current_tag_attributes.iterator();
+        while (attr_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.current_tag_attributes.deinit(self.allocator);
+        if (self.last_start_tag_name) |last_name| self.allocator.free(last_name);
+        self.current_attribute_name.deinit(self.allocator);
+        self.current_attribute_value.deinit(self.allocator);
+        self.current_doctype_name.deinit(self.allocator);
+        self.current_doctype_public_identifier.deinit(self.allocator);
+        self.current_doctype_system_identifier.deinit(self.allocator);
+        self.current_comment_data.deinit(self.allocator);
+        self.temp_buffer.deinit(self.allocator);
+
+        for (self.tokens.items) |*token| token.deinit(self.allocator);
+        self.tokens.deinit(self.allocator);
+        self.parse_errors.deinit(self.allocator);
+    }
+
+    /// Gets the next character from the input stream, given a position.
+    /// It implements the "Preprocessing the input stream" step.
+    fn advancePosition(input: []const u21, old_position: usize) struct { character: u21, new_position: usize } {
+        if (old_position >= input.len) return .{ .character = EOF, .new_position = old_position };
+        var character = input[old_position];
+        var new_position = old_position + 1;
+        if (character == '\r') {
+            character = '\n';
+            if (new_position < input.len and input[new_position] == '\n') {
+                new_position += 1;
+            }
+        }
+        return .{ .character = character, .new_position = new_position };
+    }
+
     fn nextInputChar(self: *Self) u21 {
+        const next_char_info = advancePosition(self.input, self.position);
         self.prev_position = self.position;
-        if (self.position >= self.input.len) return EOF;
-        defer self.position += 1;
-        return self.input[self.position];
+        self.position = next_char_info.new_position;
+        return next_char_info.character;
     }
 
     fn peekInputChar(self: *Self) u21 {
-        // TODO Don't duplicate logic from nextInputChar.
-        if (self.position >= self.input.len) return EOF;
-        return self.input[self.position];
+        return advancePosition(self.input, self.position).character;
     }
 
     fn resetPosition(self: *Self, old_position: usize) void {
@@ -230,28 +403,30 @@ const Tokenizer = struct {
     }
 
     fn consumeN(self: *Self, count: usize) void {
+        var new_position = self.position;
         var i = count;
         while (i > 0) : (i -= 1) {
-            _ = self.nextInputChar();
+            new_position = advancePosition(self.input, new_position).new_position;
         }
+        self.position = new_position;
     }
 
     fn nextFewCharsEql(self: *Self, comptime string: []const u8) bool {
-        const saved_position = self.position;
-        defer self.resetPosition(saved_position);
+        var position = self.position;
         for (decodeComptimeString(string)) |character| {
-            const input_char = self.nextInputChar();
-            if (input_char == EOF or input_char != character) return false;
+            const next_char_info = advancePosition(self.input, position);
+            if (next_char_info.character == EOF or next_char_info.character != character) return false;
+            position = next_char_info.new_position;
         }
         return true;
     }
 
     fn nextFewCharsCaseInsensitiveEql(self: *Self, comptime string: []const u8) bool {
-        const saved_position = self.position;
-        defer self.resetPosition(saved_position);
+        var position = self.position;
         for (decodeComptimeString(string)) |character| {
-            const input_char = self.nextInputChar();
-            if (input_char == EOF or !caseInsensitiveEql(input_char, character)) return false;
+            const next_char_info = advancePosition(self.input, position);
+            if (next_char_info.character == EOF or !caseInsensitiveEql(next_char_info.character, character)) return false;
+            position = next_char_info.new_position;
         }
         return true;
     }
@@ -340,6 +515,7 @@ const Tokenizer = struct {
 
     fn emitEOF(self: *Self) !void {
         try self.tokens.append(self.allocator, Token{ .eof = .{} });
+        self.reached_eof = true;
     }
 
     fn emitCurrentTag(self: *Self) !void {
@@ -347,6 +523,7 @@ const Tokenizer = struct {
         errdefer self.allocator.free(name);
         switch (self.current_tag_type) {
             .Start => {
+                if (self.last_start_tag_name) |last_name| self.allocator.free(last_name);
                 self.last_start_tag_name = try std.mem.dupe(self.allocator, u21, name);
                 try self.tokens.append(self.allocator, Token{ .start_tag = .{
                     .name = name,
@@ -362,6 +539,8 @@ const Tokenizer = struct {
                 } });
             },
         }
+        self.current_tag_self_closing = false;
+        self.current_tag_attributes = .{};
         self.current_tag_type = undefined;
     }
 
@@ -431,6 +610,7 @@ const Tokenizer = struct {
         if (get_result.found_existing) {
             self.allocator.free(name);
             self.current_attribute_value_result_loc = null;
+            try self.parseError(.DuplicateAttribute);
         } else {
             self.current_attribute_value_result_loc = get_result.value_ptr;
         }
@@ -441,6 +621,7 @@ const Tokenizer = struct {
         errdefer self.allocator.free(value);
         if (self.current_attribute_value_result_loc) |ptr| {
             ptr.* = value;
+            self.current_attribute_value_result_loc = null;
         } else {
             self.allocator.free(value);
         }
@@ -512,6 +693,7 @@ const Tokenizer = struct {
     }
 
     fn adjustedCurrentNodeNotInHtmlNamepsace(self: *Self) bool {
+        // TODO
         return !self.adjusted_current_node_is_in_html_namespace;
     }
 };
@@ -1990,6 +2172,7 @@ fn decodeComptimeStringLen(comptime string: []const u8) usize {
 
 fn decodeComptimeString(comptime string: []const u8) [decodeComptimeStringLen(string)]u21 {
     var result: [decodeComptimeStringLen(string)]u21 = undefined;
+    if (result.len == 0) return result;
     var decoded_it = std.unicode.Utf8View.initComptime(string).iterator();
     var i: usize = 0;
     while (decoded_it.nextCodepoint()) |codepoint| {
