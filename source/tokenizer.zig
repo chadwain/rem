@@ -1,15 +1,10 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
-const AutoHashMapUnmanaged = std.AutoHashMapUnmanaged;
 const Allocator = std.mem.Allocator;
 
 const EOF = '\u{5FFFE}';
 const REPLACEMENT_CHARACTER = '\u{FFFD}';
-
-test {
-    std.testing.refAllDecls(@This());
-}
 
 test "tokenize sample html text" {
     @setEvalBranchQuota(5000);
@@ -52,7 +47,7 @@ test "tokenize sample html text" {
     }
 }
 
-const TokenizerState = enum {
+pub const TokenizerState = enum {
     Data,
     RCDATA,
     RAWTEXT,
@@ -135,7 +130,10 @@ const TokenizerState = enum {
     NumericCharacterReferenceEnd,
 };
 
-const ParseError = enum {
+pub const ParseError = enum {
+    SurrogateInInputStream,
+    NoncharacterInInputStream,
+    ControlCharacterInInputStream,
     UnexpectedNullCharacter,
     UnexpectedQuestionMarkInsteadOfTagName,
     EOFBeforeTagName,
@@ -149,6 +147,8 @@ const ParseError = enum {
     UnexpectedCharacterInUnquotedAttributeValue,
     MissingWhitespaceBetweenAttributes,
     UnexpectedSolidusInTag,
+    EndTagWithAttributes,
+    EndTagWithTrailingSolidus,
     CDATAInHtmlContent,
     IncorrectlyOpenedComment,
     AbruptClosingOfEmptyComment,
@@ -168,7 +168,7 @@ const ParseError = enum {
     MissingWhitespaceAfterDOCTYPESystemKeyword,
     MissingDOCTYPESystemIdentifier,
     AbruptDOCTYPESystemIdentifier,
-    UnexptecedCharacterAfterDOCTYPESystemIdentifier,
+    UnexpectedCharacterAfterDOCTYPESystemIdentifier,
     EOFInCDATA,
     MissingSemicolonAfterCharacterReference,
     UnknownNamedCharacterReference,
@@ -179,42 +179,36 @@ const ParseError = enum {
     NoncharacterCharacterReference,
     ControlCharacterReference,
     DuplicateAttribute,
+
+    // TODO
+    NonVoidHtmlElementStartTagWithTrailingSolidus,
 };
 
 const TokenDOCTYPE = struct {
-    name: ?[]u21,
-    public_identifier: ?[]u21,
-    system_identifier: ?[]u21,
+    name: ?[]const u8,
+    public_identifier: ?[]const u8,
+    system_identifier: ?[]const u8,
     force_quirks: bool,
 };
 
-pub const AttributeContext = struct {
-    pub fn hash(self: @This(), s: []const u21) u64 {
-        _ = self;
-        return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(s));
-    }
-    pub fn eql(self: @This(), a: []const u21, b: []const u21) bool {
-        _ = self;
-        return std.mem.eql(u21, a, b);
-    }
-};
-
-const AttributeSet = std.HashMapUnmanaged([]const u21, []const u21, AttributeContext, std.hash_map.default_max_load_percentage);
+pub const AttributeSet = std.StringHashMapUnmanaged([]const u8);
 const TokenTag = struct {
-    name: []u21,
+    name: []const u8,
     attributes: AttributeSet,
     self_closing: bool,
 };
 const TokenComment = struct {
-    data: []u21,
+    data: []const u8,
 };
 const TokenCharacter = struct {
     data: u21,
 };
 const TokenEOF = struct {};
-const Token = union(enum) {
+pub const Token = union(enum) {
     doctype: TokenDOCTYPE,
     start_tag: TokenTag,
+    // NOTE: End tag attributes never appear in the DOM tree.
+    // NOTE: End tags cannot be self closing
     end_tag: TokenTag,
     comment: TokenComment,
     character: TokenCharacter,
@@ -245,36 +239,29 @@ const Token = union(enum) {
     }
 
     pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        const write = (struct {
-            fn f(w: anytype, s: []const u21) !void {
-                var code_units: [4]u8 = undefined;
-                for (s) |c| {
-                    const len = std.unicode.utf8Encode(c, &code_units) catch unreachable;
-                    try w.writeAll(code_units[0..len]);
-                }
-            }
-        }).f;
+        _ = fmt;
+        _ = options;
 
         switch (value) {
             .doctype => |d| {
                 try writer.writeAll("DOCTYPE (");
-                if (d.name) |name| try write(writer, name);
-                if (d.public_identifier) |pi| try write(writer, pi);
-                if (d.system_identifier) |si| try write(writer, si);
+                if (d.name) |name| try writer.writeAll(name);
+                if (d.public_identifier) |pi| try writer.writeAll(pi);
+                if (d.system_identifier) |si| try writer.writeAll(si);
                 try writer.writeAll(")");
             },
             .start_tag => |t| {
                 try writer.writeAll("Start tag ");
                 if (t.self_closing) try writer.writeAll("(self closing) ");
                 try writer.writeAll("\"");
-                try write(writer, t.name);
+                try writer.writeAll(t.name);
                 try writer.writeAll("\" [");
                 var it = t.attributes.iterator();
                 while (it.next()) |entry| {
                     try writer.writeAll("\"");
-                    try write(writer, entry.key_ptr.*);
+                    try writer.writeAll(entry.key_ptr.*);
                     try writer.writeAll("\": \"");
-                    try write(writer, entry.value_ptr.*);
+                    try writer.writeAll(entry.value_ptr.*);
                     try writer.writeAll("\"");
                 }
                 try writer.writeAll("]");
@@ -283,21 +270,21 @@ const Token = union(enum) {
                 try writer.writeAll("End tag ");
                 if (t.self_closing) try writer.writeAll("(self closing) ");
                 try writer.writeAll("\"");
-                try write(writer, t.name);
+                try writer.writeAll(t.name);
                 try writer.writeAll("\" [");
                 var it = t.attributes.iterator();
                 while (it.next()) |entry| {
                     try writer.writeAll("\"");
-                    try write(writer, entry.key_ptr.*);
+                    try writer.writeAll(entry.key_ptr.*);
                     try writer.writeAll("\": \"");
-                    try write(writer, entry.value_ptr.*);
+                    try writer.writeAll(entry.value_ptr.*);
                     try writer.writeAll("\"");
                 }
                 try writer.writeAll("]");
             },
             .comment => |c| {
                 try writer.writeAll("Comment (");
-                try write(writer, c.data);
+                try writer.writeAll(c.data);
                 try writer.writeAll(")");
             },
             .character => |c| {
@@ -305,7 +292,11 @@ const Token = union(enum) {
                 switch (c.data) {
                     '\n' => try writer.writeAll("<newline>"),
                     '\t' => try writer.writeAll("<tab>"),
-                    else => try write(writer, &.{c.data}),
+                    else => {
+                        var code_units: [4]u8 = undefined;
+                        const len = std.unicode.utf8Encode(c.data, &code_units) catch unreachable;
+                        try writer.writeAll(code_units[0..len]);
+                    },
                 }
                 try writer.writeAll(")");
             },
@@ -316,32 +307,33 @@ const Token = union(enum) {
     }
 };
 
-const Tokenizer = struct {
+pub const Tokenizer = struct {
     state: TokenizerState = .Data,
     return_state: TokenizerState = undefined,
     character_reference_code: u32 = 0,
-    current_tag_name: ArrayListUnmanaged(u21) = .{},
+    current_tag_name: ArrayListUnmanaged(u8) = .{},
     current_tag_attributes: AttributeSet = .{},
     current_tag_self_closing: bool = false,
     current_tag_type: enum { Start, End } = undefined,
-    last_start_tag_name: ?[]u21 = null,
-    current_attribute_name: ArrayListUnmanaged(u21) = .{},
-    current_attribute_value: ArrayListUnmanaged(u21) = .{},
-    current_attribute_value_result_loc: ?*[]const u21 = null,
-    current_doctype_name: ArrayListUnmanaged(u21) = .{},
-    current_doctype_public_identifier: ArrayListUnmanaged(u21) = .{},
-    current_doctype_system_identifier: ArrayListUnmanaged(u21) = .{},
+    last_start_tag_name: []u8 = &[_]u8{},
+    current_attribute_name: ArrayListUnmanaged(u8) = .{},
+    current_attribute_value: ArrayListUnmanaged(u8) = .{},
+    current_attribute_value_result_loc: ?*[]const u8 = null,
+    current_doctype_name: ArrayListUnmanaged(u8) = .{},
+    current_doctype_public_identifier: ArrayListUnmanaged(u8) = .{},
+    current_doctype_system_identifier: ArrayListUnmanaged(u8) = .{},
     current_doctype_force_quirks: bool = false,
     current_doctype_name_is_missing: bool = true,
     current_doctype_public_identifier_is_missing: bool = true,
     current_doctype_system_identifier_is_missing: bool = true,
-    current_comment_data: ArrayListUnmanaged(u21) = .{},
+    current_comment_data: ArrayListUnmanaged(u8) = .{},
     temp_buffer: ArrayListUnmanaged(u21) = .{},
     adjusted_current_node_is_in_html_namespace: bool = true,
 
     input: []const u21,
     position: usize = 0,
-    prev_position: usize = 0,
+    reconsumed_input_char: u21 = undefined,
+    should_reconsume: bool = false,
     reached_eof: bool = false,
 
     tokens: ArrayListUnmanaged(Token) = .{},
@@ -350,7 +342,7 @@ const Tokenizer = struct {
 
     const Self = @This();
 
-    fn deinit(self: *Self) void {
+    pub fn deinit(self: *Self) void {
         self.current_tag_name.deinit(self.allocator);
         var attr_it = self.current_tag_attributes.iterator();
         while (attr_it.next()) |entry| {
@@ -358,7 +350,7 @@ const Tokenizer = struct {
             self.allocator.free(entry.value_ptr.*);
         }
         self.current_tag_attributes.deinit(self.allocator);
-        if (self.last_start_tag_name) |last_name| self.allocator.free(last_name);
+        self.allocator.free(self.last_start_tag_name);
         self.current_attribute_name.deinit(self.allocator);
         self.current_attribute_value.deinit(self.allocator);
         self.current_doctype_name.deinit(self.allocator);
@@ -387,26 +379,32 @@ const Tokenizer = struct {
         return .{ .character = character, .new_position = new_position };
     }
 
-    fn nextInputChar(self: *Self) u21 {
-        const next_char_info = advancePosition(self.input, self.position);
-        self.prev_position = self.position;
-        self.position = next_char_info.new_position;
-        return next_char_info.character;
+    fn nextInputChar(self: *Self) !u21 {
+        if (self.should_reconsume) {
+            self.should_reconsume = false;
+            return self.reconsumed_input_char;
+        } else {
+            const next_char_info = advancePosition(self.input, self.position);
+            self.reconsumed_input_char = next_char_info.character;
+            self.position = next_char_info.new_position;
+            if (next_char_info.character != EOF) {
+                try self.checkInputCharacterForErrors(next_char_info.character);
+            }
+            return next_char_info.character;
+        }
     }
 
     fn peekInputChar(self: *Self) u21 {
         return advancePosition(self.input, self.position).character;
     }
 
-    fn resetPosition(self: *Self, old_position: usize) void {
-        self.position = old_position;
-    }
-
-    fn consumeN(self: *Self, count: usize) void {
+    fn consumeN(self: *Self, count: usize) !void {
         var new_position = self.position;
         var i = count;
         while (i > 0) : (i -= 1) {
-            new_position = advancePosition(self.input, new_position).new_position;
+            const next_char_info = advancePosition(self.input, new_position);
+            new_position = next_char_info.new_position;
+            try self.checkInputCharacterForErrors(next_char_info.character);
         }
         self.position = new_position;
     }
@@ -431,6 +429,50 @@ const Tokenizer = struct {
         return true;
     }
 
+    fn checkInputCharacterForErrors(self: *Self, character: u21) !void {
+        switch (character) {
+            0xD800...0xDFFF => try self.parseError(.SurrogateInInputStream),
+            0xFDD0...0xFDEF,
+            0xFFFE,
+            0xFFFF,
+            0x1FFFE,
+            0x1FFFF,
+            0x2FFFE,
+            0x2FFFF,
+            0x3FFFE,
+            0x3FFFF,
+            0x4FFFE,
+            0x4FFFF,
+            0x5FFFE,
+            0x5FFFF,
+            0x6FFFE,
+            0x6FFFF,
+            0x7FFFE,
+            0x7FFFF,
+            0x8FFFE,
+            0x8FFFF,
+            0x9FFFE,
+            0x9FFFF,
+            0xAFFFE,
+            0xAFFFF,
+            0xBFFFE,
+            0xBFFFF,
+            0xCFFFE,
+            0xCFFFF,
+            0xDFFFE,
+            0xDFFFF,
+            0xEFFFE,
+            0xEFFFF,
+            0xFFFFE,
+            0xFFFFF,
+            0x10FFFE,
+            0x10FFFF,
+            => try self.parseError(.NoncharacterInInputStream),
+            0x01...0x08, 0x0B, 0x0D...0x1F, 0x7F...0x9F => try self.parseError(.ControlCharacterInInputStream),
+            else => {},
+        }
+    }
+
     fn changeTo(self: *Self, new_state: TokenizerState) void {
         self.state = new_state;
     }
@@ -440,7 +482,7 @@ const Tokenizer = struct {
         self.return_state = return_state;
     }
 
-    fn partOfAnAttribute(self: *Self) bool {
+    fn isPartOfAnAttribute(self: *Self) bool {
         return switch (self.return_state) {
             .AttributeValueDoubleQuoted,
             .AttributeValueSingleQuoted,
@@ -451,7 +493,7 @@ const Tokenizer = struct {
     }
 
     fn reconsume(self: *Self, new_state: TokenizerState) void {
-        self.resetPosition(self.prev_position);
+        self.should_reconsume = true;
         self.state = new_state;
     }
 
@@ -523,8 +565,8 @@ const Tokenizer = struct {
         errdefer self.allocator.free(name);
         switch (self.current_tag_type) {
             .Start => {
-                if (self.last_start_tag_name) |last_name| self.allocator.free(last_name);
-                self.last_start_tag_name = try std.mem.dupe(self.allocator, u21, name);
+                self.last_start_tag_name = try self.allocator.realloc(self.last_start_tag_name, name.len);
+                std.mem.copy(u8, self.last_start_tag_name, name);
                 try self.tokens.append(self.allocator, Token{ .start_tag = .{
                     .name = name,
                     .attributes = self.current_tag_attributes,
@@ -532,6 +574,12 @@ const Tokenizer = struct {
                 } });
             },
             .End => {
+                if (self.current_tag_attributes.count() > 0) {
+                    try self.parseError(.EndTagWithAttributes);
+                }
+                if (self.current_tag_self_closing) {
+                    try self.parseError(.EndTagWithTrailingSolidus);
+                }
                 try self.tokens.append(self.allocator, Token{ .end_tag = .{
                     .name = name,
                     .attributes = self.current_tag_attributes,
@@ -545,10 +593,12 @@ const Tokenizer = struct {
     }
 
     fn isAppropriateEndTag(self: *Self) bool {
-        return if (self.last_start_tag_name) |last_name|
-            std.mem.eql(u21, last_name, self.current_tag_name.items)
-        else
-            false;
+        // Looking at the tokenizer logic, it seems that is no way to reach this function without current_tag_name
+        // having at least 1 ASCII character in it. So we don't have to worry about making sure it has non-zero length.
+        //
+        // Notice that this gets called from the states that end in "TagName", and that those states
+        // can only be reached by reconsuming an ASCII character from an associated "TagOpen" state.
+        return std.mem.eql(u8, self.last_start_tag_name, self.current_tag_name.items);
     }
 
     fn createStartTagToken(self: *Self) void {
@@ -564,10 +614,12 @@ const Tokenizer = struct {
     }
 
     fn createAttribute(self: *Self) void {
+        _ = self;
         // Nothing to do.
     }
 
     fn createDOCTYPEToken(self: *Self) void {
+        _ = self;
         // Nothing to do.
     }
 
@@ -588,19 +640,26 @@ const Tokenizer = struct {
     }
 
     fn createCommentToken(self: *Self) void {
+        _ = self;
         // Nothing to do.
     }
 
     fn appendCurrentTagName(self: *Self, character: u21) !void {
-        try self.current_tag_name.append(self.allocator, character);
+        var code_units: [4]u8 = undefined;
+        const len = try std.unicode.utf8Encode(character, &code_units);
+        try self.current_tag_name.appendSlice(self.allocator, code_units[0..len]);
     }
 
     fn appendCurrentAttributeName(self: *Self, character: u21) !void {
-        try self.current_attribute_name.append(self.allocator, character);
+        var code_units: [4]u8 = undefined;
+        const len = try std.unicode.utf8Encode(character, &code_units);
+        try self.current_attribute_name.appendSlice(self.allocator, code_units[0..len]);
     }
 
     fn appendCurrentAttributeValue(self: *Self, character: u21) !void {
-        try self.current_attribute_value.append(self.allocator, character);
+        var code_units: [4]u8 = undefined;
+        const len = try std.unicode.utf8Encode(character, &code_units);
+        try self.current_attribute_value.appendSlice(self.allocator, code_units[0..len]);
     }
 
     fn finishAttributeName(self: *Self) !void {
@@ -612,6 +671,7 @@ const Tokenizer = struct {
             self.current_attribute_value_result_loc = null;
             try self.parseError(.DuplicateAttribute);
         } else {
+            get_result.value_ptr.* = &.{};
             self.current_attribute_value_result_loc = get_result.value_ptr;
         }
     }
@@ -628,23 +688,31 @@ const Tokenizer = struct {
     }
 
     fn appendDOCTYPEName(self: *Self, character: u21) !void {
-        try self.current_doctype_name.append(self.allocator, character);
+        var code_units: [4]u8 = undefined;
+        const len = try std.unicode.utf8Encode(character, &code_units);
+        try self.current_doctype_name.appendSlice(self.allocator, code_units[0..len]);
     }
 
     fn appendDOCTYPEPublicIdentifier(self: *Self, character: u21) !void {
-        try self.current_doctype_public_identifier.append(self.allocator, character);
+        var code_units: [4]u8 = undefined;
+        const len = try std.unicode.utf8Encode(character, &code_units);
+        try self.current_doctype_public_identifier.appendSlice(self.allocator, code_units[0..len]);
     }
 
     fn appendDOCTYPESystemIdentifier(self: *Self, character: u21) !void {
-        try self.current_doctype_system_identifier.append(self.allocator, character);
+        var code_units: [4]u8 = undefined;
+        const len = try std.unicode.utf8Encode(character, &code_units);
+        try self.current_doctype_system_identifier.appendSlice(self.allocator, code_units[0..len]);
     }
 
     fn appendComment(self: *Self, character: u21) !void {
-        try self.current_comment_data.append(self.allocator, character);
+        var code_units: [4]u8 = undefined;
+        const len = try std.unicode.utf8Encode(character, &code_units);
+        try self.current_comment_data.appendSlice(self.allocator, code_units[0..len]);
     }
 
     fn appendCommentString(self: *Self, comptime string: []const u8) !void {
-        try self.current_comment_data.appendSlice(self.allocator, &decodeComptimeString(string));
+        try self.current_comment_data.appendSlice(self.allocator, string);
     }
 
     fn appendTempBuffer(self: *Self, character: u21) !void {
@@ -663,14 +731,12 @@ const Tokenizer = struct {
         return self.temp_buffer.items[self.temp_buffer.items.len - 1];
     }
 
-    fn tempBufferDropLast(self: *Self) void {
-        _ = self.temp_buffer.pop();
-    }
-
     fn flushCharacterReference(self: *Self) !void {
-        if (self.partOfAnAttribute()) {
+        if (self.isPartOfAnAttribute()) {
             for (self.temp_buffer.items) |character| {
-                try self.current_attribute_value.append(self.allocator, character);
+                var code_units: [4]u8 = undefined;
+                const len = try std.unicode.utf8Encode(character, &code_units);
+                try self.current_attribute_value.appendSlice(self.allocator, code_units[0..len]);
             }
         } else {
             for (self.temp_buffer.items) |character| {
@@ -679,15 +745,15 @@ const Tokenizer = struct {
         }
     }
 
-    // TODO Have a third state for when there is no match.
-    const NamedCharacterMatch = enum { Prefix, Exact };
-
-    fn tempBufferMatchesNamedCharacterPrefix(self: *Self) ?NamedCharacterMatch {
+    fn tempBufferMatchesNamedCharacter(self: *Self, next_character: u21) enum { Prefix, Exact, NoMatch } {
+        _ = self;
+        _ = next_character;
         // TODO Do real named character matching.
-        return null;
+        return .NoMatch;
     }
 
     fn translateNamedCharacterReference(self: *Self) struct { first: u21, second: ?u21 } {
+        _ = self;
         // TODO Do real named character translation.
         unreachable;
     }
@@ -701,7 +767,7 @@ const Tokenizer = struct {
 pub fn tokenize(t: *Tokenizer) !void {
     switch (t.state) {
         .Data => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '&' => t.toCharacterReferenceState(.Data),
                 '<' => t.changeTo(.TagOpen),
                 0x00 => {
@@ -713,7 +779,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .RCDATA => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '&' => t.toCharacterReferenceState(.RCDATA),
                 '<' => t.changeTo(.RCDATALessThanSign),
                 0x00 => {
@@ -725,7 +791,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .RAWTEXT => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '<' => t.changeTo(.RAWTEXTLessThanSign),
                 0x00 => {
                     try t.parseError(.UnexpectedNullCharacter);
@@ -736,7 +802,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptData => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '<' => t.changeTo(.ScriptDataLessThanSign),
                 0x00 => {
                     try t.parseError(.UnexpectedNullCharacter);
@@ -747,7 +813,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .PLAINTEXT => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 0x00 => {
                     try t.parseError(.UnexpectedNullCharacter);
                     try t.emitCharacter(REPLACEMENT_CHARACTER);
@@ -757,7 +823,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .TagOpen => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '!' => t.changeTo(.MarkupDeclarationOpen),
                 '/' => t.changeTo(.EndTagOpen),
                 'A'...'Z', 'a'...'z' => {
@@ -782,7 +848,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .EndTagOpen => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 'A'...'Z', 'a'...'z' => {
                     t.createEndTagToken();
                     t.reconsume(.TagName);
@@ -804,7 +870,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .TagName => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeAttributeName),
                 '/' => t.changeTo(.SelfClosingStartTag),
                 '>' => {
@@ -824,7 +890,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .RCDATALessThanSign => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '/' => {
                     t.clearTempBuffer();
                     t.changeTo(.RCDATAEndTagOpen);
@@ -836,7 +902,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .RCDATAEndTagOpen => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 'A'...'Z', 'a'...'z' => {
                     t.createEndTagToken();
                     t.reconsume(.RCDATAEndTagName);
@@ -848,11 +914,11 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .RCDATAEndTagName => {
-            const current_input_char = t.nextInputChar();
+            const current_input_char = try t.nextInputChar();
             try endTagName(t, current_input_char, .RCDATA);
         },
         .RAWTEXTLessThanSign => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '/' => {
                     t.clearTempBuffer();
                     t.changeTo(.RAWTEXTEndTagOpen);
@@ -864,7 +930,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .RAWTEXTEndTagOpen => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 'A'...'Z', 'a'...'z' => {
                     t.createEndTagToken();
                     t.reconsume(.RAWTEXTEndTagName);
@@ -876,11 +942,11 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .RAWTEXTEndTagName => {
-            const current_input_char = t.nextInputChar();
+            const current_input_char = try t.nextInputChar();
             try endTagName(t, current_input_char, .RAWTEXT);
         },
         .ScriptDataLessThanSign => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '/' => {
                     t.clearTempBuffer();
                     t.changeTo(.ScriptDataEndTagOpen);
@@ -896,7 +962,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptDataEndTagOpen => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 'A'...'Z', 'a'...'z' => {
                     t.createEndTagToken();
                     t.reconsume(.ScriptDataEndTagName);
@@ -908,11 +974,11 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptDataEndTagName => {
-            const current_input_char = t.nextInputChar();
+            const current_input_char = try t.nextInputChar();
             try endTagName(t, current_input_char, .ScriptData);
         },
         .ScriptDataEscapeStart => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => {
                     t.changeTo(.ScriptDataEscapeStartDash);
                     try t.emitCharacter('-');
@@ -921,7 +987,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptDataEscapeStartDash => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => {
                     t.changeTo(.ScriptDataEscapedDashDash);
                     try t.emitCharacter('-');
@@ -930,7 +996,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptDataEscaped => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => {
                     t.changeTo(.ScriptDataEscapedDash);
                     try t.emitCharacter('-');
@@ -948,7 +1014,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptDataEscapedDash => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => {
                     t.changeTo(.ScriptDataEscapedDashDash);
                     try t.emitCharacter('-');
@@ -970,7 +1036,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptDataEscapedDashDash => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => try t.emitCharacter('-'),
                 '<' => t.changeTo(.ScriptDataEscapedLessThanSign),
                 '>' => {
@@ -993,7 +1059,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptDataEscapedLessThanSign => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '/' => {
                     t.clearTempBuffer();
                     t.changeTo(.ScriptDataEscapedEndTagOpen);
@@ -1010,7 +1076,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptDataEscapedEndTagOpen => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 'A'...'Z', 'a'...'z' => {
                     t.createEndTagToken();
                     t.reconsume(.ScriptDataEscapedEndTagName);
@@ -1022,11 +1088,11 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptDataEscapedEndTagName => {
-            const current_input_char = t.nextInputChar();
+            const current_input_char = try t.nextInputChar();
             try endTagName(t, current_input_char, .ScriptDataEscaped);
         },
         .ScriptDataDoubleEscapeStart => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ', '/', '>' => |c| {
                     t.state = if (t.tempBufferEql("script")) .ScriptDataDoubleEscaped else .ScriptDataEscaped;
                     try t.emitCharacter(c);
@@ -1043,7 +1109,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptDataDoubleEscaped => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => {
                     t.changeTo(.ScriptDataDoubleEscapedDash);
                     try t.emitCharacter('-');
@@ -1064,7 +1130,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptDataDoubleEscapedDash => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => {
                     t.changeTo(.ScriptDataDoubleEscapedDashDash);
                     try t.emitCharacter('-');
@@ -1089,7 +1155,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptDataDoubleEscapedDashDash => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => try t.emitCharacter('-'),
                 '<' => {
                     t.changeTo(.ScriptDataDoubleEscapedLessThanSign);
@@ -1115,7 +1181,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .ScriptDataDoubleEscapedLessThanSign => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '/' => {
                     t.clearTempBuffer();
                     t.changeTo(.ScriptDataDoubleEscapeEnd);
@@ -1126,7 +1192,7 @@ pub fn tokenize(t: *Tokenizer) !void {
         },
         // Nearly identical to ScriptDataDoubleEscapeStart.
         .ScriptDataDoubleEscapeEnd => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ', '/', '>' => |c| {
                     t.state = if (t.tempBufferEql("script")) .ScriptDataEscaped else .ScriptDataDoubleEscaped;
                     try t.emitCharacter(c);
@@ -1143,7 +1209,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .BeforeAttributeName => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => {},
                 '/', '>', EOF => t.reconsume(.AfterAttributeName),
                 '=' => {
@@ -1159,7 +1225,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .AttributeName => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ', '/', '>', EOF => {
                     try t.finishAttributeName();
                     t.reconsume(.AfterAttributeName);
@@ -1183,7 +1249,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .AfterAttributeName => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => {},
                 '/' => t.changeTo(.SelfClosingStartTag),
                 '=' => t.changeTo(.BeforeAttributeValue),
@@ -1202,7 +1268,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .BeforeAttributeValue => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => {},
                 '"' => t.changeTo(.AttributeValueDoubleQuoted),
                 '\'' => t.changeTo(.AttributeValueSingleQuoted),
@@ -1215,7 +1281,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .AttributeValueDoubleQuoted => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '"' => {
                     t.finishAttributeValue();
                     t.changeTo(.AfterAttributeValueQuoted);
@@ -1234,7 +1300,7 @@ pub fn tokenize(t: *Tokenizer) !void {
         },
         // Nearly identical to AttributeValueDoubleQuoted.
         .AttributeValueSingleQuoted => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\'' => {
                     t.finishAttributeValue();
                     t.changeTo(.AfterAttributeValueQuoted);
@@ -1252,7 +1318,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .AttributeValueUnquoted => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => {
                     t.finishAttributeValue();
                     t.changeTo(.BeforeAttributeName);
@@ -1281,7 +1347,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .AfterAttributeValueQuoted => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeAttributeName),
                 '/' => t.changeTo(.SelfClosingStartTag),
                 '>' => {
@@ -1299,7 +1365,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .SelfClosingStartTag => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '>' => {
                     t.makeCurrentTagSelfClosing();
                     t.changeTo(.Data);
@@ -1316,7 +1382,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .BogusComment => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '>' => {
                     t.changeTo(.Data);
                     try t.emitComment();
@@ -1334,14 +1400,14 @@ pub fn tokenize(t: *Tokenizer) !void {
         },
         .MarkupDeclarationOpen => {
             if (t.nextFewCharsEql("--")) {
-                t.consumeN(2);
+                try t.consumeN(2);
                 t.createCommentToken();
                 t.changeTo(.CommentStart);
             } else if (t.nextFewCharsCaseInsensitiveEql("DOCTYPE")) {
-                t.consumeN(7);
+                try t.consumeN(7);
                 t.changeTo(.DOCTYPE);
             } else if (t.nextFewCharsEql("[CDATA[")) {
-                t.consumeN(7);
+                try t.consumeN(7);
                 if (t.adjustedCurrentNodeNotInHtmlNamepsace()) {
                     t.changeTo(.CDATASection);
                 } else {
@@ -1357,7 +1423,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .CommentStart => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => t.changeTo(.CommentStartDash),
                 '>' => {
                     try t.parseError(.AbruptClosingOfEmptyComment);
@@ -1368,7 +1434,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .CommentStartDash => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => t.changeTo(.CommentEnd),
                 '>' => {
                     try t.parseError(.AbruptClosingOfEmptyComment);
@@ -1387,7 +1453,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .Comment => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '<' => {
                     try t.appendComment('<');
                     t.changeTo(.CommentLessThanSign);
@@ -1406,7 +1472,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .CommentLessThanSign => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '!' => {
                     try t.appendComment('!');
                     t.changeTo(.CommentLessThanSignBang);
@@ -1416,19 +1482,19 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .CommentLessThanSignBang => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => t.changeTo(.CommentLessThanSignBangDash),
                 else => t.reconsume(.Comment),
             }
         },
         .CommentLessThanSignBangDash => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => t.changeTo(.CommentLessThanSignBangDashDash),
                 else => t.reconsume(.CommentEndDash),
             }
         },
         .CommentLessThanSignBangDashDash => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '>', EOF => t.reconsume(.CommentEnd),
                 else => {
                     try t.parseError(.NestedComment);
@@ -1437,7 +1503,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .CommentEndDash => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => t.changeTo(.CommentEnd),
                 EOF => {
                     try t.parseError(.EOFInComment);
@@ -1451,7 +1517,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .CommentEnd => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '>' => {
                     t.changeTo(.Data);
                     try t.emitComment();
@@ -1471,7 +1537,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .CommentEndBang => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '-' => {
                     try t.appendComment('-');
                     try t.appendComment('-');
@@ -1497,7 +1563,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .DOCTYPE => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeDOCTYPEName),
                 '>' => t.reconsume(.BeforeDOCTYPEName),
                 EOF => {
@@ -1514,7 +1580,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .BeforeDOCTYPEName => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => {},
                 'A'...'Z' => |c| {
                     t.createDOCTYPEToken();
@@ -1545,13 +1611,13 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .DOCTYPEName => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => t.changeTo(.AfterDOCTYPEName),
                 '>' => {
                     t.changeTo(.Data);
                     try t.emitDOCTYPE();
                 },
-                'A'...'Z' => |c| try t.appendDOCTYPEName(c),
+                'A'...'Z' => |c| try t.appendDOCTYPEName(toLowercase(c)),
                 0x00 => {
                     try t.parseError(.UnexpectedNullCharacter);
                     try t.appendDOCTYPEName(REPLACEMENT_CHARACTER);
@@ -1566,7 +1632,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .AfterDOCTYPEName => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => {},
                 '>' => {
                     t.changeTo(.Data);
@@ -1580,10 +1646,10 @@ pub fn tokenize(t: *Tokenizer) !void {
                 },
                 else => |c| {
                     if (caseInsensitiveEql(c, 'P') and t.nextFewCharsCaseInsensitiveEql("UBLIC")) {
-                        t.consumeN(5);
+                        try t.consumeN(5);
                         t.changeTo(.AfterDOCTYPEPublicKeyword);
                     } else if (caseInsensitiveEql(c, 'S') and t.nextFewCharsCaseInsensitiveEql("YSTEM")) {
-                        t.consumeN(5);
+                        try t.consumeN(5);
                         t.changeTo(.AfterDOCTYPESystemKeyword);
                     } else {
                         try t.parseError(.InvalidCharacterSequenceAfterDOCTYPEName);
@@ -1594,7 +1660,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .AfterDOCTYPEPublicKeyword => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeDOCTYPEPublicIdentifier),
                 '"' => {
                     try t.parseError(.MissingWhitespaceAfterDOCTYPEPublicKeyword);
@@ -1626,7 +1692,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .BeforeDOCTYPEPublicIdentifier => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => {},
                 '"' => {
                     t.markCurrentDOCTYPEPublicIdentifierNotMissing();
@@ -1656,7 +1722,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .DOCTYPEPublicIdentifierDoubleQuoted => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '"' => t.changeTo(.AfterDOCTYPEPublicIdentifier),
                 0x00 => {
                     try t.parseError(.UnexpectedNullCharacter);
@@ -1679,7 +1745,7 @@ pub fn tokenize(t: *Tokenizer) !void {
         },
         // Nearly identical to DOCTYPEPublicIdentifierDoubleQuoted.
         .DOCTYPEPublicIdentifierSingleQuoted => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\'' => t.changeTo(.AfterDOCTYPEPublicIdentifier),
                 0x00 => {
                     try t.parseError(.UnexpectedNullCharacter);
@@ -1701,7 +1767,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .AfterDOCTYPEPublicIdentifier => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => t.changeTo(.BetweenDOCTYPEPublicAndSystemIdentifiers),
                 '>' => {
                     t.changeTo(.Data);
@@ -1731,7 +1797,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .BetweenDOCTYPEPublicAndSystemIdentifiers => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => {},
                 '>' => {
                     t.changeTo(.Data);
@@ -1749,6 +1815,7 @@ pub fn tokenize(t: *Tokenizer) !void {
                     try t.parseError(.EOFInDOCTYPE);
                     t.currentDOCTYPETokenForceQuirks();
                     try t.emitDOCTYPE();
+                    try t.emitEOF();
                 },
                 else => {
                     try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
@@ -1758,7 +1825,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .AfterDOCTYPESystemKeyword => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeDOCTYPESystemIdentifier),
                 '"' => {
                     try t.parseError(.MissingWhitespaceAfterDOCTYPESystemKeyword);
@@ -1790,7 +1857,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .BeforeDOCTYPESystemIdentifier => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => {},
                 '"' => {
                     t.markCurrentDOCTYPESystemIdentifierNotMissing();
@@ -1820,7 +1887,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .DOCTYPESystemIdentifierDoubleQuoted => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '"' => t.changeTo(.AfterDOCTYPESystemIdentifier),
                 0x00 => {
                     try t.parseError(.UnexpectedNullCharacter);
@@ -1843,7 +1910,7 @@ pub fn tokenize(t: *Tokenizer) !void {
         },
         // Nearly identical to DOCTYPESystemIdentifierDoubleQuoted
         .DOCTYPESystemIdentifierSingleQuoted => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\'' => t.changeTo(.AfterDOCTYPESystemIdentifier),
                 0x00 => {
                     try t.parseError(.UnexpectedNullCharacter);
@@ -1865,7 +1932,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .AfterDOCTYPESystemIdentifier => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '\t', '\n', 0x0C, ' ' => {},
                 '>' => {
                     t.changeTo(.Data);
@@ -1878,13 +1945,13 @@ pub fn tokenize(t: *Tokenizer) !void {
                     try t.emitEOF();
                 },
                 else => {
-                    try t.parseError(.UnexptecedCharacterAfterDOCTYPESystemIdentifier);
+                    try t.parseError(.UnexpectedCharacterAfterDOCTYPESystemIdentifier);
                     t.reconsume(.BogusDOCTYPE);
                 },
             }
         },
         .BogusDOCTYPE => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '>' => {
                     t.changeTo(.Data);
                     try t.emitDOCTYPE();
@@ -1898,7 +1965,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .CDATASection => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 ']' => t.changeTo(.CDATASectionBracket),
                 EOF => {
                     try t.parseError(.EOFInCDATA);
@@ -1908,7 +1975,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .CDATASectionBracket => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 ']' => t.changeTo(.CDATASectionEnd),
                 else => {
                     try t.emitCharacter(']');
@@ -1917,7 +1984,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .CDATASectionEnd => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 ']' => try t.emitCharacter(']'),
                 '>' => t.changeTo(.Data),
                 else => {
@@ -1929,7 +1996,7 @@ pub fn tokenize(t: *Tokenizer) !void {
         .CharacterReference => {
             t.clearTempBuffer();
             try t.appendTempBuffer('&');
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '0'...'9', 'A'...'Z', 'a'...'z' => {
                     t.reconsume(.NamedCharacterReference);
                 },
@@ -1944,20 +2011,19 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .NamedCharacterReference => {
-            try t.appendTempBuffer(t.peekInputChar());
-            // TODO Rewrite this loop.
-            while (t.tempBufferMatchesNamedCharacterPrefix()) |match_type| {
+            while (true) {
+                const match_type = t.tempBufferMatchesNamedCharacter(t.peekInputChar());
                 switch (match_type) {
                     .Prefix => {
-                        _ = t.nextInputChar();
-                        try t.appendTempBuffer(t.peekInputChar());
-                        continue;
+                        try t.appendTempBuffer(try t.nextInputChar());
                     },
                     .Exact => {
-                        _ = t.nextInputChar();
-                        const c = t.peekInputChar();
-                        if (t.partOfAnAttribute() and t.tempBufferLast() != ';' and (c == '=' or (c >= '0' and c <= '9') or (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z'))) {
-                            // Legacy reasons.
+                        try t.appendTempBuffer(try t.nextInputChar());
+                        const historical_reasons = t.isPartOfAnAttribute() and t.tempBufferLast() != ';' and switch (t.peekInputChar()) {
+                            '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
+                            else => false,
+                        };
+                        if (historical_reasons) {
                             try t.flushCharacterReference();
                             t.switchToReturnState();
                         } else {
@@ -1972,17 +2038,19 @@ pub fn tokenize(t: *Tokenizer) !void {
                             if (chars.second) |s| try t.appendTempBuffer(s);
                             t.switchToReturnState();
                         }
+                        break;
+                    },
+                    .NoMatch => {
+                        try t.flushCharacterReference();
+                        t.changeTo(.AmbiguousAmpersand);
+                        break;
                     },
                 }
-            } else {
-                t.tempBufferDropLast();
-                try t.flushCharacterReference();
-                t.changeTo(.AmbiguousAmpersand);
             }
         },
         .AmbiguousAmpersand => {
-            switch (t.nextInputChar()) {
-                '0'...'9', 'A'...'Z', 'a'...'z' => |c| if (t.partOfAnAttribute()) try t.appendCurrentAttributeValue(c) else try t.emitCharacter(c),
+            switch (try t.nextInputChar()) {
+                '0'...'9', 'A'...'Z', 'a'...'z' => |c| if (t.isPartOfAnAttribute()) try t.appendCurrentAttributeValue(c) else try t.emitCharacter(c),
                 ';' => {
                     try t.parseError(.UnknownNamedCharacterReference);
                     t.reconsumeInReturnState();
@@ -1992,7 +2060,7 @@ pub fn tokenize(t: *Tokenizer) !void {
         },
         .NumericCharacterReference => {
             t.character_reference_code = 0;
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 'x', 'X' => |c| {
                     try t.appendTempBuffer(c);
                     t.changeTo(.HexadecimalCharacterReferenceStart);
@@ -2001,7 +2069,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .HexadecimalCharacterReferenceStart => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '0'...'9', 'A'...'F', 'a'...'f' => t.reconsume(.HexadecimalCharacterReference),
                 else => {
                     try t.parseError(.AbsenceOfDigitsInNumericCharacterReference);
@@ -2011,7 +2079,7 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .DecimalCharacterReferenceStart => {
-            switch (t.nextInputChar()) {
+            switch (try t.nextInputChar()) {
                 '0'...'9' => t.reconsume(.DecimalCharacterReference),
                 else => {
                     try t.parseError(.AbsenceOfDigitsInNumericCharacterReference);
@@ -2021,11 +2089,10 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .HexadecimalCharacterReference => {
-            switch (t.nextInputChar()) {
-                // Use saturating arithmetic here?
-                '0'...'9' => |c| t.character_reference_code = t.character_reference_code * 16 + decimalCharToNumber(c),
-                'A'...'F' => |c| t.character_reference_code = t.character_reference_code * 16 + upperHexCharToNumber(c),
-                'a'...'f' => |c| t.character_reference_code = t.character_reference_code * 16 + lowerHexCharToNumber(c),
+            switch (try t.nextInputChar()) {
+                '0'...'9' => |c| t.character_reference_code = characterReferenceCodeSaturatedMultiplyAdd(t.character_reference_code, 16, decimalCharToNumber(c)),
+                'A'...'F' => |c| t.character_reference_code = characterReferenceCodeSaturatedMultiplyAdd(t.character_reference_code, 16, upperHexCharToNumber(c)),
+                'a'...'f' => |c| t.character_reference_code = characterReferenceCodeSaturatedMultiplyAdd(t.character_reference_code, 16, lowerHexCharToNumber(c)),
                 ';' => t.changeTo(.NumericCharacterReferenceEnd),
                 else => {
                     try t.parseError(.MissingSemicolonAfterCharacterReference);
@@ -2034,9 +2101,8 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .DecimalCharacterReference => {
-            switch (t.nextInputChar()) {
-                // Use saturating arithmetic here?
-                '0'...'9' => |c| t.character_reference_code = t.character_reference_code * 10 + decimalCharToNumber(c),
+            switch (try t.nextInputChar()) {
+                '0'...'9' => |c| t.character_reference_code = characterReferenceCodeSaturatedMultiplyAdd(t.character_reference_code, 10, decimalCharToNumber(c)),
                 ';' => t.changeTo(.NumericCharacterReferenceEnd),
                 else => {
                     try t.parseError(.MissingSemicolonAfterCharacterReference);
@@ -2192,6 +2258,15 @@ fn upperHexCharToNumber(c: u21) u21 {
 
 fn lowerHexCharToNumber(c: u21) u21 {
     return c - 0x57;
+}
+
+fn characterReferenceCodeSaturatedMultiplyAdd(character_reference_code: u32, mul: u32, add: u32) u32 {
+    var overflow = false;
+    var result: u32 = undefined;
+    overflow = overflow or @mulWithOverflow(u32, character_reference_code, mul, &result);
+    overflow = overflow or @addWithOverflow(u32, result, add, &result);
+    if (overflow) result = std.math.maxInt(u32);
+    return result;
 }
 
 fn codepointFromCharacterReferenceCode(character_reference_code: u32) u21 {
