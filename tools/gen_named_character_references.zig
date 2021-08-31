@@ -73,7 +73,7 @@ pub fn main() !void {
     const al = &arena.allocator;
 
     const data = blk: {
-        const file = try std.fs.cwd().openFile("entities.json", .{});
+        const file = try std.fs.cwd().openFile("tools/named_character_references.json", .{});
         defer file.close();
         break :blk try file.readToEndAlloc(al, std.math.maxInt(c_int));
     };
@@ -96,8 +96,10 @@ pub fn main() !void {
     const output = try render(&node, al);
     defer al.free(output);
 
-    var stdout = std.io.getStdOut().writer();
-    try stdout.writeAll(output);
+    var out_file = try std.fs.cwd().createFile("tools/named_character_references.zig", .{});
+    defer out_file.close();
+    var writer = out_file.writer();
+    try writer.writeAll(output);
 }
 
 fn createTree(al: *std.mem.Allocator, node: *Node) error{OutOfMemory}!void {

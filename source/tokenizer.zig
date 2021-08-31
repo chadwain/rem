@@ -1,4 +1,4 @@
-const named_characters = @import("./named_character_references.zig");
+const named_characters = @import("named-character-references");
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -7,57 +7,6 @@ const Allocator = std.mem.Allocator;
 
 const EOF = '\u{5FFFE}';
 const REPLACEMENT_CHARACTER = '\u{FFFD}';
-
-test "tokenize sample html text" {
-    @setEvalBranchQuota(5000);
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer assert(!gpa.deinit());
-    var tokenizer = Tokenizer{
-        .allocator = &gpa.allocator,
-        .input = &decodeComptimeString(
-            \\<html>
-            \\	<head>
-            \\		<style>
-            \\			div {
-            \\				width: 200px;
-            \\				height: 100px;
-            \\			}
-            \\		</style>
-            \\	</head>
-            \\	<body>
-            \\		<div>
-            \\			Text &Backslash;&#x41; goes here.
-            \\		</div>
-            \\	</body>
-            \\</html>
-        ),
-    };
-    defer tokenizer.deinit();
-
-    while (!tokenizer.reached_eof) {
-        try tokenize(&tokenizer);
-    }
-
-    std.debug.print("\nTokens:", .{});
-    if (tokenizer.tokens.items.len == 0) {
-        std.debug.print(" (none)\n", .{});
-    } else {
-        std.debug.print("\n", .{});
-        for (tokenizer.tokens.items) |t| {
-            std.debug.print("{any}\n", .{t});
-        }
-    }
-
-    std.debug.print("\nParse errors:", .{});
-    if (tokenizer.parse_errors.items.len == 0) {
-        std.debug.print(" (none)\n", .{});
-    } else {
-        std.debug.print("\n", .{});
-        for (tokenizer.parse_errors.items) |e| {
-            std.debug.print("{any}\n", .{e});
-        }
-    }
-}
 
 pub const TokenizerState = enum {
     Data,
@@ -2352,4 +2301,55 @@ fn endTagName(t: *Tokenizer, current_input_char: u21, next_state: TokenizerState
     try t.emitString("</");
     try t.emitTempBufferCharacters();
     t.reconsume(next_state);
+}
+
+test "tokenize sample html text" {
+    @setEvalBranchQuota(5000);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer assert(!gpa.deinit());
+    var tokenizer = Tokenizer{
+        .allocator = &gpa.allocator,
+        .input = &decodeComptimeString(
+            \\<html>
+            \\	<head>
+            \\		<style>
+            \\			div {
+            \\				width: 200px;
+            \\				height: 100px;
+            \\			}
+            \\		</style>
+            \\	</head>
+            \\	<body>
+            \\		<div>
+            \\			Text &Backslash;&#x41; goes here.
+            \\		</div>
+            \\	</body>
+            \\</html>
+        ),
+    };
+    defer tokenizer.deinit();
+
+    while (!tokenizer.reached_eof) {
+        try tokenize(&tokenizer);
+    }
+
+    std.debug.print("\nTokens:", .{});
+    if (tokenizer.tokens.items.len == 0) {
+        std.debug.print(" (none)\n", .{});
+    } else {
+        std.debug.print("\n", .{});
+        for (tokenizer.tokens.items) |t| {
+            std.debug.print("{any}\n", .{t});
+        }
+    }
+
+    std.debug.print("\nParse errors:", .{});
+    if (tokenizer.parse_errors.items.len == 0) {
+        std.debug.print(" (none)\n", .{});
+    } else {
+        std.debug.print("\n", .{});
+        for (tokenizer.parse_errors.items) |e| {
+            std.debug.print("{any}\n", .{e});
+        }
+    }
 }
