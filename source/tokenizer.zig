@@ -1,3 +1,5 @@
+const named_characters = @import("./named_character_references.zig");
+
 const std = @import("std");
 const assert = std.debug.assert;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
@@ -24,7 +26,7 @@ test "tokenize sample html text" {
             \\	</head>
             \\	<body>
             \\		<div>
-            \\			Text goes here.
+            \\			Text &Backslash;&#x41; goes here.
             \\		</div>
             \\	</body>
             \\</html>
@@ -36,14 +38,24 @@ test "tokenize sample html text" {
         try tokenize(&tokenizer);
     }
 
-    std.debug.print("\nTokens:\n", .{});
-    for (tokenizer.tokens.items) |t| {
-        std.debug.print("{any}\n", .{t});
+    std.debug.print("\nTokens:", .{});
+    if (tokenizer.tokens.items.len == 0) {
+        std.debug.print(" (none)\n", .{});
+    } else {
+        std.debug.print("\n", .{});
+        for (tokenizer.tokens.items) |t| {
+            std.debug.print("{any}\n", .{t});
+        }
     }
 
-    std.debug.print("\nParse errors:\n", .{});
-    for (tokenizer.parse_errors.items) |e| {
-        std.debug.print("{any}\n", .{e});
+    std.debug.print("\nParse errors:", .{});
+    if (tokenizer.parse_errors.items.len == 0) {
+        std.debug.print(" (none)\n", .{});
+    } else {
+        std.debug.print("\n", .{});
+        for (tokenizer.parse_errors.items) |e| {
+            std.debug.print("{any}\n", .{e});
+        }
     }
 }
 
@@ -395,7 +407,11 @@ pub const Tokenizer = struct {
     }
 
     fn peekInputChar(self: *Self) u21 {
-        return advancePosition(self.input, self.position).character;
+        if (self.should_reconsume) {
+            return self.reconsumed_input_char;
+        } else {
+            return advancePosition(self.input, self.position).character;
+        }
     }
 
     fn consumeN(self: *Self, count: usize) !void {
@@ -745,17 +761,46 @@ pub const Tokenizer = struct {
         }
     }
 
-    fn tempBufferMatchesNamedCharacter(self: *Self, next_character: u21) enum { Prefix, Exact, NoMatch } {
-        _ = self;
-        _ = next_character;
-        // TODO Do real named character matching.
-        return .NoMatch;
-    }
+    fn findNamedCharacterReference(self: *Self) !named_characters.Value {
+        var node = named_characters.root;
+        var next_character = self.peekInputChar();
+        var next_position = advancePosition(self.input, self.position).new_position;
+        var character_reference_saved_position = self.position;
+        var character_reference_consumed_codepoints_count: usize = 1;
+        var last_matched_named_character_value = named_characters.Value{};
+        while (true) {
+            const key_index = node.find(next_character) orelse break;
+            try self.appendTempBuffer(next_character);
 
-    fn translateNamedCharacterReference(self: *Self) struct { first: u21, second: ?u21 } {
-        _ = self;
-        // TODO Do real named character translation.
-        unreachable;
+            if (node.child(key_index)) |c_node| {
+                const new_value = node.value(key_index);
+                if (new_value[0] != null) {
+                    // Partial match found.
+                    character_reference_saved_position = next_position;
+                    character_reference_consumed_codepoints_count = self.temp_buffer.items.len;
+                    last_matched_named_character_value = new_value;
+                }
+                node = c_node;
+            } else {
+                // Complete match found.
+                character_reference_saved_position = next_position;
+                character_reference_consumed_codepoints_count = self.temp_buffer.items.len;
+                last_matched_named_character_value = node.value(key_index);
+                break;
+            }
+
+            const next_char_info = advancePosition(self.input, next_position);
+            next_character = next_char_info.character;
+            next_position = next_char_info.new_position;
+        }
+
+        self.position = character_reference_saved_position;
+        self.temp_buffer.shrinkRetainingCapacity(character_reference_consumed_codepoints_count);
+        for (self.temp_buffer.items) |c| {
+            // The 0th character is an ampersand '&'.
+            try self.checkInputCharacterForErrors(c);
+        }
+        return last_matched_named_character_value;
     }
 
     fn adjustedCurrentNodeNotInHtmlNamepsace(self: *Self) bool {
@@ -1588,6 +1633,13 @@ pub fn tokenize(t: *Tokenizer) !void {
                     try t.appendDOCTYPEName(toLowercase(c));
                     t.changeTo(.DOCTYPEName);
                 },
+                0x00 => {
+                    try t.parseError(.UnexpectedNullCharacter);
+                    t.createDOCTYPEToken();
+                    t.markCurrentDOCTYPENameNotMissing();
+                    try t.appendDOCTYPEName(REPLACEMENT_CHARACTER);
+                    t.changeTo(.DOCTYPEName);
+                },
                 '>' => {
                     try t.parseError(.MissingDOCTYPEName);
                     t.createDOCTYPEToken();
@@ -1994,58 +2046,49 @@ pub fn tokenize(t: *Tokenizer) !void {
             }
         },
         .CharacterReference => {
+            // NOTE: This is not exactly as the spec says, but should yield the same results.
             t.clearTempBuffer();
             try t.appendTempBuffer('&');
-            switch (try t.nextInputChar()) {
+            switch (t.peekInputChar()) {
                 '0'...'9', 'A'...'Z', 'a'...'z' => {
-                    t.reconsume(.NamedCharacterReference);
+                    t.changeTo(.NamedCharacterReference);
                 },
                 '#' => {
+                    _ = try t.nextInputChar();
                     try t.appendTempBuffer('#');
                     t.changeTo(.NumericCharacterReference);
                 },
                 else => {
+                    _ = try t.nextInputChar();
                     try t.flushCharacterReference();
                     t.reconsumeInReturnState();
                 },
             }
         },
         .NamedCharacterReference => {
-            while (true) {
-                const match_type = t.tempBufferMatchesNamedCharacter(t.peekInputChar());
-                switch (match_type) {
-                    .Prefix => {
-                        try t.appendTempBuffer(try t.nextInputChar());
-                    },
-                    .Exact => {
-                        try t.appendTempBuffer(try t.nextInputChar());
-                        const historical_reasons = t.isPartOfAnAttribute() and t.tempBufferLast() != ';' and switch (t.peekInputChar()) {
-                            '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
-                            else => false,
-                        };
-                        if (historical_reasons) {
-                            try t.flushCharacterReference();
-                            t.switchToReturnState();
-                        } else {
-                            if (t.tempBufferLast() != ';') {
-                                try t.parseError(.MissingSemicolonAfterCharacterReference);
-                            }
-                            // NOTE: This is slightly out of order from what the spec says. Will this cause problems?
-                            const chars = t.translateNamedCharacterReference();
-                            try t.flushCharacterReference();
-                            t.clearTempBuffer();
-                            try t.appendTempBuffer(chars.first);
-                            if (chars.second) |s| try t.appendTempBuffer(s);
-                            t.switchToReturnState();
-                        }
-                        break;
-                    },
-                    .NoMatch => {
-                        try t.flushCharacterReference();
-                        t.changeTo(.AmbiguousAmpersand);
-                        break;
-                    },
+            const chars = try t.findNamedCharacterReference();
+            const match_found = chars[0] != null;
+            if (match_found) {
+                const historical_reasons = t.isPartOfAnAttribute() and t.tempBufferLast() != ';' and switch (t.peekInputChar()) {
+                    '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
+                    else => false,
+                };
+                if (historical_reasons) {
+                    try t.flushCharacterReference();
+                    t.switchToReturnState();
+                } else {
+                    if (t.tempBufferLast() != ';') {
+                        try t.parseError(.MissingSemicolonAfterCharacterReference);
+                    }
+                    t.clearTempBuffer();
+                    try t.appendTempBuffer(chars[0].?);
+                    if (chars[1]) |s| try t.appendTempBuffer(s);
+                    try t.flushCharacterReference();
+                    t.switchToReturnState();
                 }
+            } else {
+                try t.flushCharacterReference();
+                t.changeTo(.AmbiguousAmpersand);
             }
         },
         .AmbiguousAmpersand => {
@@ -2114,7 +2157,6 @@ pub fn tokenize(t: *Tokenizer) !void {
             switch (t.character_reference_code) {
                 0x00 => {
                     try t.parseError(.NullCharacterReference);
-                    try t.parseError(.ControlCharacterReference);
                     t.character_reference_code = REPLACEMENT_CHARACTER;
                 },
                 0x10FFFF + 1...std.math.maxInt(@TypeOf(t.character_reference_code)) => {
@@ -2197,11 +2239,10 @@ pub fn tokenize(t: *Tokenizer) !void {
                 },
                 else => {},
             }
-            // NOTE: This is slightly out of order from what the spec says. Will this cause problems?
             const char = codepointFromCharacterReferenceCode(t.character_reference_code);
-            try t.flushCharacterReference();
             t.clearTempBuffer();
             try t.appendTempBuffer(char);
+            try t.flushCharacterReference();
             t.switchToReturnState();
         },
     }
