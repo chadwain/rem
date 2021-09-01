@@ -5,6 +5,11 @@ pub fn build(b: *std.build.Builder) void {
         .name = "named-character-references",
         .path = .{ .path = "tools/named_character_references.zig" },
     };
+    const tokenizer_pkg = std.build.Pkg{
+        .name = "tokenizer",
+        .path = .{ .path = "source/tokenizer.zig" },
+        .dependencies = &.{named_character_references_pkg},
+    };
 
     // Standard release options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
@@ -23,6 +28,12 @@ pub fn build(b: *std.build.Builder) void {
     test_step.dependOn(&main_tests.step);
 
     genNamedCharRefs(b);
+
+    var html5lib_tokenizer_tests = b.addTest("test/html5lib-test-tokenizer.zig");
+    html5lib_tokenizer_tests.setBuildMode(mode);
+    html5lib_tokenizer_tests.addPackage(tokenizer_pkg);
+    const html5lib_tokenizer_tests_step = b.step("test-tokenizer", "Run tokenizer tests from html5lib-tests");
+    html5lib_tokenizer_tests_step.dependOn(&html5lib_tokenizer_tests.step);
 }
 
 fn genNamedCharRefs(b: *std.build.Builder) void {
