@@ -172,34 +172,36 @@ fn render(node: *Node, al: *std.mem.Allocator) ![]u8 {
         \\        _ = ctx;
         \\        return std.math.order(lhs, rhs);
         \\    }
-        \\
         \\};
         \\
         \\pub const root = &Node{
+        \\
     );
-    try writeKeys(writer, node);
-    try writeValues(writer, node);
-    try writeChildren(writer, node);
+    try writeKeys(writer, node, 1);
+    try writeValues(writer, node, 1);
+    try writeChildren(writer, node, 1);
     try writer.writeAll("};");
 
     return output.toOwnedSlice();
 }
 
-fn writeKeys(writer: anytype, node: *Node) ArrayList(u8).Writer.Error!void {
-    try writer.writeAll(".keys=&[_]u8{");
+fn writeKeys(writer: anytype, node: *Node, indent: usize) ArrayList(u8).Writer.Error!void {
+    try writeIndentation(writer, indent);
+    try writer.writeAll(".keys = &[_]u8{");
     for (node.children.items) |c, index| {
         try writer.writeAll("\'");
         try writer.writeAll(&.{c.key});
         try writer.writeAll("\'");
         if (index != node.children.items.len - 1) {
-            try writer.writeAll(",");
+            try writer.writeAll(", ");
         }
     }
-    try writer.writeAll("},");
+    try writer.writeAll("},\n");
 }
 
-fn writeValues(writer: anytype, node: *Node) ArrayList(u8).Writer.Error!void {
-    try writer.writeAll(".values=&[_]Value{");
+fn writeValues(writer: anytype, node: *Node, indent: usize) ArrayList(u8).Writer.Error!void {
+    try writeIndentation(writer, indent);
+    try writer.writeAll(".values = &[_]Value{");
     for (node.children.items) |c, index| {
         try writer.writeAll(".{");
         if (c.is_match) {
@@ -215,24 +217,36 @@ fn writeValues(writer: anytype, node: *Node) ArrayList(u8).Writer.Error!void {
         }
         try writer.writeAll("}");
         if (index != node.children.items.len - 1) {
-            try writer.writeAll(",");
+            try writer.writeAll(", ");
         }
     }
-    try writer.writeAll("},");
+    try writer.writeAll("},\n");
 }
 
-fn writeChildren(writer: anytype, node: *Node) ArrayList(u8).Writer.Error!void {
-    try writer.writeAll(".children=&[_]?*const Node{");
+fn writeChildren(writer: anytype, node: *Node, indent: usize) ArrayList(u8).Writer.Error!void {
+    try writeIndentation(writer, indent);
+    try writer.writeAll(".children = &[_]?*const Node{\n");
     for (node.children.items) |c| {
         if (c.node) |n| {
-            try writer.writeAll("&.{");
-            try writeKeys(writer, n);
-            try writeValues(writer, n);
-            try writeChildren(writer, n);
-            try writer.writeAll("},");
+            try writeIndentation(writer, indent + 1);
+            try writer.writeAll("&.{\n");
+            try writeKeys(writer, n, indent + 2);
+            try writeValues(writer, n, indent + 2);
+            try writeChildren(writer, n, indent + 2);
+            try writeIndentation(writer, indent + 1);
+            try writer.writeAll("},\n");
         } else {
-            try writer.writeAll("null,");
+            try writeIndentation(writer, indent + 1);
+            try writer.writeAll("null,\n");
         }
     }
-    try writer.writeAll("},");
+    try writeIndentation(writer, indent);
+    try writer.writeAll("},\n");
+}
+
+fn writeIndentation(writer: anytype, indent: usize) ArrayList(u8).Writer.Error!void {
+    var i = indent;
+    while (i > 0) : (i -= 1) {
+        try writer.writeAll("    ");
+    }
 }
