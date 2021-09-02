@@ -25,12 +25,11 @@ const std = @import("std");
 const testing = std.testing;
 const Progress = std.Progress;
 
-const pkg = @import("tokenizer");
-const Token = pkg.Token;
-const Tokenizer = pkg.Tokenizer;
-const TokenizerState = pkg.TokenizerState;
-const AttributeSet = pkg.AttributeSet;
-const ParseError = pkg.ParseError;
+const Tokenizer = @import("Tokenizer");
+const Token = Tokenizer.Token;
+const TokenizerState = Tokenizer.State;
+const AttributeSet = Tokenizer.AttributeSet;
+const ParseError = Tokenizer.ParseError;
 
 test "content model flags" {
     try runTestFile("test/html5lib-tests/tokenizer/contentModelFlags.test");
@@ -109,6 +108,7 @@ fn runTestFile(file_path: []const u8) !void {
         const description = test_obj.Object.get("description").?.String;
         if (std.mem.eql(u8, description, "Invalid Unicode character U+5FFFE")) {
             // The tokenizer reserves U+5FFFE for internal use.
+            prog_root.completeOne();
             continue;
         }
 
@@ -140,10 +140,10 @@ fn runTestFile(file_path: []const u8) !void {
             }
         };
         defer expected_errors.deinit();
-        const last_start_tag = if (test_obj.Object.get("lastStartTag")) |lastStartTagObj| lastStartTagObj.String else null;
+        const last_start_tag_name = if (test_obj.Object.get("lastStartTag")) |lastStartTagObj| lastStartTagObj.String else "";
 
         for (states[0..num_states]) |state| {
-            runTest(allocator, input, expected_tokens.items, expected_errors.items, state, last_start_tag) catch |err| {
+            runTest(allocator, input, expected_tokens.items, expected_errors.items, state, last_start_tag_name) catch |err| {
                 std.debug.print("Test \"{s}\" with initial state \"{s}\" failed\n", .{ description, @tagName(state) });
                 return err;
             };
@@ -156,13 +156,10 @@ fn runTestFile(file_path: []const u8) !void {
     prog_root.end();
 }
 
-fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: []Token, expected_errors: []ErrorInfo, initial_state: TokenizerState, last_start_tag: ?[]const u8) !void {
-    var tokenizer = Tokenizer{ .allocator = allocator, .input = input };
+fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: []Token, expected_errors: []ErrorInfo, initial_state: TokenizerState, last_start_tag_name: []const u8) !void {
+    var tokenizer = Tokenizer.init(input, allocator, initial_state);
     defer tokenizer.deinit();
-    tokenizer.changeTo(initial_state);
-    if (last_start_tag) |name| {
-        tokenizer.last_start_tag_name = try allocator.dupe(u8, name);
-    }
+    tokenizer.last_start_tag_name = try allocator.dupe(u8, last_start_tag_name);
 
     while (!tokenizer.reached_eof) {
         try tokenizer.run();

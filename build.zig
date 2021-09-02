@@ -11,8 +11,8 @@ pub fn build(b: *std.build.Builder) void {
         .path = .{ .path = "tools/named_character_references.zig" },
     };
     const tokenizer_pkg = std.build.Pkg{
-        .name = "tokenizer",
-        .path = .{ .path = "source/tokenizer.zig" },
+        .name = "Tokenizer",
+        .path = .{ .path = "source/Tokenizer.zig" },
         .dependencies = &.{named_character_references_pkg},
     };
 
@@ -20,7 +20,7 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
-    const lib = b.addStaticLibrary("dom", "source/tokenizer.zig");
+    const lib = b.addStaticLibrary("html-parser", "source/Tokenizer.zig");
     lib.setBuildMode(mode);
     lib.install();
     lib.addPackage(named_character_references_pkg);
