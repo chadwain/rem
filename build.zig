@@ -1,3 +1,8 @@
+// Copyright (C) 2021 Chadwain Holness
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 const std = @import("std");
 
 pub fn build(b: *std.build.Builder) void {
