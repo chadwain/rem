@@ -81,10 +81,14 @@ fn runTestFile(file_path: []const u8) !void {
     var tests = tree.root.Object.get("tests").?.Array;
     var progress = Progress{};
     const prog_root = try progress.start("", tests.items.len);
-    defer prog_root.end();
 
     for (tests.items) |test_obj| {
         const description = test_obj.Object.get("description").?.String;
+        if (std.mem.eql(u8, description, "Invalid Unicode character U+5FFFE")) {
+            // The tokenizer reserves U+5FFFE for internal use.
+            continue;
+        }
+
         var states: [6]TokenizerState = undefined;
         var num_states: usize = 0;
         if (test_obj.Object.get("initialStates")) |initial_states_obj| {
@@ -98,37 +102,44 @@ fn runTestFile(file_path: []const u8) !void {
         }
 
         var prog_task = prog_root.start(description, num_states);
-        defer prog_task.end();
         prog_task.activate();
 
-        const input = try decodeString(allocator, test_obj.Object.get("input").?.String);
+        const double_escaped = if (test_obj.Object.get("doubleEscaped")) |de| de.Bool else false;
+        const input = try getStringDecoded(test_obj.Object.get("input").?.String, allocator, double_escaped);
         defer allocator.free(input);
-        const expected_tokens = try parseOutput(&arena.allocator, test_obj.Object.get("output").?.Array);
+        const expected_tokens = try parseOutput(allocator, test_obj.Object.get("output").?.Array, double_escaped);
         defer expected_tokens.deinit();
         const expected_errors = blk: {
             if (test_obj.Object.get("errors")) |errors_obj| {
                 break :blk try parseErrors(&arena.allocator, errors_obj.Array);
             } else {
-                break :blk std.ArrayList(ErrorInfo).init(&arena.allocator);
+                break :blk std.ArrayList(ErrorInfo).init(allocator);
             }
         };
         defer expected_errors.deinit();
+        const last_start_tag = if (test_obj.Object.get("lastStartTag")) |lastStartTagObj| lastStartTagObj.String else null;
 
         for (states[0..num_states]) |state| {
-            runTest(allocator, input, expected_tokens.items, expected_errors.items, state) catch |err| {
-                std.debug.print("Test \"{s}\" failed\n", .{description});
+            runTest(allocator, input, expected_tokens.items, expected_errors.items, state, last_start_tag) catch |err| {
+                std.debug.print("Test \"{s}\" with initial state \"{s}\" failed\n", .{ description, @tagName(state) });
                 return err;
             };
             prog_task.completeOne();
-            progress.refresh();
         }
+
+        prog_task.end();
     }
+
+    prog_root.end();
 }
 
-fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: []Token, expected_errors: []ErrorInfo, initial_state: TokenizerState) !void {
+fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: []Token, expected_errors: []ErrorInfo, initial_state: TokenizerState, last_start_tag: ?[]const u8) !void {
     var tokenizer = Tokenizer{ .allocator = allocator, .input = input };
     defer tokenizer.deinit();
     tokenizer.changeTo(initial_state);
+    if (last_start_tag) |name| {
+        tokenizer.last_start_tag_name = try allocator.dupe(u8, name);
+    }
 
     while (!tokenizer.reached_eof) {
         try tokenizer.run();
@@ -136,7 +147,7 @@ fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: [
 
     try std.testing.expect(tokenizer.tokens.items[tokenizer.tokens.items.len - 1] == .eof);
     std.testing.expectEqual(expected_tokens.len, tokenizer.tokens.items.len - 1) catch {
-        std.debug.print("Unequal number of tokens\n Expected {}: {any}\n Actual {}: {any}\n", .{ expected_tokens.len, expected_tokens, tokenizer.tokens.items.len, tokenizer.tokens.items });
+        std.debug.print("Unequal number of tokens\n Expected {}: {any}\n Actual {}: {any}\n", .{ expected_tokens.len, expected_tokens, tokenizer.tokens.items.len - 1, tokenizer.tokens.items[0 .. tokenizer.tokens.items.len - 1] });
         return error.UnequalNumberOfTokens;
     };
     for (expected_tokens) |token, i| {
@@ -158,7 +169,7 @@ fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: [
     }
 }
 
-fn parseOutput(allocator: *std.mem.Allocator, outputs: anytype) !std.ArrayList(Token) {
+fn parseOutput(allocator: *std.mem.Allocator, outputs: anytype, double_escaped: bool) !std.ArrayList(Token) {
     var tokens = try std.ArrayList(Token).initCapacity(allocator, outputs.items.len);
     for (outputs.items) |output_obj| {
         const output_array = output_obj.Array.items;
@@ -168,10 +179,10 @@ fn parseOutput(allocator: *std.mem.Allocator, outputs: anytype) !std.ArrayList(T
             // ["DOCTYPE", name, public_id, system_id, correctness]
             try tokens.append(Token{
                 .doctype = .{
-                    .name = if (output_array[1] == .Null) null else output_array[1].String,
+                    .name = if (output_array[1] == .Null) null else try getString(output_array[1].String, allocator, double_escaped),
                     // public_id and system_id are either strings or null.
-                    .public_identifier = if (output_array[2] == .Null) null else output_array[2].String,
-                    .system_identifier = if (output_array[3] == .Null) null else output_array[3].String,
+                    .public_identifier = if (output_array[2] == .Null) null else try getString(output_array[2].String, allocator, double_escaped),
+                    .system_identifier = if (output_array[3] == .Null) null else try getString(output_array[3].String, allocator, double_escaped),
                     // correctness is either true or false; true corresponds to the force-quirks flag being false, and vice-versa.
                     .force_quirks = !output_array[4].Bool,
                 },
@@ -182,7 +193,7 @@ fn parseOutput(allocator: *std.mem.Allocator, outputs: anytype) !std.ArrayList(T
             const attributes_obj = output_array[2].Object;
             var token = Token{
                 .start_tag = .{
-                    .name = output_array[1].String,
+                    .name = try getString(output_array[1].String, allocator, double_escaped),
                     // When the self-closing flag is set, the StartTag array has true as its fourth entry.
                     // When the flag is not set, the array has only three entries for backwards compatibility.
                     .self_closing = if (output_array.len == 3) false else output_array[3].Bool,
@@ -191,30 +202,28 @@ fn parseOutput(allocator: *std.mem.Allocator, outputs: anytype) !std.ArrayList(T
             };
             var attributes_obj_it = attributes_obj.iterator();
             while (attributes_obj_it.next()) |attribute_entry| {
-                try token.start_tag.attributes.put(allocator, attribute_entry.key_ptr.*, attribute_entry.value_ptr.String);
+                try token.start_tag.attributes.put(allocator, try getString(attribute_entry.key_ptr.*, allocator, double_escaped), try getString(attribute_entry.value_ptr.String, allocator, double_escaped));
             }
             try tokens.append(token);
         } else if (std.mem.eql(u8, token_type_str, "EndTag")) {
             // ["EndTag", name]
             try tokens.append(Token{
                 .end_tag = .{
-                    .name = output_array[1].String,
+                    .name = try getString(output_array[1].String, allocator, double_escaped),
                 },
             });
         } else if (std.mem.eql(u8, token_type_str, "Comment")) {
             // ["Comment", data]
             try tokens.append(Token{
-                .comment = .{ .data = output_array[1].String },
+                .comment = .{ .data = try getString(output_array[1].String, allocator, double_escaped) },
             });
         } else if (std.mem.eql(u8, token_type_str, "Character")) {
             // ["Character", data]
             // All adjacent character tokens are coalesced into a single ["Character", data] token.
-            var chars_utf8 = try std.unicode.Utf8View.init(output_array[1].String);
-            var chars_iterator = chars_utf8.iterator();
-            while (chars_iterator.nextCodepoint()) |codepoint| {
-                try tokens.append(Token{
-                    .character = .{ .data = codepoint },
-                });
+            const decoded = try getStringDecoded(output_array[1].String, allocator, double_escaped);
+            defer allocator.free(decoded);
+            for (decoded) |c| {
+                try tokens.append(Token{ .character = .{ .data = c } });
             }
         }
     }
@@ -362,12 +371,104 @@ const ErrorInfo = struct {
     }
 };
 
-fn decodeString(allocator: *std.mem.Allocator, string: []const u8) ![]u21 {
-    var it = (try std.unicode.Utf8View.init(string)).iterator();
-    var list = std.ArrayList(u21).init(allocator);
-    errdefer list.deinit();
-    while (it.nextCodepoint()) |cp| {
-        try list.append(cp);
+fn getString(string: []const u8, allocator: *std.mem.Allocator, double_escaped: bool) ![]u8 {
+    if (!double_escaped) {
+        return allocator.dupe(u8, string);
+    } else {
+        return doubleEscape(allocator, string);
     }
-    return list.toOwnedSlice();
+}
+
+fn getStringDecoded(string: []const u8, allocator: *std.mem.Allocator, double_escaped: bool) ![]u21 {
+    if (!double_escaped) {
+        var it = (try std.unicode.Utf8View.init(string)).iterator();
+        var list = std.ArrayList(u21).init(allocator);
+        errdefer list.deinit();
+        while (it.nextCodepoint()) |cp| {
+            try list.append(cp);
+        }
+        return list.toOwnedSlice();
+    } else {
+        return decodeDoubleEscape(allocator, string);
+    }
+}
+
+fn doubleEscape(allocator: *std.mem.Allocator, string: []const u8) ![]u8 {
+    var result = std.ArrayList(u8).init(allocator);
+    errdefer result.deinit();
+    var state: enum { Data, Backslash, Unicode } = .Data;
+
+    var pos: usize = 0;
+    while (pos < string.len) {
+        const codepoint_len = std.unicode.utf8ByteSequenceLength(string[pos]) catch unreachable;
+        switch (state) {
+            .Data => {
+                defer pos += codepoint_len;
+                switch (string[pos]) {
+                    '\\' => state = .Backslash,
+                    else => |c| try result.append(c),
+                }
+            },
+            .Backslash => {
+                defer pos += codepoint_len;
+                switch (string[pos]) {
+                    'u' => state = .Unicode,
+                    else => |c| {
+                        try result.append('\\');
+                        try result.append(c);
+                        state = .Data;
+                    },
+                }
+            },
+            .Unicode => {
+                defer pos += 4;
+                const codepoint = std.fmt.parseUnsigned(u21, string[pos .. pos + 4], 16) catch unreachable;
+                var code_units: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(codepoint, &code_units) catch unreachable;
+                try result.appendSlice(code_units[0..len]);
+                state = .Data;
+            },
+        }
+    }
+
+    return result.toOwnedSlice();
+}
+
+fn decodeDoubleEscape(allocator: *std.mem.Allocator, string: []const u8) ![]u21 {
+    var result = std.ArrayList(u21).init(allocator);
+    errdefer result.deinit();
+    var state: enum { Data, Backslash, Unicode } = .Data;
+
+    var pos: usize = 0;
+    while (pos < string.len) {
+        const codepoint_len = std.unicode.utf8ByteSequenceLength(string[pos]) catch unreachable;
+        switch (state) {
+            .Data => {
+                defer pos += codepoint_len;
+                switch (string[pos]) {
+                    '\\' => state = .Backslash,
+                    else => |c| try result.append(c),
+                }
+            },
+            .Backslash => {
+                defer pos += codepoint_len;
+                switch (string[pos]) {
+                    'u' => state = .Unicode,
+                    else => |c| {
+                        try result.append('\\');
+                        try result.append(c);
+                        state = .Data;
+                    },
+                }
+            },
+            .Unicode => {
+                defer pos += 4;
+                const codepoint = std.fmt.parseUnsigned(u21, string[pos .. pos + 4], 16) catch unreachable;
+                try result.append(codepoint);
+                state = .Data;
+            },
+        }
+    }
+
+    return result.toOwnedSlice();
 }

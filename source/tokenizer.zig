@@ -335,6 +335,8 @@ pub const Tokenizer = struct {
             if (new_position < input.len and input[new_position] == '\n') {
                 new_position += 1;
             }
+        } else if (character == EOF) {
+            character = REPLACEMENT_CHARACTER;
         }
         return .{ .character = character, .new_position = new_position };
     }
@@ -642,6 +644,11 @@ pub const Tokenizer = struct {
         var code_units: [4]u8 = undefined;
         const len = try std.unicode.utf8Encode(character, &code_units);
         try self.current_tag_name.appendSlice(self.allocator, code_units[0..len]);
+    }
+
+    fn resetCurrentTagName(self: *Self) void {
+        self.current_tag_name.deinit(self.allocator);
+        self.current_tag_name = .{};
     }
 
     fn appendCurrentAttributeName(self: *Self, character: u21) !void {
@@ -2302,58 +2309,8 @@ fn endTagName(t: *Tokenizer, current_input_char: u21, next_state: TokenizerState
         else => {},
     }
 
+    t.resetCurrentTagName();
     try t.emitString("</");
     try t.emitTempBufferCharacters();
     t.reconsume(next_state);
-}
-
-test "tokenize sample html text" {
-    @setEvalBranchQuota(5000);
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer assert(!gpa.deinit());
-    var tokenizer = Tokenizer{
-        .allocator = &gpa.allocator,
-        .input = &decodeComptimeString(
-            \\<html>
-            \\	<head>
-            \\		<style>
-            \\			div {
-            \\				width: 200px;
-            \\				height: 100px;
-            \\			}
-            \\		</style>
-            \\	</head>
-            \\	<body>
-            \\		<div>
-            \\			Text &Backslash;&#x41; goes here.
-            \\		</div>
-            \\	</body>
-            \\</html>
-        ),
-    };
-    defer tokenizer.deinit();
-
-    while (!tokenizer.reached_eof) {
-        try tokenizer.run();
-    }
-
-    std.debug.print("\nTokens:", .{});
-    if (tokenizer.tokens.items.len == 0) {
-        std.debug.print(" (none)\n", .{});
-    } else {
-        std.debug.print("\n", .{});
-        for (tokenizer.tokens.items) |t| {
-            std.debug.print("{any}\n", .{t});
-        }
-    }
-
-    std.debug.print("\nParse errors:", .{});
-    if (tokenizer.parse_errors.items.len == 0) {
-        std.debug.print(" (none)\n", .{});
-    } else {
-        std.debug.print("\n", .{});
-        for (tokenizer.parse_errors.items) |e| {
-            std.debug.print("{any}\n", .{e});
-        }
-    }
 }
