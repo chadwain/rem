@@ -369,7 +369,6 @@ const ErrorInfo = struct {
             ParseError.NestedComment => "nested-comment",
             ParseError.NoncharacterCharacterReference => "noncharacter-character-reference",
             ParseError.NoncharacterInInputStream => "noncharacter-in-input-stream",
-            ParseError.NonVoidHtmlElementStartTagWithTrailingSolidus => "non-void-html-element-start-tag-with-trailing-solidus",
             ParseError.NullCharacterReference => "null-character-reference",
             ParseError.SurrogateCharacterReference => "surrogate-character-reference",
             ParseError.SurrogateInInputStream => "surrogate-in-input-stream",

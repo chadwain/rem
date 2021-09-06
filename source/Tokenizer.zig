@@ -10,6 +10,7 @@ const named_characters = @import("named-character-references");
 const std = @import("std");
 const assert = std.debug.assert;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 const Allocator = std.mem.Allocator;
 
 const EOF = '\u{5FFFE}';
@@ -209,9 +210,6 @@ pub const ParseError = enum {
     NoncharacterCharacterReference,
     ControlCharacterReference,
     DuplicateAttribute,
-
-    // TODO
-    NonVoidHtmlElementStartTagWithTrailingSolidus,
 };
 
 pub const TokenDOCTYPE = struct {
@@ -221,7 +219,7 @@ pub const TokenDOCTYPE = struct {
     force_quirks: bool,
 };
 
-pub const AttributeSet = std.StringHashMapUnmanaged([]const u8);
+pub const AttributeSet = StringHashMapUnmanaged([]const u8);
 
 pub const TokenStartTag = struct {
     name: []const u8,
@@ -381,6 +379,8 @@ fn consumeN(self: *Self, count: usize) !void {
     var i = count;
     while (i > 0) : (i -= 1) {
         const next_char_info = advancePosition(self.input, new_position);
+        // NOTE: There is no need to check for EOF here, because
+        // this function only gets called after nextFewCharsEql/nextFewCharsCaseInsensitiveEql returns true.
         new_position = next_char_info.new_position;
         try self.checkInputCharacterForErrors(next_char_info.character);
     }
@@ -493,7 +493,6 @@ fn emitCharacter(self: *Self, character: u21) !void {
 }
 
 fn emitString(self: *Self, comptime string: []const u8) !void {
-    // TODO Maybe we can have a TokenString.
     for (decodeComptimeString(string)) |character| {
         try emitCharacter(self, character);
     }
@@ -741,6 +740,7 @@ fn findNamedCharacterReference(self: *Self) !named_characters.Value {
     var character_reference_consumed_codepoints_count: usize = 1;
     var last_matched_named_character_value = named_characters.Value{};
     while (true) {
+        if (next_character == EOF) break;
         const key_index = node.find(next_character) orelse break;
         try self.appendTempBuffer(next_character);
 
@@ -786,9 +786,12 @@ fn codepointFromCharacterReferenceCode(self: *Self) u21 {
     return @intCast(u21, self.character_reference_code);
 }
 
-fn adjustedCurrentNodeNotInHtmlNamepsace(self: *Self) bool {
-    // TODO
-    return !self.adjusted_current_node_is_in_html_namespace;
+fn setAdjustedCurrentNodeInHtmlNamespace(self: *Self, value: bool) void {
+    self.adjusted_current_node_is_in_html_namespace = value;
+}
+
+fn adjustedCurrentNodeInHtmlNamepsace(self: *Self) bool {
+    return self.adjusted_current_node_is_in_html_namespace;
 }
 
 pub fn run(t: *Self) !void {
@@ -1435,7 +1438,7 @@ pub fn run(t: *Self) !void {
                 t.changeTo(.DOCTYPE);
             } else if (t.nextFewCharsEql("[CDATA[")) {
                 try t.consumeN(7);
-                if (t.adjustedCurrentNodeNotInHtmlNamepsace()) {
+                if (!t.adjustedCurrentNodeInHtmlNamepsace()) {
                     t.changeTo(.CDATASection);
                 } else {
                     try t.parseError(.CDATAInHtmlContent);
