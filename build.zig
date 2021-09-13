@@ -36,4 +36,9 @@ pub fn build(b: *std.build.Builder) void {
     html5lib_tokenizer_tests.addPackage(tokenizer_pkg);
     const html5lib_tokenizer_tests_step = b.step("test-tokenizer", "Run tokenizer tests from html5lib-tests");
     html5lib_tokenizer_tests_step.dependOn(&html5lib_tokenizer_tests.step);
+
+    var tree_construction_tests = b.addTest("source/tree_construction.zig");
+    tree_construction_tests.setBuildMode(mode);
+    const tree_construction_tests_step = b.step("test-tree-construction", "Run tree construction tests");
+    tree_construction_tests_step.dependOn(&tree_construction_tests.step);
 }
