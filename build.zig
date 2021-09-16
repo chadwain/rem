@@ -45,6 +45,7 @@ pub fn build(b: *std.build.Builder) void {
 
     const tree_construction_tests = b.addTest("source/tree_construction.zig");
     tree_construction_tests.setBuildMode(mode);
+    tree_construction_tests.addPackage(named_character_references_pkg);
     const tree_construction_tests_step = b.step("test-tree-construction", "Run tree construction tests");
     tree_construction_tests_step.dependOn(&tree_construction_tests.step);
 }
