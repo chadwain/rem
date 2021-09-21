@@ -17,6 +17,13 @@ const TokenComment = Tokenizer.TokenComment;
 const TokenCharacter = Tokenizer.TokenCharacter;
 const TokenDOCTYPE = Tokenizer.TokenDOCTYPE;
 
+const Dom = @import("./dom.zig");
+const Document = Dom.Document;
+const Element = Dom.Element;
+const ElementInterface = Dom.ElementInterface;
+const CharacterData = Dom.CharacterData;
+const CharacterDataInterface = Dom.CharacterDataInterface;
+
 const report_parse_errors = true;
 
 test {
@@ -41,7 +48,8 @@ test {
     }
     std.debug.print("\n", .{});
 
-    var c = try TreeConstructor.init(al);
+    var dom = Dom.Dom{};
+    var c = TreeConstructor.init(&dom, al);
 
     for (tokenizer.tokens.items) |token| {
         try c.run(token);
@@ -49,215 +57,64 @@ test {
     }
 
     std.debug.print("\nDOM Tree:\n\n", .{});
-    var node_stack = ArrayListUnmanaged(struct { node: *Node, depth: usize }){};
+    std.debug.print("Document: {s}\n", .{@tagName(c.dom.document.quirks_mode)});
+    if (c.dom.document.doctype) |doctype| {
+        std.debug.print("DocumentType: name={s} publicId={s} systemId={s}\n", .{ doctype.name, doctype.publicId, doctype.systemId });
+    }
+
+    var node_stack = ArrayListUnmanaged(struct { node: Dom.ElementOrCharacterData, depth: usize }){};
     defer node_stack.deinit(al);
-    try node_stack.append(al, .{ .node = c.document, .depth = 0 });
+    if (c.dom.document.element) |*document_element| {
+        try node_stack.append(al, .{ .node = .{ .element = document_element }, .depth = 0 });
+    }
     while (node_stack.items.len > 0) {
         const item = node_stack.pop();
         var len = item.depth;
         while (len > 0) : (len -= 1) {
             std.debug.print("  ", .{});
         }
-        const node = item.node;
-        std.debug.print("{any}\n", .{node.*});
-        var num_children = node.children.items.len;
-        while (num_children > 0) : (num_children -= 1) {
-            try node_stack.append(al, .{ .node = node.children.items[num_children - 1], .depth = item.depth + 1 });
+        switch (item.node) {
+            .element => |element| {
+                const namespace_prefix = element.namespace_prefix orelse "";
+                const is = element.is orelse "";
+                std.debug.print("Element: interface={s} local_name={s} namespace={s} prefix={s} is={s}", .{
+                    @tagName(element.interface),
+                    element.local_name,
+                    @tagName(element.namespace),
+                    namespace_prefix,
+                    is,
+                });
+                var attr_it = element.attributes.iterator();
+                std.debug.print(" [ ", .{});
+                while (attr_it.next()) |attr| {
+                    std.debug.print("\"{s}\"=\"{s}\" ", .{ attr.key_ptr.*, attr.value_ptr.* });
+                }
+                std.debug.print("]\n", .{});
+                var num_children = element.children.items.len;
+                while (num_children > 0) : (num_children -= 1) {
+                    try node_stack.append(al, .{ .node = element.children.items[num_children - 1], .depth = item.depth + 1 });
+                }
+            },
+            .cdata => |cdata| std.debug.print("{s}\n", .{cdata.data.items}),
         }
     }
 }
 
-const Node = struct {
-    kind: union(NodeType) {
-        Element: *ElementNodeData,
-        Document: *DocumentNodeData,
-        DocumentType: *DocumentTypeNodeData,
-        Text: *TextNodeData,
-        Comment: *CommentNodeData,
-    },
-    children: ArrayListUnmanaged(*Node) = .{},
-    node_document: *Node,
-
-    fn deinit(self: *Node, allocator: *Allocator) void {
-        self.children.deinit(allocator);
-        switch (self.kind) {
-            .Element => |d| d.deinit(allocator),
-            .Document => {},
-            .DocumentType => |d| d.deinit(allocator),
-            .Text => |d| d.deinit(allocator),
-            .Comment => |d| d.deinit(allocator),
-        }
-    }
-
-    fn appendChild(self: *Node, allocator: *Allocator) !*Node {
-        const node = try allocator.create(Node);
-        errdefer allocator.destroy(node);
-        try self.children.append(allocator, node);
-        return node;
-    }
-
-    pub fn format(value: Node, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt;
-        _ = options;
-        switch (value.kind) {
-            .Element => |e| {
-                try writer.writeAll("Element type=");
-                if (e.html_element_type) |t| {
-                    try writer.writeAll(@tagName(t));
-                } else {
-                    try writer.writeAll("(non-html)");
-                }
-                try writer.writeAll(" name=");
-                try writer.writeAll(e.local_name);
-                try writer.writeAll(" namespace=");
-                if (e.namespace_prefix) |namespace_prefix| {
-                    try writer.writeAll(namespace_prefix);
-                    try writer.writeAll(":");
-                }
-                try writer.writeAll(@tagName(e.namespace));
-                try writer.writeAll(" [");
-                var attr_it = e.attributes.iterator();
-                while (attr_it.next()) |attr| {
-                    try writer.writeAll("\"");
-                    try writer.writeAll(attr.key_ptr.*);
-                    try writer.writeAll("\": \"");
-                    try writer.writeAll(attr.value_ptr.*);
-                    try writer.writeAll("\"");
-                }
-                try writer.writeAll("]");
-            },
-            .Document => |d| {
-                try writer.writeAll("Document ");
-                try writer.writeAll(@tagName(d.quirks_mode));
-            },
-            .DocumentType => |dt| {
-                try writer.writeAll("DocumentType name=");
-                try writer.writeAll(dt.name);
-                try writer.writeAll(" publicId=");
-                try writer.writeAll(dt.publicId);
-                try writer.writeAll(" systemId=");
-                try writer.writeAll(dt.systemId);
-            },
-            .Text => |t| {
-                try writer.writeAll("Text \"");
-                try writer.writeAll(t.text.items);
-                try writer.writeAll("\"");
-            },
-            .Comment => |c| {
-                try writer.writeAll("Comment \"");
-                try writer.writeAll(c.comment.items);
-                try writer.writeAll("\"");
-            },
-        }
-    }
-};
-
-const NodeType = enum {
-    Element,
-    Document,
-    DocumentType,
-    Text,
-    Comment,
-};
-
-const WhatWgNamespace = enum {
-    html,
-};
-
-const ElementAttributes = StringHashMapUnmanaged([]u8);
-
-const ElementNodeData = struct {
-    attributes: ElementAttributes,
-    namespace: WhatWgNamespace,
-    namespace_prefix: ?[]u8,
-    local_name: []u8,
-    is: ?[]u8,
-    // TODO: Are html_element_type and local_name always the same?
-    html_element_type: ?HtmlElementType,
-
-    fn deinit(self: *ElementNodeData, allocator: *Allocator) void {
-        var attr_it = self.attributes.iterator();
-        while (attr_it.next()) |attr| {
-            allocator.free(attr.key_ptr.*);
-            allocator.free(attr.value_ptr.*);
-        }
-        self.attributes.deinit(allocator);
-        if (self.namespace_prefix) |ns| allocator.free(ns);
-        allocator.free(self.local_name);
-        if (self.is) |is| allocator.free(is);
-    }
-
-    fn appendAttribute(self: *ElementNodeData, allocator: *Allocator, key: []u8, value: []u8) !void {
-        // TODO: Appending an attribute has more steps.
-        try self.attributes.put(allocator, key, value);
-    }
-};
-
-const HtmlElementType = enum {
-    html,
-    head,
-    body,
-    script,
-};
-
-const DocumentNodeData = struct {
-    doctype: ?*Node = null,
-    quirks_mode: QuirksMode = .no_quirks,
-
-    const QuirksMode = enum {
-        no_quirks,
-        quirks,
-        limited_quirks,
-    };
-};
-
-const DocumentTypeNodeData = struct {
-    name: []u8,
-    publicId: []u8,
-    systemId: []u8,
-
-    fn deinit(self: *DocumentTypeNodeData, allocator: *Allocator) void {
-        allocator.free(self.name);
-        allocator.free(self.publicId);
-        allocator.free(self.systemId);
-    }
-};
-
-const TextNodeData = struct {
-    text: ArrayListUnmanaged(u8) = .{},
-
-    fn deinit(self: *TextNodeData, allocator: *Allocator) void {
-        self.text.deinit(allocator);
-    }
-
-    fn append(self: *TextNodeData, allocator: *Allocator, character: u21) !void {
-        var code_units: [4]u8 = undefined;
-        const len = try std.unicode.utf8Encode(character, &code_units);
-        try self.text.appendSlice(allocator, code_units[0..len]);
-    }
-};
-
-const CommentNodeData = struct {
-    comment: ArrayListUnmanaged(u8) = .{},
-
-    fn deinit(self: *CommentNodeData, allocator: *Allocator) void {
-        self.comment.deinit(allocator);
-    }
-
-    fn append(self: *CommentNodeData, allocator: *Allocator, string: []const u8) !void {
-        try self.comment.appendSlice(allocator, string);
-    }
+const ParentNode = union(enum) {
+    document: *Document,
+    element: *Element,
 };
 
 const TreeConstructor = struct {
-    document: *Node,
-    head_element_pointer: ?*Node = null,
+    dom: *Dom.Dom,
+    allocator: *Allocator,
 
     insertion_mode: InsertionMode = .Initial,
     original_insertion_mode: InsertionMode = undefined,
-    open_elements: ArrayListUnmanaged(*Node) = .{},
-    active_formatting_elements: ArrayListUnmanaged(*Node) = .{},
+    open_elements: ArrayListUnmanaged(*Dom.Element) = .{},
+    active_formatting_elements: ArrayListUnmanaged(*Dom.Element) = .{},
     template_insertion_modes: ArrayListUnmanaged(InsertionMode) = .{},
+    head_element_pointer: ?*Dom.Element = null,
     reprocess: bool = false,
     stopped: bool = false,
     parser_cannot_change_the_mode: bool = false,
@@ -268,25 +125,15 @@ const TreeConstructor = struct {
     scripting: bool = false,
     foster_parenting: bool = false,
 
-    allocator: *Allocator,
-
     const FramesetOk = enum {
         ok,
         not_ok,
     };
 
-    fn init(allocator: *Allocator) !TreeConstructor {
-        const document = try allocator.create(DocumentNodeData);
-        errdefer allocator.destroy(document);
-        document.* = .{};
-
-        const node = try allocator.create(Node);
-        errdefer allocator.destroy(node);
-        node.* = .{ .kind = .{ .Document = document }, .node_document = node };
-
+    fn init(dom: *Dom.Dom, allocator: *Allocator) TreeConstructor {
         return TreeConstructor{
+            .dom = dom,
             .allocator = allocator,
-            .document = node,
         };
     }
 
@@ -295,7 +142,7 @@ const TreeConstructor = struct {
         while (should_process) {
             self.reprocess = false;
             // TODO: Must call dispatcher instead.
-            try processToken(self, token);
+            try dispatcher(self, token);
             should_process = self.reprocess;
         }
     }
@@ -327,8 +174,16 @@ const TreeConstructor = struct {
         std.debug.print("Stopped parsing.", .{});
     }
 
-    fn currentNode(self: *TreeConstructor) *Node {
+    fn currentNode(self: *TreeConstructor) *Element {
         return self.open_elements.items[self.open_elements.items.len - 1];
+    }
+
+    fn adjustedCurrentNode(self: *TreeConstructor) *Element {
+        if (self.is_fragment_parser and self.open_elements.items.len == 1) {
+            @panic("TODO: Adjusted current node, fragment case");
+        } else {
+            return self.currentNode();
+        }
     }
 };
 
@@ -363,11 +218,14 @@ const ParseError = enum {
     NonVoidHtmlElementStartTagWithTrailingSolidus,
 };
 
-fn dispatcher(c: *TreeConstructor, token: Token) void {
-    if (c.open_elements.items.len == 0 or
-        c.adjusted_current_node().namespace == .html
+fn dispatcher(c: *TreeConstructor, token: Token) !void {
+    if (c.open_elements.items.len == 0) return processToken(c, token);
+
+    const adjusted_current_node = c.adjustedCurrentNode();
+    if (adjusted_current_node.namespace == .html or
+        token == .eof
     // TODO: or a bunch of other stuff according to the "tree construction dispatcher" in section 13.2.6
-    ) processToken(c, token) else processTokenForeignContent(c, token);
+    ) try processToken(c, token) else processTokenForeignContent(c, token);
 }
 
 pub fn processToken(c: *TreeConstructor, token: Token) !void {
@@ -497,9 +355,8 @@ fn initial(c: *TreeConstructor, token: Token) !void {
                 initialAnythingElse(c);
             }
         },
-        .comment => |comment| try insertCommentWithPosition(c, comment, NodeInsertionLocation.lastChildOf(c.document)),
-        .doctype => {
-            const d = token.doctype;
+        .comment => |comment| try insertCommentToDocument(c, comment),
+        .doctype => |d| {
             if ((d.name != null and !strEqlAny(d.name.?, &.{"html"})) or (d.public_identifier != null) or (d.system_identifier != null and !strEqlAny(d.system_identifier.?, &.{"about:legacy-compat"}))) {
                 parseError(.Generic);
             }
@@ -508,38 +365,15 @@ fn initial(c: *TreeConstructor, token: Token) !void {
                 !c.parser_cannot_change_the_mode and
                 doctypeEnablesQuirks(d))
             {
-                c.document.kind.Document.quirks_mode = .quirks;
+                c.dom.document.quirks_mode = .quirks;
             } else if (!c.is_iframe_srcdoc_document and
                 !c.parser_cannot_change_the_mode and
                 doctypeEnablesLimitedQuirks(d))
             {
-                c.document.kind.Document.quirks_mode = .limited_quirks;
+                c.dom.document.quirks_mode = .limited_quirks;
             }
 
-            const data = try c.allocator.create(DocumentTypeNodeData);
-            errdefer c.allocator.destroy(data);
-            const name = d.name orelse "";
-            const publicId = d.public_identifier orelse "";
-            const systemId = d.system_identifier orelse "";
-            const strings = try c.allocator.alloc(u8, name.len + publicId.len + systemId.len);
-            errdefer c.allocator.free(strings);
-            data.* = .{
-                .name = strings[0..name.len],
-                .publicId = strings[name.len .. name.len + publicId.len],
-                .systemId = strings[name.len + publicId.len ..],
-            };
-            std.mem.copy(u8, data.name, name);
-            std.mem.copy(u8, data.publicId, publicId);
-            std.mem.copy(u8, data.systemId, systemId);
-
-            const node = try c.document.appendChild(c.allocator);
-            errdefer @panic("TODO: Node deletion");
-            node.* = .{
-                .kind = .{ .DocumentType = data },
-                .node_document = c.document,
-            };
-            c.document.kind.Document.doctype = node;
-
+            _ = try c.dom.document.insertDocumentType(c.allocator, d.name, d.public_identifier, d.system_identifier);
             c.changeTo(.BeforeHtml);
         },
         else => initialAnythingElse(c),
@@ -551,7 +385,7 @@ fn initialAnythingElse(c: *TreeConstructor) void {
         parseError(.Generic);
     }
     if (!c.parser_cannot_change_the_mode) {
-        c.document.kind.Document.quirks_mode = .quirks;
+        c.dom.document.quirks_mode = .quirks;
     }
     c.reprocessIn(.BeforeHtml);
 }
@@ -562,7 +396,7 @@ fn beforeHtml(c: *TreeConstructor, token: Token) !void {
             parseError(.Generic);
             // Ignore the token.
         },
-        .comment => |comment| try insertCommentWithPosition(c, comment, NodeInsertionLocation.lastChildOf(c.document)),
+        .comment => |comment| try insertCommentToDocument(c, comment),
         .character => |character| {
             if (isWhitespaceCharacter(character.data)) {
                 // Ignore the token.
@@ -572,12 +406,9 @@ fn beforeHtml(c: *TreeConstructor, token: Token) !void {
         },
         .start_tag => |start_tag| {
             if (strEqlAny(start_tag.name, &.{"html"})) {
-                const node = try createAnElementForTheToken(c, start_tag, .html, c.document);
-                errdefer node.kind.Element.deinit(c.allocator);
-                const node_ptr = try c.document.appendChild(c.allocator);
-                errdefer @panic("TODO: Node deletion");
-                node_ptr.* = node;
-                try c.open_elements.append(c.allocator, node_ptr);
+                const element = try createAnElementForTheToken(c, start_tag, .html, .{ .document = &c.dom.document });
+                const element_ptr = c.dom.document.insertElement(element);
+                try c.open_elements.append(c.allocator, element_ptr);
                 c.changeTo(.BeforeHead);
             } else {
                 try beforeHtmlAnythingElse(c);
@@ -598,24 +429,16 @@ fn beforeHtml(c: *TreeConstructor, token: Token) !void {
 fn beforeHtmlAnythingElse(c: *TreeConstructor) !void {
     const local_name = try c.allocator.dupe(u8, "html");
     errdefer c.allocator.free(local_name);
-    const html = try c.allocator.create(ElementNodeData);
-    errdefer c.allocator.destroy(html);
-    html.* = .{
+    const element = c.dom.document.insertElement(Dom.Element{
         .attributes = .{},
         .namespace = .html,
         .namespace_prefix = null,
         .local_name = local_name,
         .is = null,
-        .html_element_type = .html,
-    };
-
-    const node = try c.document.appendChild(c.allocator);
-    errdefer @panic("TODO: Node deletion");
-    node.* = .{
-        .kind = .{ .Element = html },
-        .node_document = c.document,
-    };
-    try c.open_elements.append(c.allocator, node);
+        .interface = .html_html,
+        .children = .{},
+    });
+    try c.open_elements.append(c.allocator, element);
     c.reprocessIn(.BeforeHead);
 }
 
@@ -671,12 +494,12 @@ fn inHead(c: *TreeConstructor, token: Token) !void {
     } else if (token == .end_tag and strEqlAny(token.end_tag.name, &.{"head"})) {
         // NOTE: NOT the same as "anything else".
         const current_node = c.open_elements.pop();
-        assert(current_node.kind.Element.html_element_type.? == .head);
+        assert(current_node.interface == .html_head);
         c.changeTo(.AfterHead);
     } else if (token == .end_tag and strEqlAny(token.end_tag.name, &.{ "body", "html", "br" })) {
         // NOTE: Same as "anything else".
         const current_node = c.open_elements.pop();
-        assert(current_node.kind.Element.html_element_type.? == .head);
+        assert(current_node.interface == .html_head);
         c.reprocessIn(.AfterHead);
     } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"template"})) {
         @panic("TODO template start tag in InHead");
@@ -687,7 +510,7 @@ fn inHead(c: *TreeConstructor, token: Token) !void {
         // Ignore the token.
     } else {
         const current_node = c.open_elements.pop();
-        assert(current_node.kind.Element.html_element_type.? == .head);
+        assert(current_node.interface == .html_head);
         c.reprocessIn(.AfterHead);
     }
 }
@@ -717,7 +540,7 @@ fn acknowledgeSelfClosingFlag(c: *TreeConstructor) void {
 
 fn inBody(c: *TreeConstructor, token: Token) !void {
     switch (token) {
-        .doctype => inBodyDoctype(c),
+        .doctype => inBodyDoctype(),
         .character => |character| {
             if (isNullCharacter(character.data)) {
                 parseError(.Generic);
@@ -760,7 +583,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 //    c.frameset_ok = .not_ok;
                 //    const body = c.open_elements[1];
                 //    assert(body.kind == .HtmlBodyElement);
-                //    for (token.start_tag.attributes) |attr| {
+                //    for (tart_tag.attributes) |attr| {
                 //        try body.appendAttributeNoReplace(attr);
                 //    }
                 //}
@@ -846,7 +669,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
             }
         },
         .end_tag => |end_tag| {
-            if (token == .end_tag and strEqlAny(token.end_tag.name, &.{"template"})) {
+            if (strEqlAny(end_tag.name, &.{"template"})) {
                 // TODO: Jump straight to the appropriate handler.
                 try inHead(c, token);
             } else if (strEqlAny(end_tag.name, &.{"body"})) {
@@ -872,8 +695,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
     }
 }
 
-fn inBodyDoctype(c: *TreeConstructor) void {
-    _ = c;
+fn inBodyDoctype() void {
     parseError(.Generic);
     // Ignore the token.
 }
@@ -907,7 +729,7 @@ fn text(c: *TreeConstructor, token: Token) !void {
         .eof => {
             parseError(.Generic);
             const current_node = c.open_elements.pop();
-            if (current_node.kind.Element.html_element_type.? == .script) {
+            if (current_node.interface == .html_script) {
                 // Mark the script element as "already started".
                 @panic("TODO Text eof");
             }
@@ -952,9 +774,9 @@ fn afterBody(c: *TreeConstructor, token: Token) void {
 
 fn afterAfterBody(c: *TreeConstructor, token: Token) !void {
     switch (token) {
-        .comment => |comment| try insertCommentWithPosition(c, comment, NodeInsertionLocation.lastChildOf(c.document)),
+        .comment => |comment| try insertCommentToDocument(c, comment),
         .doctype => {
-            inBodyDoctype(c);
+            inBodyDoctype();
         },
         .character => |character| {
             if (isWhitespaceCharacter(character.data)) {
@@ -984,13 +806,6 @@ fn processTokenForeignContent(c: *TreeConstructor, token: Token) void {
     _ = c;
     _ = token;
     @panic("TODO Parsing tokens in foreign content");
-}
-
-fn isNullToken(token: Token) bool {
-    return switch (token) {
-        .character => |t| isNullCharacter(t.data),
-        else => false,
-    };
 }
 
 fn isNullCharacter(character: u21) bool {
@@ -1037,19 +852,45 @@ fn parseError(err: ParseError) void {
 }
 
 const NodeInsertionLocation = struct {
-    parent: *Node,
+    parent: ParentNode,
 
-    fn createNode(self: NodeInsertionLocation, allocator: *Allocator) !*Node {
-        return self.parent.appendChild(allocator);
+    fn asLastChildOfDocument(document: *Document) NodeInsertionLocation {
+        return NodeInsertionLocation{ .parent = .{ .document = document } };
     }
 
-    fn lastChildOf(node: *Node) NodeInsertionLocation {
-        return NodeInsertionLocation{ .parent = node };
+    fn asLastChildOfElement(element: *Element) NodeInsertionLocation {
+        return NodeInsertionLocation{ .parent = .{ .element = element } };
     }
 
-    fn nodeBefore(self: NodeInsertionLocation) ?*Node {
-        if (self.parent.children.items.len == 0) return null;
-        return self.parent.children.items[self.parent.children.items.len - 1];
+    fn makeElement(self: NodeInsertionLocation, allocator: *Allocator, element: Element) !*Element {
+        // TODO: Assuming that the insertion location is last child of parent.
+        return switch (self.parent) {
+            .document => |doc| doc.insertElement(element),
+            .element => |e| try e.insertElement(allocator, element),
+        };
+    }
+
+    fn makeCharacterData(self: NodeInsertionLocation, allocator: *Allocator, data: []const u8, interface: CharacterDataInterface) !void {
+        // TODO: Assuming that the insertion location is last child of parent.
+        switch (self.parent) {
+            .document => |doc| try doc.insertCharacterData(allocator, data, interface),
+            .element => |e| try e.insertCharacterData(allocator, data, interface),
+        }
+    }
+
+    // Only meant to be called when inserting a character, after checking that the parent is not a Document.
+    fn previousSiblingIsText(self: NodeInsertionLocation) ?*Dom.CharacterData {
+        // TODO: Assuming that the insertion location is last child of parent.
+        switch (self.parent) {
+            .document => unreachable,
+            .element => |e| {
+                if (e.children.items.len == 0) return null;
+                return switch (e.children.items[e.children.items.len - 1]) {
+                    .element => null,
+                    .cdata => |cdata| if (cdata.interface == .text) cdata else null,
+                };
+            },
+        }
     }
 };
 
@@ -1057,11 +898,11 @@ fn appropriateNodeInsertionLocation(c: *TreeConstructor) NodeInsertionLocation {
     return appropriateNodeInsertionLocationWithTarget(c, c.currentNode());
 }
 
-fn appropriateNodeInsertionLocationWithTarget(c: *TreeConstructor, target: *Node) NodeInsertionLocation {
+fn appropriateNodeInsertionLocationWithTarget(c: *TreeConstructor, target: *Element) NodeInsertionLocation {
     _ = c;
     var adjusted_insertion_location: NodeInsertionLocation = undefined;
     // TODO: Apply foster parenting.
-    adjusted_insertion_location = NodeInsertionLocation.lastChildOf(target);
+    adjusted_insertion_location = NodeInsertionLocation.asLastChildOfElement(target);
 
     // TODO: Check if adjusted_insertion_location is a template.
     return adjusted_insertion_location;
@@ -1069,27 +910,16 @@ fn appropriateNodeInsertionLocationWithTarget(c: *TreeConstructor, target: *Node
 
 fn insertCharacter(c: *TreeConstructor, character: TokenCharacter) !void {
     const location = appropriateNodeInsertionLocation(c);
-    if (location.parent.kind == .Document) {
+    if (location.parent == .document) {
         return;
     }
 
-    // TODO Optimization.
-    const previous_sibling = location.nodeBefore();
-    if (previous_sibling != null and previous_sibling.?.kind == .Text) {
-        try previous_sibling.?.kind.Text.append(c.allocator, character.data);
+    var code_units: [4]u8 = undefined;
+    const len = try std.unicode.utf8Encode(character.data, &code_units);
+    if (location.previousSiblingIsText()) |text_node| {
+        try text_node.append(c.allocator, code_units[0..len]);
     } else {
-        const data = try c.allocator.create(TextNodeData);
-        errdefer c.allocator.destroy(data);
-        data.* = .{};
-        errdefer data.deinit(c.allocator);
-        try data.append(c.allocator, character.data);
-
-        const node = try location.createNode(c.allocator);
-        errdefer @panic("TODO: Node deletion");
-        node.* = .{
-            .kind = .{ .Text = data },
-            .node_document = location.parent.node_document,
-        };
+        try location.makeCharacterData(c.allocator, code_units[0..len], .text);
     }
 }
 
@@ -1098,36 +928,39 @@ fn insertComment(c: *TreeConstructor, comment: TokenComment) !void {
 }
 
 fn insertCommentWithPosition(c: *TreeConstructor, comment: TokenComment, location: NodeInsertionLocation) !void {
-    const data = try c.allocator.create(CommentNodeData);
-    errdefer c.allocator.destroy(data);
-    data.* = .{};
-    errdefer data.deinit(c.allocator);
-    try data.append(c.allocator, comment.data);
+    return location.makeCharacterData(c.allocator, comment.data, .comment);
+}
 
-    const node = try location.createNode(c.allocator);
-    errdefer @panic("TODO: Node deletion");
-    node.* = .{
-        .kind = .{ .Comment = data },
-        .node_document = location.parent.node_document,
-    };
+fn insertCommentToDocument(c: *TreeConstructor, comment: TokenComment) !void {
+    return c.dom.document.insertCharacterData(c.allocator, comment.data, .comment);
 }
 
 fn createAnElementForTheToken(
     c: *TreeConstructor,
     start_tag: TokenStartTag,
-    namespace: WhatWgNamespace,
-    intended_parent: *Node,
-) !Node {
+    namespace: Dom.WhatWgNamespace,
+    intended_parent: ParentNode,
+) !Element {
     // TODO: Speculative HTML parser.
-    const document = intended_parent.node_document;
+    // TODO: Get the element's node element.
+    _ = intended_parent;
     const local_name = start_tag.name;
     const is = start_tag.attributes.get("is");
     // TODO: Do custom element definition lookup.
     // NOTE: Custom element definition lookup is done twice using the same arguments:
     //       once here, and again when creating an element.
-    const element = try c.allocator.create(ElementNodeData);
-    errdefer c.allocator.destroy(element);
-    element.* = try domCreateElement(c, local_name, namespace, null, is, false);
+    // TODO: Find a better way to set html_element_type.
+    var interface: ElementInterface = undefined;
+    if (std.mem.eql(u8, start_tag.name, "html")) {
+        interface = .html_html;
+    } else if (std.mem.eql(u8, start_tag.name, "head")) {
+        interface = .html_head;
+    } else if (std.mem.eql(u8, start_tag.name, "body")) {
+        interface = .html_body;
+    } else {
+        @panic("TODO: Set the HTML element type.");
+    }
+    var element = try Dom.createAnElement(c.allocator, local_name, namespace, null, is, interface, false);
     errdefer element.deinit(c.allocator);
     var attr_it = start_tag.attributes.iterator();
     while (attr_it.next()) |attr| {
@@ -1141,70 +974,22 @@ fn createAnElementForTheToken(
     // TODO: Execute scripts.
     // TODO: Check for resettable elements.
     // TODO: Check for form-associated elements.
-    return Node{
-        .kind = .{ .Element = element },
-        .node_document = document,
-    };
+    return element;
 }
 
-fn domCreateElement(
-    c: *TreeConstructor,
-    local_name: []const u8,
-    namespace: WhatWgNamespace,
-    prefix: ?[]const u8,
-    is: ?[]const u8,
-    // TODO: Figure out what synchronous_custom_elements does.
-    synchronous_custom_elements: bool,
-) !ElementNodeData {
-    _ = synchronous_custom_elements;
-    // TODO: Do custom element definition lookup.
-    // TODO: Handle all 3 different cases for this procedure.
-    const element_local_name = try c.allocator.dupe(u8, local_name);
-    errdefer c.allocator.free(element_local_name);
-    const element_prefix = if (prefix) |p| try c.allocator.dupe(u8, p) else null;
-    errdefer if (element_prefix) |p| c.allocator.free(p);
-    const element_is = if (is) |s| try c.allocator.dupe(u8, s) else null;
-    errdefer if (element_is) |s| c.allocator.free(s);
-    // TODO: The caller of this function must set the element interface (aka html_element_type).
-    var result = ElementNodeData{
-        .attributes = .{},
-        .namespace = namespace,
-        .namespace_prefix = element_prefix,
-        .local_name = element_local_name,
-        // TODO: Set the custom element state and custom element defintion.
-        .is = element_is,
-        // NOTE: If the element is an HTML element, this field must be set later.
-        .html_element_type = undefined,
-    };
-    // TODO: Check for a valid custom element name.
-    return result;
-}
-
-fn insertForeignElementForTheToken(c: *TreeConstructor, start_tag: TokenStartTag, namespace: WhatWgNamespace) !*Node {
+fn insertForeignElementForTheToken(c: *TreeConstructor, start_tag: TokenStartTag, namespace: Dom.WhatWgNamespace) !*Element {
     const adjusted_insertion_location = appropriateNodeInsertionLocation(c);
     var element = try createAnElementForTheToken(c, start_tag, namespace, adjusted_insertion_location.parent);
     errdefer element.deinit(c.allocator);
-    // TODO: Set html_element_type in createAnElementForTheToken.
-    if (std.mem.eql(u8, start_tag.name, "html")) {
-        element.kind.Element.html_element_type = .html;
-    } else if (std.mem.eql(u8, start_tag.name, "head")) {
-        element.kind.Element.html_element_type = .head;
-    } else if (std.mem.eql(u8, start_tag.name, "body")) {
-        element.kind.Element.html_element_type = .body;
-    } else {
-        @panic("TODO: Set the HTML element type.");
-    }
     // TODO: Allow the element to be dropped.
     // TODO: Some stuff regarding custom elements
-    const node_ptr = try adjusted_insertion_location.createNode(c.allocator);
-    errdefer @panic("TODO: Node deletion");
+    const element_ptr = try adjusted_insertion_location.makeElement(c.allocator, element);
     // TODO: Some stuff regarding custom elements
-    node_ptr.* = element;
-    try c.open_elements.append(c.allocator, node_ptr);
-    return node_ptr;
+    try c.open_elements.append(c.allocator, element_ptr);
+    return element_ptr;
 }
 
-fn insertHtmlElementForTheToken(c: *TreeConstructor, start_tag: TokenStartTag) !*Node {
+fn insertHtmlElementForTheToken(c: *TreeConstructor, start_tag: TokenStartTag) !*Element {
     return insertForeignElementForTheToken(c, start_tag, .html);
 }
 
