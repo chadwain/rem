@@ -20,7 +20,7 @@ const TokenDOCTYPE = Tokenizer.TokenDOCTYPE;
 const Dom = @import("./dom.zig");
 const Document = Dom.Document;
 const Element = Dom.Element;
-const ElementInterface = Dom.ElementInterface;
+const ElementType = Dom.ElementType;
 const CharacterData = Dom.CharacterData;
 const CharacterDataInterface = Dom.CharacterDataInterface;
 
@@ -28,7 +28,7 @@ const report_parse_errors = true;
 
 test {
     const al = std.heap.page_allocator;
-    const input = "<!doctype html><html><body>hello</body></html>";
+    const input = "<!doctype html><!--Side note 1--><html><body>hello<!--Side note 2--></body></html><!--Side note 3-->";
     var it = (try std.unicode.Utf8View.init(input)).iterator();
     var list = std.ArrayList(u21).init(al);
     defer list.deinit();
@@ -58,14 +58,27 @@ test {
 
     std.debug.print("\nDOM Tree:\n\n", .{});
     std.debug.print("Document: {s}\n", .{@tagName(c.dom.document.quirks_mode)});
+
+    {
+        const split = c.dom.document.cdata_nodes_splits[0];
+        const cdatas = c.dom.document.cdata_nodes.items[split[0]..split[1]];
+        for (cdatas) |cdata| std.debug.print("  {s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items });
+    }
+
     if (c.dom.document.doctype) |doctype| {
-        std.debug.print("DocumentType: name={s} publicId={s} systemId={s}\n", .{ doctype.name, doctype.publicId, doctype.systemId });
+        std.debug.print("  DocumentType: name={s} publicId={s} systemId={s}\n", .{ doctype.name, doctype.publicId, doctype.systemId });
+    }
+
+    {
+        const split = c.dom.document.cdata_nodes_splits[1];
+        const cdatas = c.dom.document.cdata_nodes.items[split[0]..split[1]];
+        for (cdatas) |cdata| std.debug.print("  {s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items });
     }
 
     var node_stack = ArrayListUnmanaged(struct { node: Dom.ElementOrCharacterData, depth: usize }){};
     defer node_stack.deinit(al);
     if (c.dom.document.element) |*document_element| {
-        try node_stack.append(al, .{ .node = .{ .element = document_element }, .depth = 0 });
+        try node_stack.append(al, .{ .node = .{ .element = document_element }, .depth = 1 });
     }
     while (node_stack.items.len > 0) {
         const item = node_stack.pop();
@@ -77,8 +90,8 @@ test {
             .element => |element| {
                 const namespace_prefix = element.namespace_prefix orelse "";
                 const is = element.is orelse "";
-                std.debug.print("Element: interface={s} local_name={s} namespace={s} prefix={s} is={s}", .{
-                    @tagName(element.interface),
+                std.debug.print("Element: type={s} local_name={s} namespace={s} prefix={s} is={s}", .{
+                    @tagName(element.element_type),
                     element.local_name,
                     @tagName(element.namespace),
                     namespace_prefix,
@@ -95,8 +108,14 @@ test {
                     try node_stack.append(al, .{ .node = element.children.items[num_children - 1], .depth = item.depth + 1 });
                 }
             },
-            .cdata => |cdata| std.debug.print("{s}\n", .{cdata.data.items}),
+            .cdata => |cdata| std.debug.print("{s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items }),
         }
+    }
+
+    {
+        const split = c.dom.document.cdata_nodes_splits[2];
+        const cdatas = c.dom.document.cdata_nodes.items[split[0]..split[1]];
+        for (cdatas) |cdata| std.debug.print("  {s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items });
     }
 }
 
@@ -115,8 +134,10 @@ const TreeConstructor = struct {
     active_formatting_elements: ArrayListUnmanaged(*Dom.Element) = .{},
     template_insertion_modes: ArrayListUnmanaged(InsertionMode) = .{},
     head_element_pointer: ?*Dom.Element = null,
+    form_element_pointer: ?*Dom.Element = null,
     reprocess: bool = false,
     stopped: bool = false,
+    ignore_next_lf_token: bool = false,
     parser_cannot_change_the_mode: bool = false,
     is_iframe_srcdoc_document: bool = false,
     is_fragment_parser: bool = false,
@@ -138,6 +159,11 @@ const TreeConstructor = struct {
     }
 
     fn run(self: *TreeConstructor, token: Token) !void {
+        if (self.ignore_next_lf_token) {
+            self.ignore_next_lf_token = false;
+            if (token == .character and token.character.data == '\n') return;
+        }
+
         var should_process = true;
         while (should_process) {
             self.reprocess = false;
@@ -435,7 +461,7 @@ fn beforeHtmlAnythingElse(c: *TreeConstructor) !void {
         .namespace_prefix = null,
         .local_name = local_name,
         .is = null,
-        .interface = .html_html,
+        .element_type = .html_html,
         .children = .{},
     });
     try c.open_elements.append(c.allocator, element);
@@ -494,12 +520,12 @@ fn inHead(c: *TreeConstructor, token: Token) !void {
     } else if (token == .end_tag and strEqlAny(token.end_tag.name, &.{"head"})) {
         // NOTE: NOT the same as "anything else".
         const current_node = c.open_elements.pop();
-        assert(current_node.interface == .html_head);
+        assert(current_node.element_type == .html_head);
         c.changeTo(.AfterHead);
     } else if (token == .end_tag and strEqlAny(token.end_tag.name, &.{ "body", "html", "br" })) {
         // NOTE: Same as "anything else".
         const current_node = c.open_elements.pop();
-        assert(current_node.interface == .html_head);
+        assert(current_node.element_type == .html_head);
         c.reprocessIn(.AfterHead);
     } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"template"})) {
         @panic("TODO template start tag in InHead");
@@ -510,7 +536,7 @@ fn inHead(c: *TreeConstructor, token: Token) !void {
         // Ignore the token.
     } else {
         const current_node = c.open_elements.pop();
-        assert(current_node.interface == .html_head);
+        assert(current_node.element_type == .html_head);
         c.reprocessIn(.AfterHead);
     }
 }
@@ -571,37 +597,39 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 try inHead(c, token);
             } else if (strEqlAny(start_tag.name, &.{"body"})) {
                 parseError(.Generic);
-                @panic("TODO: InBody start tag body");
-                //if (c.open_elements.items.len == 1 or
-                //    (c.open_elements.items.len > 1 and c.open_elements.items[1].kind != .HtmlBodyElement) or
-                //    for (c.open_elements.items) |e|
-                //{
-                //    if (e.kind == .HtmlTemplateElement) break true;
-                //} else false) {
-                //    // Ignore the token.
-                //} else {
-                //    c.frameset_ok = .not_ok;
-                //    const body = c.open_elements[1];
-                //    assert(body.kind == .HtmlBodyElement);
-                //    for (tart_tag.attributes) |attr| {
-                //        try body.appendAttributeNoReplace(attr);
-                //    }
-                //}
+                if (c.open_elements.items.len == 1 or
+                    (c.open_elements.items.len > 1 and c.open_elements.items[1].element_type != .html_body) or
+                    for (c.open_elements.items) |e|
+                {
+                    if (e.element_type == .html_template) break true;
+                } else false) {
+                    assert(c.is_fragment_parser);
+                    // Ignore the token.
+                } else {
+                    c.frameset_ok = .not_ok;
+                    const body = c.open_elements.items[1];
+                    assert(body.element_type == .html_body);
+                    var attr_it = start_tag.attributes.iterator();
+                    while (attr_it.next()) |attr| {
+                        try body.addAttributeNoReplace(c.allocator, attr.key_ptr.*, attr.value_ptr.*);
+                    }
+                }
             } else if (strEqlAny(start_tag.name, &.{"frameset"})) {
                 parseError(.Generic);
-                @panic("TODO: InBody start tag frameset");
-                //if (c.open_elements.items.len == 1 or c.open_elements.items[1].kind != .HtmlBodyElement) {
-                //    // Do nothing.
-                //}
-                //if (c.frameset_ok == .not_ok) {
-                //    // Do nothing.
-                //} else {
-                //    const second = c.open_elements.items[1];
-                //    second.detachFromParent();
-                //    c.open_elements.shrink(1);
-                //    _ = insertHtmlElementForTheToken(c, token);
-                //    c.changeTo(.InFrameset);
-                //}
+                if (c.open_elements.items.len == 1 or c.open_elements.items[1].element_type != .html_body) {
+                    assert(c.is_fragment_parser);
+                    // Ignore the token.
+                } else if (c.frameset_ok == .not_ok) {
+                    // Ignore the token.
+                } else {
+                    @panic("TODO: InBody start tag frameset, removing an element");
+                    // The stack of open elements has at least 2 elements because of previous checks.
+                    // const second = c.open_elements.items[1];
+                    // second.detachFromParent();
+                    // c.open_elements.shrinkRetainingCapacity(1);
+                    // _ = try insertHtmlElementForTheToken(c, token);
+                    // c.changeTo(.InFrameset);
+                }
             } else if (strEqlAny(start_tag.name, &.{
                 "address",
                 "article",
@@ -628,42 +656,65 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 "summary",
                 "ul",
             })) {
-                if (hasElementInScope(c, .p)) {
+                if (hasElementInButtonScope(c, .html_p)) {
                     closePElement(c);
                 }
                 _ = try insertHtmlElementForTheToken(c, start_tag);
             } else if (strEqlAny(start_tag.name, &.{ "h1", "h2", "h3", "h4", "h5", "h6" })) {
-                @panic("TODO InBody start tag h1-h6");
-                //if (c.hasElementInScope("p")) {
-                //    c.closePElement();
-                //}
-                //const current_node = c.current_node();
-                //if (isInHtmlNamespace(current_node()) and strEqlAny(current_node.name, &.{ "h1", "h2", "h3", "h4", "h5", "h6" })) {
-                //    parseError(.Generic);
-                //    _ = c.open_elements.pop();
-                //}
-                //insertHtmlElementForTheToken(token);
+                if (hasElementInButtonScope(c, .html_p)) {
+                    closePElement(c);
+                }
+                const current_node = c.currentNode();
+                if (current_node.namespace == .html and strEqlAny(current_node.local_name, &.{ "h1", "h2", "h3", "h4", "h5", "h6" })) {
+                    parseError(.Generic);
+                    _ = c.open_elements.pop();
+                }
+                _ = try insertHtmlElementForTheToken(c, start_tag);
             } else if (strEqlAny(start_tag.name, &.{ "pre", "listing" })) {
-                @panic("TODO InBody start tag pre, listing");
-                //if (c.hasElementInScope("p")) {
-                //    c.closePElement();
-                //}
-                //insertHtmlElementForTheToken(token);
-                //c.ignoreNextLFToken();
-                //c.frameset_ok = .not_ok;
+                if (hasElementInButtonScope(c, .html_p)) {
+                    closePElement(c);
+                }
+                _ = try insertHtmlElementForTheToken(c, start_tag);
+                c.ignore_next_lf_token = true;
+                c.frameset_ok = .not_ok;
             } else if (strEqlAny(start_tag.name, &.{"form"})) {
-                @panic("TODO InBody start tag form");
-                //if (c.form_element_pointer != null and !c.open_elements.has("template")) {
-                //    parseError(.Generic);
-                //} else {
-                //    if (c.hasElementInScope("p")) {
-                //        c.closePElement();
-                //    }
-                //    const node = insertHtmlElementForTheToken(token);
-                //    if (!c.open_elements.has("template")) {
-                //        c.form_element_pointer = node;
-                //    }
-                //}
+                const stack_has_template_element = stackOfOpenElementsHas(c, .html_template);
+                if (c.form_element_pointer != null and !stack_has_template_element) {
+                    parseError(.Generic);
+                    // Ignore the token.
+                } else {
+                    if (hasElementInButtonScope(c, .html_p)) {
+                        closePElement(c);
+                    }
+                    const element = try insertHtmlElementForTheToken(c, start_tag);
+                    if (!stack_has_template_element) {
+                        c.form_element_pointer = element;
+                    }
+                }
+            } else if (strEqlAny(start_tag.name, &.{"li"})) {
+                c.frameset_ok = .not_ok;
+                var index = c.open_elements.items.len;
+                var node = c.open_elements.items[index - 1];
+                // TODO: Rewrite this.
+                while (true) {
+                    if (node.element_type == .html_li) {
+                        generateImpliedEndTags(c, .html_li);
+                        if (c.currentNode().element_type != .html_li) {
+                            parseError(.Generic);
+                        }
+                        while (c.open_elements.pop().element_type != .html_li) {}
+                        break;
+                    } else if (isSpecialElement(node.element_type) and node.element_type != .html_address and node.element_type != .html_div and node.element_type != .html_p) {
+                        break;
+                    } else {
+                        index -= 1;
+                        node = c.open_elements.items[index - 1];
+                    }
+                }
+                if (hasElementInButtonScope(c, .html_p)) {
+                    closePElement(c);
+                }
+                _ = try insertHtmlElementForTheToken(c, start_tag);
             } else {
                 @panic("TODO InBody insertion mode is incomplete");
             }
@@ -673,7 +724,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 // TODO: Jump straight to the appropriate handler.
                 try inHead(c, token);
             } else if (strEqlAny(end_tag.name, &.{"body"})) {
-                if (!hasElementInScope(c, .body)) {
+                if (!hasElementInScope(c, .html_body)) {
                     parseError(.Generic);
                     // Ignore the token.
                 } else {
@@ -681,7 +732,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     c.changeTo(.AfterBody);
                 }
             } else if (strEqlAny(end_tag.name, &.{"html"})) {
-                if (!hasElementInScope(c, .body)) {
+                if (!hasElementInScope(c, .html_body)) {
                     parseError(.Generic);
                     // Ignore the token.
                 } else {
@@ -715,7 +766,7 @@ fn inBodyStartTagHtml(c: *TreeConstructor, start_tag: TokenStartTag) void {
     //} else {
     //    const top = c.open_elements.top();
     //    for (start_tag.attributes) |attr| {
-    //        top.appendAttributeNoReplace(attr);
+    //        top.addAttributeNoReplace(attr);
     //    }
     //}
 }
@@ -729,7 +780,7 @@ fn text(c: *TreeConstructor, token: Token) !void {
         .eof => {
             parseError(.Generic);
             const current_node = c.open_elements.pop();
-            if (current_node.interface == .html_script) {
+            if (current_node.element_type == .html_script) {
                 // Mark the script element as "already started".
                 @panic("TODO Text eof");
             }
@@ -846,6 +897,13 @@ fn strEqlAny(string: []const u8, comptime compare_to: []const []const u8) bool {
     return false;
 }
 
+fn elemTypeEqlAny(element_type: ElementType, comptime compare_to: []const ElementType) bool {
+    for (compare_to) |t| {
+        if (element_type == t) return true;
+    }
+    return false;
+}
+
 fn parseError(err: ParseError) void {
     // TODO: Handle parse errors.
     std.debug.print("Tree construction parse error: {s}\n", .{@tagName(err)});
@@ -899,13 +957,50 @@ fn appropriateNodeInsertionLocation(c: *TreeConstructor) NodeInsertionLocation {
 }
 
 fn appropriateNodeInsertionLocationWithTarget(c: *TreeConstructor, target: *Element) NodeInsertionLocation {
-    _ = c;
-    var adjusted_insertion_location: NodeInsertionLocation = undefined;
-    // TODO: Apply foster parenting.
-    adjusted_insertion_location = NodeInsertionLocation.asLastChildOfElement(target);
+    var adjusted_insertion_location: *Element = undefined;
+    var position: enum { last_child } = undefined;
+    if (c.foster_parenting and elemTypeEqlAny(target.element_type, &.{ .html_table, .html_tbody, .html_tfoot, .html_thead, .html_tr })) substeps: {
+        @setCold(true);
+        var last_template: ?*Dom.Element = null;
+        var last_table: ?*Dom.Element = null;
+        var index = c.open_elements.items.len;
+        while (index > 0) : (index -= 1) {
+            var node = c.open_elements.items[index - 1];
+            if (node.element_type == .html_template) {
+                last_template = node;
+                if (last_table != null) break;
+            } else if (node.element_type == .html_table) {
+                if (last_template != null) {
+                    // last_template is lower in the stack than last_table.
+                    @panic("TODO Appropriate place for inserting a node is inside a template");
+                } else {
+                    last_table = node;
+                }
+            }
+        }
+        if (last_template != null and last_table == null) {
+            @panic("TODO Appropriate place for inserting a node is inside a template");
+        }
+        if (last_table == null) {
+            assert(c.is_fragment_parser);
+            adjusted_insertion_location = c.open_elements.items[0];
+            position = .last_child;
+            break :substeps;
+        }
+        @panic("TODO Foster parenting implementation is incomplete");
+    } else {
+        adjusted_insertion_location = target;
+        position = .last_child;
+    }
 
-    // TODO: Check if adjusted_insertion_location is a template.
-    return adjusted_insertion_location;
+    if (adjusted_insertion_location.element_type == .html_template) {
+        @setCold(true);
+        @panic("TODO Appropriate place for inserting a node is inside a template");
+    }
+
+    return switch (position) {
+        .last_child => NodeInsertionLocation.asLastChildOfElement(adjusted_insertion_location),
+    };
 }
 
 fn insertCharacter(c: *TreeConstructor, character: TokenCharacter) !void {
@@ -949,26 +1044,22 @@ fn createAnElementForTheToken(
     // TODO: Do custom element definition lookup.
     // NOTE: Custom element definition lookup is done twice using the same arguments:
     //       once here, and again when creating an element.
-    // TODO: Find a better way to set html_element_type.
-    var interface: ElementInterface = undefined;
+    // TODO: Find a better way to set element_type.
+    var element_type: ElementType = undefined;
     if (std.mem.eql(u8, start_tag.name, "html")) {
-        interface = .html_html;
+        element_type = .html_html;
     } else if (std.mem.eql(u8, start_tag.name, "head")) {
-        interface = .html_head;
+        element_type = .html_head;
     } else if (std.mem.eql(u8, start_tag.name, "body")) {
-        interface = .html_body;
+        element_type = .html_body;
     } else {
         @panic("TODO: Set the HTML element type.");
     }
-    var element = try Dom.createAnElement(c.allocator, local_name, namespace, null, is, interface, false);
+    var element = try Dom.createAnElement(c.allocator, local_name, namespace, null, is, element_type, false);
     errdefer element.deinit(c.allocator);
     var attr_it = start_tag.attributes.iterator();
     while (attr_it.next()) |attr| {
-        const key = try c.allocator.dupe(u8, attr.key_ptr.*);
-        errdefer c.allocator.free(key);
-        const value = try c.allocator.dupe(u8, attr.value_ptr.*);
-        errdefer c.allocator.free(value);
-        try element.appendAttribute(c.allocator, key, value);
+        try element.addAttribute(c.allocator, attr.key_ptr.*, attr.value_ptr.*);
         // TODO: Check for attribute namespace parse errors.
     }
     // TODO: Execute scripts.
@@ -993,21 +1084,208 @@ fn insertHtmlElementForTheToken(c: *TreeConstructor, start_tag: TokenStartTag) !
     return insertForeignElementForTheToken(c, start_tag, .html);
 }
 
+fn stackOfOpenElementsHas(c: *TreeConstructor, element_type: ElementType) bool {
+    var index = c.open_elements.items.len;
+    while (index > 0) : (index -= 1) {
+        if (c.open_elements.items[index - 1].element_type == element_type) return true;
+    }
+    return false;
+}
+
 fn reconstructActiveFormattingElements(c: *TreeConstructor) void {
     if (c.active_formatting_elements.items.len == 0) return;
     @panic("TODO Reconstruct the active formatting elements");
 }
 
-fn hasElementInScope(c: *TreeConstructor, element_type: enum { body, html, p }) bool {
-    _ = c;
-    _ = element_type;
-    // TODO Check for elements in scope.
+fn isSpecialElement(element_type: ElementType) bool {
+    return switch (element_type) {
+        .html_address,
+        .html_applet,
+        .html_area,
+        .html_article,
+        .html_aside,
+        .html_base,
+        .html_basefont,
+        .html_bgsound,
+        .html_blockquote,
+        .html_body,
+        .html_br,
+        .html_button,
+        .html_caption,
+        .html_center,
+        .html_col,
+        .html_colgroup,
+        .html_dd,
+        .html_details,
+        .html_dir,
+        .html_div,
+        .html_dl,
+        .html_dt,
+        .html_embed,
+        .html_fieldset,
+        .html_figcaption,
+        .html_figure,
+        .html_footer,
+        .html_form,
+        .html_frame,
+        .html_frameset,
+        .html_h1,
+        .html_h2,
+        .html_h3,
+        .html_h4,
+        .html_h5,
+        .html_h6,
+        .html_head,
+        .html_header,
+        .html_hgroup,
+        .html_hr,
+        .html_html,
+        .html_iframe,
+        .html_img,
+        .html_input,
+        .html_keygen,
+        .html_li,
+        .html_link,
+        .html_listing,
+        .html_main,
+        .html_marquee,
+        .html_menu,
+        .html_meta,
+        .html_nav,
+        .html_noembed,
+        .html_noframes,
+        .html_noscript,
+        .html_object,
+        .html_ol,
+        .html_p,
+        .html_param,
+        .html_plaintext,
+        .html_pre,
+        .html_script,
+        .html_section,
+        .html_select,
+        .html_source,
+        .html_style,
+        .html_summary,
+        .html_table,
+        .html_tbody,
+        .html_td,
+        .html_template,
+        .html_textarea,
+        .html_tfoot,
+        .html_th,
+        .html_thead,
+        .html_title,
+        .html_tr,
+        .html_track,
+        .html_ul,
+        .html_wbr,
+        .html_xmp,
+        .mathml_mi,
+        .mathml_mo,
+        .mathml_mn,
+        .mathml_ms,
+        .mathml_mtext,
+        .mathml_annotation_xml,
+        .svg_foreign_object,
+        .svg_desc,
+        .svg_title,
+        => true,
+        else => false,
+    };
+}
+
+fn hasElementInSpecificScope(c: *TreeConstructor, target: ElementType, comptime list: []const ElementType) bool {
+    var index = c.open_elements.items.len;
+    var node = c.open_elements.items[index - 1];
+    while (node.element_type != target) {
+        if (std.mem.indexOfScalar(ElementType, list, node.element_type) != null) return false;
+        index -= 1;
+        node = c.open_elements.items[index - 1];
+    }
     return true;
 }
 
+fn hasElementInScope(c: *TreeConstructor, target: ElementType) bool {
+    const list = &[_]ElementType{
+        .html_applet,
+        .html_caption,
+        .html_html,
+        .html_table,
+        .html_td,
+        .html_th,
+        .html_marquee,
+        .html_object,
+        .html_template,
+        .mathml_mi,
+        .mathml_mo,
+        .mathml_mn,
+        .mathml_ms,
+        .mathml_mtext,
+        .mathml_annotation_xml,
+        .svg_foreign_object,
+        .svg_desc,
+        .svg_title,
+    };
+    return hasElementInSpecificScope(c, target, list);
+}
+
+fn hasElementInButtonScope(c: *TreeConstructor, target: ElementType) bool {
+    const list = &[_]ElementType{
+        .html_applet,
+        .html_button,
+        .html_caption,
+        .html_html,
+        .html_table,
+        .html_td,
+        .html_th,
+        .html_marquee,
+        .html_object,
+        .html_template,
+        .mathml_mi,
+        .mathml_mo,
+        .mathml_mn,
+        .mathml_ms,
+        .mathml_mtext,
+        .mathml_annotation_xml,
+        .svg_foreign_object,
+        .svg_desc,
+        .svg_title,
+    };
+    return hasElementInSpecificScope(c, target, list);
+}
+
+fn generateImpliedEndTags(c: *TreeConstructor, exception: ?ElementType) void {
+    const list = &[_]ElementType{
+        .html_dd,
+        .html_dt,
+        .html_li,
+        .html_optgroup,
+        .html_option,
+        .html_p,
+        .html_rb,
+        .html_rp,
+        .html_rt,
+        .html_rtc,
+    };
+
+    var element_type = c.currentNode().element_type;
+    while (std.mem.indexOfScalar(ElementType, list, element_type)) |_| {
+        if (exception == null or element_type != exception.?) {
+            _ = c.open_elements.pop();
+            element_type = c.currentNode().element_type;
+        } else {
+            break;
+        }
+    }
+}
+
 fn closePElement(c: *TreeConstructor) void {
-    _ = c;
-    @panic("TODO Close a P element.");
+    generateImpliedEndTags(c, .html_p);
+    if (c.currentNode().element_type != .html_p) {
+        parseError(.Generic);
+    }
+    while (c.open_elements.pop().element_type != .html_p) {}
 }
 
 fn checkValidInBodyEndTag(c: *TreeConstructor) void {

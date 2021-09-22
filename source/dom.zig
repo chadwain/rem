@@ -96,12 +96,106 @@ pub const WhatWgNamespace = enum {
     html,
 };
 
-pub const ElementInterface = enum {
-    element,
-    html_html,
-    html_head,
+pub const ElementType = enum {
+    html_address,
+    html_applet,
+    html_area,
+    html_article,
+    html_aside,
+    html_base,
+    html_basefont,
+    html_bgsound,
+    html_blockquote,
     html_body,
+    html_br,
+    html_button,
+    html_caption,
+    html_center,
+    html_col,
+    html_colgroup,
+    html_dd,
+    html_details,
+    html_dir,
+    html_div,
+    html_dl,
+    html_dt,
+    html_embed,
+    html_fieldset,
+    html_figcaption,
+    html_figure,
+    html_footer,
+    html_form,
+    html_frame,
+    html_frameset,
+    html_h1,
+    html_h2,
+    html_h3,
+    html_h4,
+    html_h5,
+    html_h6,
+    html_head,
+    html_header,
+    html_hgroup,
+    html_hr,
+    html_html,
+    html_iframe,
+    html_img,
+    html_input,
+    html_keygen,
+    html_li,
+    html_link,
+    html_listing,
+    html_main,
+    html_marquee,
+    html_menu,
+    html_meta,
+    html_nav,
+    html_noembed,
+    html_noframes,
+    html_noscript,
+    html_object,
+    html_ol,
+    html_optgroup,
+    html_option,
+    html_p,
+    html_param,
+    html_plaintext,
+    html_pre,
+    html_rb,
+    html_rp,
+    html_rt,
+    html_rtc,
     html_script,
+    html_section,
+    html_select,
+    html_source,
+    html_style,
+    html_summary,
+    html_table,
+    html_tbody,
+    html_td,
+    html_template,
+    html_textarea,
+    html_tfoot,
+    html_th,
+    html_thead,
+    html_title,
+    html_tr,
+    html_track,
+    html_ul,
+    html_wbr,
+    html_xmp,
+
+    mathml_mi,
+    mathml_mo,
+    mathml_mn,
+    mathml_ms,
+    mathml_mtext,
+    mathml_annotation_xml,
+
+    svg_foreign_object,
+    svg_desc,
+    svg_title,
 };
 
 pub const Element = struct {
@@ -110,7 +204,7 @@ pub const Element = struct {
     namespace_prefix: ?[]u8,
     local_name: []u8,
     is: ?[]u8,
-    interface: ElementInterface,
+    element_type: ElementType,
     children: ArrayListUnmanaged(ElementOrCharacterData),
 
     pub fn deinit(self: *Element, allocator: *Allocator) void {
@@ -125,9 +219,18 @@ pub const Element = struct {
         if (self.is) |is| allocator.free(is);
     }
 
-    pub fn appendAttribute(self: *Element, allocator: *Allocator, key: []u8, value: []u8) !void {
-        // TODO: Appending an attribute has more steps.
-        try self.attributes.put(allocator, key, value);
+    pub fn addAttribute(self: *Element, allocator: *Allocator, key: []const u8, value: []const u8) !void {
+        const key_copy = try allocator.dupe(u8, key);
+        errdefer allocator.free(key_copy);
+        const value_copy = try allocator.dupe(u8, value);
+        errdefer allocator.free(value_copy);
+        try self.attributes.putNoClobber(allocator, key_copy, value_copy);
+    }
+
+    pub fn addAttributeNoReplace(self: *Element, allocator: *Allocator, key: []const u8, value: []const u8) !void {
+        if (!self.attributes.contains(key)) {
+            return self.addAttribute(allocator, key, value);
+        }
     }
 
     pub fn insertElement(self: *Element, allocator: *Allocator, child: Element) !*Element {
@@ -162,13 +265,12 @@ pub const CharacterData = struct {
     interface: CharacterDataInterface,
 
     pub fn append(self: *CharacterData, allocator: *Allocator, data: []const u8) !void {
-        // TODO: Appending data has more steps.
         try self.data.appendSlice(allocator, data);
     }
 };
 
 pub const CharacterDataInterface = enum {
-    // NOTE: CharacterData is an anstract interface.
+    // NOTE: CharacterData is an abstract interface.
     text,
     comment,
 };
@@ -184,7 +286,7 @@ pub fn createAnElement(
     namespace: WhatWgNamespace,
     prefix: ?[]const u8,
     is: ?[]const u8,
-    interface: ElementInterface,
+    element_type: ElementType,
     // TODO: Figure out what synchronous_custom_elements does.
     synchronous_custom_elements: bool,
 ) !Element {
@@ -197,7 +299,6 @@ pub fn createAnElement(
     errdefer if (element_prefix) |p| allocator.free(p);
     const element_is = if (is) |s| try allocator.dupe(u8, s) else null;
     errdefer if (element_is) |s| allocator.free(s);
-    // TODO: The caller of this function must set the element interface (aka html_element_type).
     var result = Element{
         .attributes = .{},
         .namespace = namespace,
@@ -205,7 +306,7 @@ pub fn createAnElement(
         .local_name = element_local_name,
         // TODO: Set the custom element state and custom element defintion.
         .is = element_is,
-        .interface = interface,
+        .element_type = element_type,
         .children = .{},
     };
     // TODO: Check for a valid custom element name.
