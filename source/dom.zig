@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const ComptimeStringMap = std.ComptimeStringMap;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
 pub const Dom = struct {
@@ -11,12 +12,21 @@ pub const Dom = struct {
 pub const Document = struct {
     doctype: ?DocumentType = null,
     element: ?Element = null,
-    cdata_nodes: ArrayListUnmanaged(CharacterData) = .{},
-    cdata_nodes_splits: [3][2]usize = .{.{ 0, 0 }} ** 3,
-    cdata_nodes_splits_current: u2 = 0,
+    cdata: ArrayListUnmanaged(CharacterData) = .{},
+    cdata_slices: [3]ArraySlice = .{.{ .begin = 0, .end = 0 }} ** 3,
+    cdata_current_slice: u2 = 0,
     quirks_mode: QuirksMode = .no_quirks,
 
-    const QuirksMode = enum {
+    pub const ArraySlice = struct {
+        begin: usize,
+        end: usize,
+
+        pub fn sliceOf(self: ArraySlice, array: anytype) @TypeOf(array) {
+            return array[self.begin..self.end];
+        }
+    };
+
+    pub const QuirksMode = enum {
         no_quirks,
         quirks,
         limited_quirks,
@@ -31,10 +41,10 @@ pub const Document = struct {
     ) !*DocumentType {
         {
             assert(self.doctype == null);
-            assert(self.cdata_nodes_splits_current == 0);
-            const num_cdatas = self.cdata_nodes_splits[0][1];
-            self.cdata_nodes_splits[1] = .{ num_cdatas, num_cdatas };
-            self.cdata_nodes_splits_current = 1;
+            assert(self.cdata_current_slice == 0);
+            const num_cdatas = self.cdata_slices[0].end;
+            self.cdata_slices[1] = .{ .begin = num_cdatas, .end = num_cdatas };
+            self.cdata_current_slice = 1;
         }
 
         const name = doctype_name orelse "";
@@ -55,15 +65,15 @@ pub const Document = struct {
     pub fn insertElement(self: *Document, element: Element) *Element {
         {
             assert(self.element == null);
-            assert(self.cdata_nodes_splits_current < 2);
-            if (self.cdata_nodes_splits_current == 0) {
+            assert(self.cdata_current_slice < 2);
+            if (self.cdata_current_slice == 0) {
                 assert(self.doctype == null);
-                const num_cdatas = self.cdata_nodes_splits[0][1];
-                self.cdata_nodes_splits[1] = .{ num_cdatas, num_cdatas };
+                const num_cdatas = self.cdata_slices[0].end;
+                self.cdata_slices[1] = .{ .begin = num_cdatas, .end = num_cdatas };
             }
-            const num_cdatas = self.cdata_nodes_splits[1][1];
-            self.cdata_nodes_splits[2] = .{ num_cdatas, num_cdatas };
-            self.cdata_nodes_splits_current = 2;
+            const num_cdatas = self.cdata_slices[1].end;
+            self.cdata_slices[2] = .{ .begin = num_cdatas, .end = num_cdatas };
+            self.cdata_current_slice = 2;
         }
 
         self.element = element;
@@ -73,14 +83,14 @@ pub const Document = struct {
     pub fn insertCharacterData(self: *Document, allocator: *Allocator, data: []const u8, interface: CharacterDataInterface) !void {
         // Document nodes don't contain Text nodes.
         assert(interface != .text);
-        const location = try self.cdata_nodes.addOne(allocator);
-        errdefer self.cdata_nodes.shrinkRetainingCapacity(self.cdata_nodes.items.len - 1);
+        const location = try self.cdata.addOne(allocator);
+        errdefer self.cdata.shrinkRetainingCapacity(self.cdata.items.len - 1);
         const copy = try allocator.dupe(u8, data);
         location.* = .{
             .data = .{ .items = copy, .capacity = copy.len },
             .interface = interface,
         };
-        self.cdata_nodes_splits[self.cdata_nodes_splits_current][1] += 1;
+        self.cdata_slices[self.cdata_current_slice].end += 1;
     }
 };
 
@@ -94,14 +104,18 @@ pub const ElementAttributes = StringHashMapUnmanaged([]u8);
 
 pub const WhatWgNamespace = enum {
     html,
+    svg,
+    mathml,
 };
 
 pub const ElementType = enum {
+    html_a,
     html_address,
     html_applet,
     html_area,
     html_article,
     html_aside,
+    html_b,
     html_base,
     html_basefont,
     html_bgsound,
@@ -111,6 +125,8 @@ pub const ElementType = enum {
     html_button,
     html_caption,
     html_center,
+    html_cite,
+    html_code,
     html_col,
     html_colgroup,
     html_dd,
@@ -119,10 +135,12 @@ pub const ElementType = enum {
     html_div,
     html_dl,
     html_dt,
+    html_em,
     html_embed,
     html_fieldset,
     html_figcaption,
     html_figure,
+    html_font,
     html_footer,
     html_form,
     html_frame,
@@ -138,6 +156,7 @@ pub const ElementType = enum {
     html_hgroup,
     html_hr,
     html_html,
+    html_i,
     html_iframe,
     html_img,
     html_input,
@@ -169,12 +188,16 @@ pub const ElementType = enum {
     html_section,
     html_select,
     html_source,
+    html_spacer,
+    html_span,
+    html_strike,
     html_style,
     html_summary,
     html_table,
     html_tbody,
     html_td,
     html_template,
+    html_test,
     html_textarea,
     html_tfoot,
     html_th,
@@ -182,6 +205,7 @@ pub const ElementType = enum {
     html_title,
     html_tr,
     html_track,
+    html_u,
     html_ul,
     html_wbr,
     html_xmp,
@@ -196,6 +220,116 @@ pub const ElementType = enum {
     svg_foreign_object,
     svg_desc,
     svg_title,
+
+    const html_map = html_map: {
+        @setEvalBranchQuota(5000);
+        break :html_map ComptimeStringMap(ElementType, .{
+            .{ "a", .html_a },
+            .{ "address", .html_address },
+            .{ "applet", .html_applet },
+            .{ "area", .html_area },
+            .{ "article", .html_article },
+            .{ "aside", .html_aside },
+            .{ "b", .html_b },
+            .{ "base", .html_base },
+            .{ "basefont", .html_basefont },
+            .{ "bgsound", .html_bgsound },
+            .{ "blockquote", .html_blockquote },
+            .{ "body", .html_body },
+            .{ "br", .html_br },
+            .{ "button", .html_button },
+            .{ "caption", .html_caption },
+            .{ "center", .html_center },
+            .{ "cite", .html_cite },
+            .{ "code", .html_code },
+            .{ "col", .html_col },
+            .{ "colgroup", .html_colgroup },
+            .{ "dd", .html_dd },
+            .{ "details", .html_details },
+            .{ "dir", .html_dir },
+            .{ "div", .html_div },
+            .{ "dl", .html_dl },
+            .{ "dt", .html_dt },
+            .{ "em", .html_em },
+            .{ "embed", .html_embed },
+            .{ "fieldset", .html_fieldset },
+            .{ "figcaption", .html_figcaption },
+            .{ "figure", .html_figure },
+            .{ "font", .html_font },
+            .{ "footer", .html_footer },
+            .{ "form", .html_form },
+            .{ "frame", .html_frame },
+            .{ "frameset", .html_frameset },
+            .{ "h1", .html_h1 },
+            .{ "h2", .html_h2 },
+            .{ "h3", .html_h3 },
+            .{ "h4", .html_h4 },
+            .{ "h5", .html_h5 },
+            .{ "h6", .html_h6 },
+            .{ "head", .html_head },
+            .{ "header", .html_header },
+            .{ "hgroup", .html_hgroup },
+            .{ "hr", .html_hr },
+            .{ "html", .html_html },
+            .{ "i", .html_i },
+            .{ "iframe", .html_iframe },
+            .{ "img", .html_img },
+            .{ "input", .html_input },
+            .{ "keygen", .html_keygen },
+            .{ "li", .html_li },
+            .{ "link", .html_link },
+            .{ "listing", .html_listing },
+            .{ "main", .html_main },
+            .{ "marquee", .html_marquee },
+            .{ "menu", .html_menu },
+            .{ "meta", .html_meta },
+            .{ "nav", .html_nav },
+            .{ "noembed", .html_noembed },
+            .{ "noframes", .html_noframes },
+            .{ "noscript", .html_noscript },
+            .{ "object", .html_object },
+            .{ "ol", .html_ol },
+            .{ "optgroup", .html_optgroup },
+            .{ "option", .html_option },
+            .{ "p", .html_p },
+            .{ "param", .html_param },
+            .{ "plaintext", .html_plaintext },
+            .{ "pre", .html_pre },
+            .{ "rb", .html_rb },
+            .{ "rp", .html_rp },
+            .{ "rt", .html_rt },
+            .{ "rtc", .html_rtc },
+            .{ "script", .html_script },
+            .{ "section", .html_section },
+            .{ "select", .html_select },
+            .{ "source", .html_source },
+            .{ "spacer", .html_spacer },
+            .{ "span", .html_span },
+            .{ "strike", .html_strike },
+            .{ "style", .html_style },
+            .{ "summary", .html_summary },
+            .{ "table", .html_table },
+            .{ "tbody", .html_tbody },
+            .{ "td", .html_td },
+            .{ "template", .html_template },
+            .{ "test", .html_test },
+            .{ "textarea", .html_textarea },
+            .{ "tfoot", .html_tfoot },
+            .{ "th", .html_th },
+            .{ "thead", .html_thead },
+            .{ "title", .html_title },
+            .{ "tr", .html_tr },
+            .{ "track", .html_track },
+            .{ "u", .html_u },
+            .{ "ul", .html_ul },
+            .{ "wbr", .html_wbr },
+            .{ "xmp", .html_xmp },
+        });
+    };
+
+    pub fn fromStringHtml(string: []const u8) ?ElementType {
+        return html_map.get(string);
+    }
 };
 
 pub const Element = struct {
@@ -311,4 +445,70 @@ pub fn createAnElement(
     };
     // TODO: Check for a valid custom element name.
     return result;
+}
+
+pub fn printDom(dom: Dom, writer: anytype, allocator: *Allocator) !void {
+    try std.fmt.format(writer, "Document: {s}\n", .{@tagName(dom.document.quirks_mode)});
+
+    try printDocumentCdatas(dom, writer, 0);
+
+    if (dom.document.doctype) |doctype| {
+        try std.fmt.format(writer, "  DocumentType: name={s} publicId={s} systemId={s}\n", .{ doctype.name, doctype.publicId, doctype.systemId });
+    }
+
+    try printDocumentCdatas(dom, writer, 1);
+
+    const ConstElementOrCharacterData = union(enum) {
+        element: *const Element,
+        cdata: *const CharacterData,
+    };
+    var node_stack = ArrayListUnmanaged(struct { node: ConstElementOrCharacterData, depth: usize }){};
+    defer node_stack.deinit(allocator);
+    if (dom.document.element) |*document_element| {
+        try node_stack.append(allocator, .{ .node = .{ .element = document_element }, .depth = 1 });
+    }
+    while (node_stack.items.len > 0) {
+        const item = node_stack.pop();
+        var len = item.depth;
+        while (len > 0) : (len -= 1) {
+            try std.fmt.format(writer, "  ", .{});
+        }
+        switch (item.node) {
+            .element => |element| {
+                const namespace_prefix = element.namespace_prefix orelse "";
+                const is = element.is orelse "";
+                try std.fmt.format(writer, "Element: type={s} local_name={s} namespace={s} prefix={s} is={s}", .{
+                    @tagName(element.element_type),
+                    element.local_name,
+                    @tagName(element.namespace),
+                    namespace_prefix,
+                    is,
+                });
+                var attr_it = element.attributes.iterator();
+                try std.fmt.format(writer, " [ ", .{});
+                while (attr_it.next()) |attr| {
+                    try std.fmt.format(writer, "\"{s}\"=\"{s}\" ", .{ attr.key_ptr.*, attr.value_ptr.* });
+                }
+                try std.fmt.format(writer, "]\n", .{});
+                var num_children = element.children.items.len;
+                while (num_children > 0) : (num_children -= 1) {
+                    const node = switch (element.children.items[num_children - 1]) {
+                        .element => |e| ConstElementOrCharacterData{ .element = e },
+                        .cdata => |c| ConstElementOrCharacterData{ .cdata = c },
+                    };
+                    try node_stack.append(allocator, .{ .node = node, .depth = item.depth + 1 });
+                }
+            },
+            .cdata => |cdata| try std.fmt.format(writer, "{s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items }),
+        }
+    }
+
+    try printDocumentCdatas(dom, writer, 2);
+}
+
+fn printDocumentCdatas(dom: Dom, writer: anytype, slice_index: u2) !void {
+    const slice = dom.document.cdata_slices[slice_index];
+    for (slice.sliceOf(dom.document.cdata.items)) |cdata| {
+        try std.fmt.format(writer, "  {s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items });
+    }
 }

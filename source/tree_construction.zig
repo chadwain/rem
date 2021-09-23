@@ -9,7 +9,9 @@ const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
-const Tokenizer = @import("./Tokenizer.zig");
+const html5 = @import("html5");
+
+const Tokenizer = html5.Tokenizer;
 const Token = Tokenizer.Token;
 const TokenStartTag = Tokenizer.TokenStartTag;
 const TokenEndTag = Tokenizer.TokenEndTag;
@@ -17,7 +19,7 @@ const TokenComment = Tokenizer.TokenComment;
 const TokenCharacter = Tokenizer.TokenCharacter;
 const TokenDOCTYPE = Tokenizer.TokenDOCTYPE;
 
-const Dom = @import("./dom.zig");
+const Dom = html5.dom;
 const Document = Dom.Document;
 const Element = Dom.Element;
 const ElementType = Dom.ElementType;
@@ -25,99 +27,6 @@ const CharacterData = Dom.CharacterData;
 const CharacterDataInterface = Dom.CharacterDataInterface;
 
 const report_parse_errors = true;
-
-test {
-    const al = std.heap.page_allocator;
-    const input = "<!doctype html><!--Side note 1--><html><body>hello<!--Side note 2--></body></html><!--Side note 3-->";
-    var it = (try std.unicode.Utf8View.init(input)).iterator();
-    var list = std.ArrayList(u21).init(al);
-    defer list.deinit();
-    while (it.nextCodepoint()) |cp| {
-        try list.append(cp);
-    }
-
-    var tokenizer = Tokenizer.init(list.items, al, .Data);
-    defer tokenizer.deinit();
-    while (!tokenizer.reached_eof) {
-        try tokenizer.run();
-    }
-
-    std.debug.print("\nTokens:\n", .{});
-    for (tokenizer.tokens.items) |token| {
-        std.debug.print("{any}\n", .{token});
-    }
-    std.debug.print("\n", .{});
-
-    var dom = Dom.Dom{};
-    var c = TreeConstructor.init(&dom, al);
-
-    for (tokenizer.tokens.items) |token| {
-        try c.run(token);
-        if (c.stopped) break;
-    }
-
-    std.debug.print("\nDOM Tree:\n\n", .{});
-    std.debug.print("Document: {s}\n", .{@tagName(c.dom.document.quirks_mode)});
-
-    {
-        const split = c.dom.document.cdata_nodes_splits[0];
-        const cdatas = c.dom.document.cdata_nodes.items[split[0]..split[1]];
-        for (cdatas) |cdata| std.debug.print("  {s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items });
-    }
-
-    if (c.dom.document.doctype) |doctype| {
-        std.debug.print("  DocumentType: name={s} publicId={s} systemId={s}\n", .{ doctype.name, doctype.publicId, doctype.systemId });
-    }
-
-    {
-        const split = c.dom.document.cdata_nodes_splits[1];
-        const cdatas = c.dom.document.cdata_nodes.items[split[0]..split[1]];
-        for (cdatas) |cdata| std.debug.print("  {s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items });
-    }
-
-    var node_stack = ArrayListUnmanaged(struct { node: Dom.ElementOrCharacterData, depth: usize }){};
-    defer node_stack.deinit(al);
-    if (c.dom.document.element) |*document_element| {
-        try node_stack.append(al, .{ .node = .{ .element = document_element }, .depth = 1 });
-    }
-    while (node_stack.items.len > 0) {
-        const item = node_stack.pop();
-        var len = item.depth;
-        while (len > 0) : (len -= 1) {
-            std.debug.print("  ", .{});
-        }
-        switch (item.node) {
-            .element => |element| {
-                const namespace_prefix = element.namespace_prefix orelse "";
-                const is = element.is orelse "";
-                std.debug.print("Element: type={s} local_name={s} namespace={s} prefix={s} is={s}", .{
-                    @tagName(element.element_type),
-                    element.local_name,
-                    @tagName(element.namespace),
-                    namespace_prefix,
-                    is,
-                });
-                var attr_it = element.attributes.iterator();
-                std.debug.print(" [ ", .{});
-                while (attr_it.next()) |attr| {
-                    std.debug.print("\"{s}\"=\"{s}\" ", .{ attr.key_ptr.*, attr.value_ptr.* });
-                }
-                std.debug.print("]\n", .{});
-                var num_children = element.children.items.len;
-                while (num_children > 0) : (num_children -= 1) {
-                    try node_stack.append(al, .{ .node = element.children.items[num_children - 1], .depth = item.depth + 1 });
-                }
-            },
-            .cdata => |cdata| std.debug.print("{s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items }),
-        }
-    }
-
-    {
-        const split = c.dom.document.cdata_nodes_splits[2];
-        const cdatas = c.dom.document.cdata_nodes.items[split[0]..split[1]];
-        for (cdatas) |cdata| std.debug.print("  {s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items });
-    }
-}
 
 const ParentNode = union(enum) {
     document: *Document,
@@ -960,7 +869,6 @@ fn appropriateNodeInsertionLocationWithTarget(c: *TreeConstructor, target: *Elem
     var adjusted_insertion_location: *Element = undefined;
     var position: enum { last_child } = undefined;
     if (c.foster_parenting and elemTypeEqlAny(target.element_type, &.{ .html_table, .html_tbody, .html_tfoot, .html_thead, .html_tr })) substeps: {
-        @setCold(true);
         var last_template: ?*Dom.Element = null;
         var last_table: ?*Dom.Element = null;
         var index = c.open_elements.items.len;
@@ -994,7 +902,6 @@ fn appropriateNodeInsertionLocationWithTarget(c: *TreeConstructor, target: *Elem
     }
 
     if (adjusted_insertion_location.element_type == .html_template) {
-        @setCold(true);
         @panic("TODO Appropriate place for inserting a node is inside a template");
     }
 

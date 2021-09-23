@@ -10,9 +10,9 @@ pub fn build(b: *std.build.Builder) void {
         .name = "named-character-references",
         .path = .{ .path = "tools/named_character_references.zig" },
     };
-    const tokenizer_pkg = std.build.Pkg{
-        .name = "Tokenizer",
-        .path = .{ .path = "source/Tokenizer.zig" },
+    const html5_pkg = std.build.Pkg{
+        .name = "html5",
+        .path = .{ .path = "html5.zig" },
         .dependencies = &.{named_character_references_pkg},
     };
 
@@ -20,7 +20,7 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
-    const lib = b.addStaticLibrary("html-parser", "source/Tokenizer.zig");
+    const lib = b.addStaticLibrary("html5", "html5.zig");
     lib.setBuildMode(mode);
     lib.install();
     lib.addPackage(named_character_references_pkg);
@@ -39,13 +39,13 @@ pub fn build(b: *std.build.Builder) void {
 
     const html5lib_tokenizer_tests = b.addTest("test/html5lib-test-tokenizer.zig");
     html5lib_tokenizer_tests.setBuildMode(mode);
-    html5lib_tokenizer_tests.addPackage(tokenizer_pkg);
+    html5lib_tokenizer_tests.addPackage(html5_pkg);
     const html5lib_tokenizer_tests_step = b.step("test-tokenizer", "Run tokenizer tests from html5lib-tests");
     html5lib_tokenizer_tests_step.dependOn(&html5lib_tokenizer_tests.step);
 
-    const tree_construction_tests = b.addTest("source/tree_construction.zig");
-    tree_construction_tests.setBuildMode(mode);
-    tree_construction_tests.addPackage(named_character_references_pkg);
-    const tree_construction_tests_step = b.step("test-tree-construction", "Run tree construction tests");
-    tree_construction_tests_step.dependOn(&tree_construction_tests.step);
+    const html5lib_tree_construction_tests = b.addTest("test/html5lib-test-tree-construction.zig");
+    html5lib_tree_construction_tests.setBuildMode(mode);
+    html5lib_tree_construction_tests.addPackage(html5_pkg);
+    const html5lib_tree_construction_tests_step = b.step("test-tree-construction", "Run tree construction tests from html5lib-tests");
+    html5lib_tree_construction_tests_step.dependOn(&html5lib_tree_construction_tests.step);
 }

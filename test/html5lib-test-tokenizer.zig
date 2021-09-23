@@ -26,7 +26,7 @@ const testing = std.testing;
 const ArrayList = std.ArrayList;
 const Progress = std.Progress;
 
-const Tokenizer = @import("Tokenizer");
+const Tokenizer = @import("html5").Tokenizer;
 const Token = Tokenizer.Token;
 const TokenizerState = Tokenizer.State;
 const AttributeSet = Tokenizer.AttributeSet;
