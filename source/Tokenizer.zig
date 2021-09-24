@@ -13,7 +13,6 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 const Allocator = std.mem.Allocator;
 
-const EOF = '\u{5FFFE}';
 const REPLACEMENT_CHARACTER = '\u{FFFD}';
 
 state: State = .Data,
@@ -40,7 +39,7 @@ adjusted_current_node_is_in_html_namespace: bool = true,
 
 input: []const u21,
 position: usize = 0,
-reconsumed_input_char: u21 = undefined,
+reconsumed_input_char: ?u21 = undefined,
 should_reconsume: bool = false,
 reached_eof: bool = false,
 allocator: *Allocator,
@@ -336,8 +335,8 @@ pub const Token = union(enum) {
 
 /// Gets the next character from the input stream, given a position.
 /// It implements the "Preprocessing the input stream" step.
-fn advancePosition(input: []const u21, old_position: usize) struct { character: u21, new_position: usize } {
-    if (old_position >= input.len) return .{ .character = EOF, .new_position = old_position };
+fn advancePosition(input: []const u21, old_position: usize) struct { character: ?u21, new_position: usize } {
+    if (old_position >= input.len) return .{ .character = null, .new_position = old_position };
     var character = input[old_position];
     var new_position = old_position + 1;
     if (character == '\r') {
@@ -345,13 +344,11 @@ fn advancePosition(input: []const u21, old_position: usize) struct { character: 
         if (new_position < input.len and input[new_position] == '\n') {
             new_position += 1;
         }
-    } else if (character == EOF) {
-        character = REPLACEMENT_CHARACTER;
     }
     return .{ .character = character, .new_position = new_position };
 }
 
-fn nextInputChar(self: *Self) !u21 {
+fn nextInputChar(self: *Self) !?u21 {
     if (self.should_reconsume) {
         self.should_reconsume = false;
         return self.reconsumed_input_char;
@@ -359,14 +356,14 @@ fn nextInputChar(self: *Self) !u21 {
         const next_char_info = advancePosition(self.input, self.position);
         self.reconsumed_input_char = next_char_info.character;
         self.position = next_char_info.new_position;
-        if (next_char_info.character != EOF) {
-            try self.checkInputCharacterForErrors(next_char_info.character);
+        if (next_char_info.character) |character| {
+            try self.checkInputCharacterForErrors(character);
         }
         return next_char_info.character;
     }
 }
 
-fn peekInputChar(self: *Self) u21 {
+fn peekInputChar(self: *Self) ?u21 {
     if (self.should_reconsume) {
         return self.reconsumed_input_char;
     } else {
@@ -382,7 +379,7 @@ fn consumeN(self: *Self, count: usize) !void {
         // NOTE: There is no need to check for EOF here, because
         // this function only gets called after nextFewCharsEql/nextFewCharsCaseInsensitiveEql returns true.
         new_position = next_char_info.new_position;
-        try self.checkInputCharacterForErrors(next_char_info.character);
+        try self.checkInputCharacterForErrors(next_char_info.character orelse unreachable);
     }
     self.position = new_position;
 }
@@ -391,7 +388,7 @@ fn nextFewCharsEql(self: *Self, comptime string: []const u8) bool {
     var position = self.position;
     for (decodeComptimeString(string)) |character| {
         const next_char_info = advancePosition(self.input, position);
-        if (next_char_info.character == EOF or next_char_info.character != character) return false;
+        if (next_char_info.character == null or next_char_info.character.? != character) return false;
         position = next_char_info.new_position;
     }
     return true;
@@ -401,7 +398,7 @@ fn nextFewCharsCaseInsensitiveEql(self: *Self, comptime string: []const u8) bool
     var position = self.position;
     for (decodeComptimeString(string)) |character| {
         const next_char_info = advancePosition(self.input, position);
-        if (next_char_info.character == EOF or !caseInsensitiveEql(next_char_info.character, character)) return false;
+        if (next_char_info.character == null or !caseInsensitiveEql(next_char_info.character.?, character)) return false;
         position = next_char_info.new_position;
     }
     return true;
@@ -658,8 +655,7 @@ fn appendCurrentTagName(self: *Self, character: u21) !void {
 }
 
 fn resetCurrentTagName(self: *Self) void {
-    self.current_tag_name.deinit(self.allocator);
-    self.current_tag_name = .{};
+    self.current_tag_name.clearRetainingCapacity();
 }
 
 fn appendCurrentAttributeName(self: *Self, character: u21) !void {
@@ -707,7 +703,7 @@ fn appendTempBuffer(self: *Self, character: u21) !void {
 }
 
 fn clearTempBuffer(self: *Self) void {
-    self.temp_buffer.shrinkRetainingCapacity(0);
+    self.temp_buffer.clearRetainingCapacity();
 }
 
 fn tempBufferEql(self: *Self, comptime string: []const u8) bool {
@@ -740,9 +736,9 @@ fn findNamedCharacterReference(self: *Self) !named_characters.Value {
     var character_reference_consumed_codepoints_count: usize = 1;
     var last_matched_named_character_value = named_characters.Value{};
     while (true) {
-        if (next_character == EOF) break;
-        const key_index = node.find(next_character) orelse break;
-        try self.appendTempBuffer(next_character);
+        const character = next_character orelse break;
+        const key_index = node.find(character) orelse break;
+        try self.appendTempBuffer(character);
 
         if (node.child(key_index)) |c_node| {
             const new_value = node.value(key_index);
@@ -797,130 +793,156 @@ fn adjustedCurrentNodeInHtmlNamepsace(self: *Self) bool {
 pub fn run(t: *Self) !void {
     switch (t.state) {
         .Data => {
-            switch (try t.nextInputChar()) {
-                '&' => t.toCharacterReferenceState(.Data),
-                '<' => t.changeTo(.TagOpen),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.emitCharacter(0x00);
-                },
-                EOF => try t.emitEOF(),
-                else => |c| try t.emitCharacter(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '&' => t.toCharacterReferenceState(.Data),
+                    '<' => t.changeTo(.TagOpen),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.emitCharacter(0x00);
+                    },
+
+                    else => |c| try t.emitCharacter(c),
+                }
+            } else {
+                try t.emitEOF();
             }
         },
         .RCDATA => {
-            switch (try t.nextInputChar()) {
-                '&' => t.toCharacterReferenceState(.RCDATA),
-                '<' => t.changeTo(.RCDATALessThanSign),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.emitCharacter(REPLACEMENT_CHARACTER);
-                },
-                EOF => try t.emitEOF(),
-                else => |c| try t.emitCharacter(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '&' => t.toCharacterReferenceState(.RCDATA),
+                    '<' => t.changeTo(.RCDATALessThanSign),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.emitCharacter(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| try t.emitCharacter(c),
+                }
+            } else {
+                try t.emitEOF();
             }
         },
         .RAWTEXT => {
-            switch (try t.nextInputChar()) {
-                '<' => t.changeTo(.RAWTEXTLessThanSign),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.emitCharacter(REPLACEMENT_CHARACTER);
-                },
-                EOF => try t.emitEOF(),
-                else => |c| try t.emitCharacter(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '<' => t.changeTo(.RAWTEXTLessThanSign),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.emitCharacter(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| try t.emitCharacter(c),
+                }
+            } else {
+                try t.emitEOF();
             }
         },
         .ScriptData => {
-            switch (try t.nextInputChar()) {
-                '<' => t.changeTo(.ScriptDataLessThanSign),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.emitCharacter(REPLACEMENT_CHARACTER);
-                },
-                EOF => try t.emitEOF(),
-                else => |c| try t.emitCharacter(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '<' => t.changeTo(.ScriptDataLessThanSign),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.emitCharacter(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| try t.emitCharacter(c),
+                }
+            } else {
+                try t.emitEOF();
             }
         },
         .PLAINTEXT => {
-            switch (try t.nextInputChar()) {
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.emitCharacter(REPLACEMENT_CHARACTER);
-                },
-                EOF => try t.emitEOF(),
-                else => |c| try t.emitCharacter(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.emitCharacter(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| try t.emitCharacter(c),
+                }
+            } else {
+                try t.emitEOF();
             }
         },
         .TagOpen => {
-            switch (try t.nextInputChar()) {
-                '!' => t.changeTo(.MarkupDeclarationOpen),
-                '/' => t.changeTo(.EndTagOpen),
-                'A'...'Z', 'a'...'z' => {
-                    t.createStartTagToken();
-                    t.reconsume(.TagName);
-                },
-                '?' => {
-                    try t.parseError(.UnexpectedQuestionMarkInsteadOfTagName);
-                    t.createCommentToken();
-                    t.reconsume(.BogusComment);
-                },
-                EOF => {
-                    try t.parseError(.EOFBeforeTagName);
-                    try t.emitCharacter('<');
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.parseError(.InvalidFirstCharacterOfTagName);
-                    try t.emitCharacter('<');
-                    t.reconsume(.Data);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '!' => t.changeTo(.MarkupDeclarationOpen),
+                    '/' => t.changeTo(.EndTagOpen),
+                    'A'...'Z', 'a'...'z' => {
+                        t.createStartTagToken();
+                        t.reconsume(.TagName);
+                    },
+                    '?' => {
+                        try t.parseError(.UnexpectedQuestionMarkInsteadOfTagName);
+                        t.createCommentToken();
+                        t.reconsume(.BogusComment);
+                    },
+
+                    else => {
+                        try t.parseError(.InvalidFirstCharacterOfTagName);
+                        try t.emitCharacter('<');
+                        t.reconsume(.Data);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFBeforeTagName);
+                try t.emitCharacter('<');
+                try t.emitEOF();
             }
         },
         .EndTagOpen => {
-            switch (try t.nextInputChar()) {
-                'A'...'Z', 'a'...'z' => {
-                    t.createEndTagToken();
-                    t.reconsume(.TagName);
-                },
-                '>' => {
-                    try t.parseError(.MissingEndTagName);
-                    t.changeTo(.Data);
-                },
-                EOF => {
-                    try t.parseError(.EOFBeforeTagName);
-                    try t.emitString("</");
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.parseError(.InvalidFirstCharacterOfTagName);
-                    t.createCommentToken();
-                    t.reconsume(.BogusComment);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    'A'...'Z', 'a'...'z' => {
+                        t.createEndTagToken();
+                        t.reconsume(.TagName);
+                    },
+                    '>' => {
+                        try t.parseError(.MissingEndTagName);
+                        t.changeTo(.Data);
+                    },
+
+                    else => {
+                        try t.parseError(.InvalidFirstCharacterOfTagName);
+                        t.createCommentToken();
+                        t.reconsume(.BogusComment);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFBeforeTagName);
+                try t.emitString("</");
+                try t.emitEOF();
             }
         },
         .TagName => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeAttributeName),
-                '/' => t.changeTo(.SelfClosingStartTag),
-                '>' => {
-                    t.changeTo(.Data);
-                    try t.emitCurrentTag();
-                },
-                'A'...'Z' => |c| try t.appendCurrentTagName(toLowercase(c)),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.appendCurrentTagName(REPLACEMENT_CHARACTER);
-                },
-                EOF => {
-                    try t.parseError(.EOFInTag);
-                    try t.emitEOF();
-                },
-                else => |c| try t.appendCurrentTagName(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeAttributeName),
+                    '/' => t.changeTo(.SelfClosingStartTag),
+                    '>' => {
+                        t.changeTo(.Data);
+                        try t.emitCurrentTag();
+                    },
+                    'A'...'Z' => |c| try t.appendCurrentTagName(toLowercase(c)),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.appendCurrentTagName(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| try t.appendCurrentTagName(c),
+                }
+            } else {
+                try t.parseError(.EOFInTag);
+                try t.emitEOF();
             }
         },
         .RCDATALessThanSign => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '/' => {
                     t.clearTempBuffer();
                     t.changeTo(.RCDATAEndTagOpen);
@@ -932,7 +954,7 @@ pub fn run(t: *Self) !void {
             }
         },
         .RCDATAEndTagOpen => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 'A'...'Z', 'a'...'z' => {
                     t.createEndTagToken();
                     t.reconsume(.RCDATAEndTagName);
@@ -943,12 +965,9 @@ pub fn run(t: *Self) !void {
                 },
             }
         },
-        .RCDATAEndTagName => {
-            const current_input_char = try t.nextInputChar();
-            try endTagName(t, current_input_char, .RCDATA);
-        },
+        .RCDATAEndTagName => try endTagName(t, .RCDATA),
         .RAWTEXTLessThanSign => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '/' => {
                     t.clearTempBuffer();
                     t.changeTo(.RAWTEXTEndTagOpen);
@@ -960,7 +979,7 @@ pub fn run(t: *Self) !void {
             }
         },
         .RAWTEXTEndTagOpen => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 'A'...'Z', 'a'...'z' => {
                     t.createEndTagToken();
                     t.reconsume(.RAWTEXTEndTagName);
@@ -971,12 +990,9 @@ pub fn run(t: *Self) !void {
                 },
             }
         },
-        .RAWTEXTEndTagName => {
-            const current_input_char = try t.nextInputChar();
-            try endTagName(t, current_input_char, .RAWTEXT);
-        },
+        .RAWTEXTEndTagName => try endTagName(t, .RAWTEXT),
         .ScriptDataLessThanSign => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '/' => {
                     t.clearTempBuffer();
                     t.changeTo(.ScriptDataEndTagOpen);
@@ -992,7 +1008,7 @@ pub fn run(t: *Self) !void {
             }
         },
         .ScriptDataEndTagOpen => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 'A'...'Z', 'a'...'z' => {
                     t.createEndTagToken();
                     t.reconsume(.ScriptDataEndTagName);
@@ -1003,12 +1019,9 @@ pub fn run(t: *Self) !void {
                 },
             }
         },
-        .ScriptDataEndTagName => {
-            const current_input_char = try t.nextInputChar();
-            try endTagName(t, current_input_char, .ScriptData);
-        },
+        .ScriptDataEndTagName => try endTagName(t, .ScriptData),
         .ScriptDataEscapeStart => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '-' => {
                     t.changeTo(.ScriptDataEscapeStartDash);
                     try t.emitCharacter('-');
@@ -1017,7 +1030,7 @@ pub fn run(t: *Self) !void {
             }
         },
         .ScriptDataEscapeStartDash => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '-' => {
                     t.changeTo(.ScriptDataEscapedDashDash);
                     try t.emitCharacter('-');
@@ -1026,70 +1039,76 @@ pub fn run(t: *Self) !void {
             }
         },
         .ScriptDataEscaped => {
-            switch (try t.nextInputChar()) {
-                '-' => {
-                    t.changeTo(.ScriptDataEscapedDash);
-                    try t.emitCharacter('-');
-                },
-                '<' => t.changeTo(.ScriptDataEscapedLessThanSign),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.emitCharacter(REPLACEMENT_CHARACTER);
-                },
-                EOF => {
-                    try t.parseError(.EOFInScriptHtmlCommentLikeText);
-                    try t.emitEOF();
-                },
-                else => |c| try t.emitCharacter(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '-' => {
+                        t.changeTo(.ScriptDataEscapedDash);
+                        try t.emitCharacter('-');
+                    },
+                    '<' => t.changeTo(.ScriptDataEscapedLessThanSign),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.emitCharacter(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| try t.emitCharacter(c),
+                }
+            } else {
+                try t.parseError(.EOFInScriptHtmlCommentLikeText);
+                try t.emitEOF();
             }
         },
         .ScriptDataEscapedDash => {
-            switch (try t.nextInputChar()) {
-                '-' => {
-                    t.changeTo(.ScriptDataEscapedDashDash);
-                    try t.emitCharacter('-');
-                },
-                '<' => t.changeTo(.ScriptDataEscapedLessThanSign),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    t.changeTo(.ScriptDataEscaped);
-                    try t.emitCharacter(REPLACEMENT_CHARACTER);
-                },
-                EOF => {
-                    try t.parseError(.EOFInScriptHtmlCommentLikeText);
-                    try t.emitEOF();
-                },
-                else => |c| {
-                    t.changeTo(.ScriptDataEscaped);
-                    try t.emitCharacter(c);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '-' => {
+                        t.changeTo(.ScriptDataEscapedDashDash);
+                        try t.emitCharacter('-');
+                    },
+                    '<' => t.changeTo(.ScriptDataEscapedLessThanSign),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        t.changeTo(.ScriptDataEscaped);
+                        try t.emitCharacter(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| {
+                        t.changeTo(.ScriptDataEscaped);
+                        try t.emitCharacter(c);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInScriptHtmlCommentLikeText);
+                try t.emitEOF();
             }
         },
         .ScriptDataEscapedDashDash => {
-            switch (try t.nextInputChar()) {
-                '-' => try t.emitCharacter('-'),
-                '<' => t.changeTo(.ScriptDataEscapedLessThanSign),
-                '>' => {
-                    t.changeTo(.ScriptData);
-                    try t.emitCharacter('>');
-                },
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    t.changeTo(.ScriptDataEscaped);
-                    try t.emitCharacter(REPLACEMENT_CHARACTER);
-                },
-                EOF => {
-                    try t.parseError(.EOFInScriptHtmlCommentLikeText);
-                    try t.emitEOF();
-                },
-                else => |c| {
-                    t.changeTo(.ScriptDataEscaped);
-                    try t.emitCharacter(c);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '-' => try t.emitCharacter('-'),
+                    '<' => t.changeTo(.ScriptDataEscapedLessThanSign),
+                    '>' => {
+                        t.changeTo(.ScriptData);
+                        try t.emitCharacter('>');
+                    },
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        t.changeTo(.ScriptDataEscaped);
+                        try t.emitCharacter(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| {
+                        t.changeTo(.ScriptDataEscaped);
+                        try t.emitCharacter(c);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInScriptHtmlCommentLikeText);
+                try t.emitEOF();
             }
         },
         .ScriptDataEscapedLessThanSign => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '/' => {
                     t.clearTempBuffer();
                     t.changeTo(.ScriptDataEscapedEndTagOpen);
@@ -1106,7 +1125,7 @@ pub fn run(t: *Self) !void {
             }
         },
         .ScriptDataEscapedEndTagOpen => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 'A'...'Z', 'a'...'z' => {
                     t.createEndTagToken();
                     t.reconsume(.ScriptDataEscapedEndTagName);
@@ -1117,12 +1136,9 @@ pub fn run(t: *Self) !void {
                 },
             }
         },
-        .ScriptDataEscapedEndTagName => {
-            const current_input_char = try t.nextInputChar();
-            try endTagName(t, current_input_char, .ScriptDataEscaped);
-        },
+        .ScriptDataEscapedEndTagName => try endTagName(t, .ScriptDataEscaped),
         .ScriptDataDoubleEscapeStart => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '\t', '\n', 0x0C, ' ', '/', '>' => |c| {
                     t.state = if (t.tempBufferEql("script")) .ScriptDataDoubleEscaped else .ScriptDataEscaped;
                     try t.emitCharacter(c);
@@ -1139,79 +1155,85 @@ pub fn run(t: *Self) !void {
             }
         },
         .ScriptDataDoubleEscaped => {
-            switch (try t.nextInputChar()) {
-                '-' => {
-                    t.changeTo(.ScriptDataDoubleEscapedDash);
-                    try t.emitCharacter('-');
-                },
-                '<' => {
-                    t.changeTo(.ScriptDataDoubleEscapedLessThanSign);
-                    try t.emitCharacter('<');
-                },
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.emitCharacter(REPLACEMENT_CHARACTER);
-                },
-                EOF => {
-                    try t.parseError(.EOFInScriptHtmlCommentLikeText);
-                    try t.emitEOF();
-                },
-                else => |c| try t.emitCharacter(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '-' => {
+                        t.changeTo(.ScriptDataDoubleEscapedDash);
+                        try t.emitCharacter('-');
+                    },
+                    '<' => {
+                        t.changeTo(.ScriptDataDoubleEscapedLessThanSign);
+                        try t.emitCharacter('<');
+                    },
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.emitCharacter(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| try t.emitCharacter(c),
+                }
+            } else {
+                try t.parseError(.EOFInScriptHtmlCommentLikeText);
+                try t.emitEOF();
             }
         },
         .ScriptDataDoubleEscapedDash => {
-            switch (try t.nextInputChar()) {
-                '-' => {
-                    t.changeTo(.ScriptDataDoubleEscapedDashDash);
-                    try t.emitCharacter('-');
-                },
-                '<' => {
-                    t.changeTo(.ScriptDataDoubleEscapedLessThanSign);
-                    try t.emitCharacter('<');
-                },
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    t.changeTo(.ScriptDataDoubleEscaped);
-                    try t.emitCharacter(REPLACEMENT_CHARACTER);
-                },
-                EOF => {
-                    try t.parseError(.EOFInScriptHtmlCommentLikeText);
-                    try t.emitEOF();
-                },
-                else => |c| {
-                    t.changeTo(.ScriptDataDoubleEscaped);
-                    try t.emitCharacter(c);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '-' => {
+                        t.changeTo(.ScriptDataDoubleEscapedDashDash);
+                        try t.emitCharacter('-');
+                    },
+                    '<' => {
+                        t.changeTo(.ScriptDataDoubleEscapedLessThanSign);
+                        try t.emitCharacter('<');
+                    },
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        t.changeTo(.ScriptDataDoubleEscaped);
+                        try t.emitCharacter(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| {
+                        t.changeTo(.ScriptDataDoubleEscaped);
+                        try t.emitCharacter(c);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInScriptHtmlCommentLikeText);
+                try t.emitEOF();
             }
         },
         .ScriptDataDoubleEscapedDashDash => {
-            switch (try t.nextInputChar()) {
-                '-' => try t.emitCharacter('-'),
-                '<' => {
-                    t.changeTo(.ScriptDataDoubleEscapedLessThanSign);
-                    try t.emitCharacter('<');
-                },
-                '>' => {
-                    t.changeTo(.ScriptData);
-                    try t.emitCharacter('>');
-                },
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    t.changeTo(.ScriptDataDoubleEscaped);
-                    try t.emitCharacter(REPLACEMENT_CHARACTER);
-                },
-                EOF => {
-                    try t.parseError(.EOFInScriptHtmlCommentLikeText);
-                    try t.emitEOF();
-                },
-                else => |c| {
-                    t.changeTo(.ScriptDataDoubleEscaped);
-                    try t.emitCharacter(c);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '-' => try t.emitCharacter('-'),
+                    '<' => {
+                        t.changeTo(.ScriptDataDoubleEscapedLessThanSign);
+                        try t.emitCharacter('<');
+                    },
+                    '>' => {
+                        t.changeTo(.ScriptData);
+                        try t.emitCharacter('>');
+                    },
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        t.changeTo(.ScriptDataDoubleEscaped);
+                        try t.emitCharacter(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| {
+                        t.changeTo(.ScriptDataDoubleEscaped);
+                        try t.emitCharacter(c);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInScriptHtmlCommentLikeText);
+                try t.emitEOF();
             }
         },
         .ScriptDataDoubleEscapedLessThanSign => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '/' => {
                     t.clearTempBuffer();
                     t.changeTo(.ScriptDataDoubleEscapeEnd);
@@ -1222,7 +1244,7 @@ pub fn run(t: *Self) !void {
         },
         // Nearly identical to ScriptDataDoubleEscapeStart.
         .ScriptDataDoubleEscapeEnd => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '\t', '\n', 0x0C, ' ', '/', '>' => |c| {
                     t.state = if (t.tempBufferEql("script")) .ScriptDataEscaped else .ScriptDataDoubleEscaped;
                     try t.emitCharacter(c);
@@ -1239,66 +1261,77 @@ pub fn run(t: *Self) !void {
             }
         },
         .BeforeAttributeName => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => {},
-                '/', '>', EOF => t.reconsume(.AfterAttributeName),
-                '=' => {
-                    try t.parseError(.UnexpectedEqualsSignBeforeAttributeName);
-                    t.createAttribute();
-                    try t.appendCurrentAttributeName('=');
-                    t.changeTo(.AttributeName);
-                },
-                else => {
-                    t.createAttribute();
-                    t.reconsume(.AttributeName);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => {},
+                    '/', '>' => t.reconsume(.AfterAttributeName),
+                    '=' => {
+                        try t.parseError(.UnexpectedEqualsSignBeforeAttributeName);
+                        t.createAttribute();
+                        try t.appendCurrentAttributeName('=');
+                        t.changeTo(.AttributeName);
+                    },
+                    else => {
+                        t.createAttribute();
+                        t.reconsume(.AttributeName);
+                    },
+                }
+            } else {
+                t.reconsume(.AfterAttributeName);
             }
         },
         .AttributeName => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ', '/', '>', EOF => {
-                    try t.finishAttributeName();
-                    t.reconsume(.AfterAttributeName);
-                },
-                '=' => {
-                    try t.finishAttributeName();
-                    t.changeTo(.BeforeAttributeValue);
-                },
-                'A'...'Z' => |c| try t.appendCurrentAttributeName(toLowercase(c)),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.appendCurrentAttributeName(REPLACEMENT_CHARACTER);
-                },
-                else => |c| {
-                    switch (c) {
-                        '"', '\'', '<' => try t.parseError(.UnexpectedCharacterInAttributeName),
-                        else => {},
-                    }
-                    try t.appendCurrentAttributeName(c);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ', '/', '>' => {
+                        try t.finishAttributeName();
+                        t.reconsume(.AfterAttributeName);
+                    },
+                    '=' => {
+                        try t.finishAttributeName();
+                        t.changeTo(.BeforeAttributeValue);
+                    },
+                    'A'...'Z' => |c| try t.appendCurrentAttributeName(toLowercase(c)),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.appendCurrentAttributeName(REPLACEMENT_CHARACTER);
+                    },
+                    else => |c| {
+                        switch (c) {
+                            '"', '\'', '<' => try t.parseError(.UnexpectedCharacterInAttributeName),
+                            else => {},
+                        }
+                        try t.appendCurrentAttributeName(c);
+                    },
+                }
+            } else {
+                try t.finishAttributeName();
+                t.reconsume(.AfterAttributeName);
             }
         },
         .AfterAttributeName => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => {},
-                '/' => t.changeTo(.SelfClosingStartTag),
-                '=' => t.changeTo(.BeforeAttributeValue),
-                '>' => {
-                    t.changeTo(.Data);
-                    try t.emitCurrentTag();
-                },
-                EOF => {
-                    try t.parseError(.EOFInTag);
-                    try t.emitEOF();
-                },
-                else => {
-                    t.createAttribute();
-                    t.reconsume(.AttributeName);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => {},
+                    '/' => t.changeTo(.SelfClosingStartTag),
+                    '=' => t.changeTo(.BeforeAttributeValue),
+                    '>' => {
+                        t.changeTo(.Data);
+                        try t.emitCurrentTag();
+                    },
+
+                    else => {
+                        t.createAttribute();
+                        t.reconsume(.AttributeName);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInTag);
+                try t.emitEOF();
             }
         },
         .BeforeAttributeValue => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '\t', '\n', 0x0C, ' ' => {},
                 '"' => t.changeTo(.AttributeValueDoubleQuoted),
                 '\'' => t.changeTo(.AttributeValueSingleQuoted),
@@ -1311,121 +1344,132 @@ pub fn run(t: *Self) !void {
             }
         },
         .AttributeValueDoubleQuoted => {
-            switch (try t.nextInputChar()) {
-                '"' => {
-                    t.finishAttributeValue();
-                    t.changeTo(.AfterAttributeValueQuoted);
-                },
-                '&' => t.toCharacterReferenceState(.AttributeValueDoubleQuoted),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
-                },
-                EOF => {
-                    try t.parseError(.EOFInTag);
-                    try t.emitEOF();
-                },
-                else => |c| try t.appendCurrentAttributeValue(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '"' => {
+                        t.finishAttributeValue();
+                        t.changeTo(.AfterAttributeValueQuoted);
+                    },
+                    '&' => t.toCharacterReferenceState(.AttributeValueDoubleQuoted),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| try t.appendCurrentAttributeValue(c),
+                }
+            } else {
+                try t.parseError(.EOFInTag);
+                try t.emitEOF();
             }
         },
         // Nearly identical to AttributeValueDoubleQuoted.
         .AttributeValueSingleQuoted => {
-            switch (try t.nextInputChar()) {
-                '\'' => {
-                    t.finishAttributeValue();
-                    t.changeTo(.AfterAttributeValueQuoted);
-                },
-                '&' => t.toCharacterReferenceState(.AttributeValueSingleQuoted),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
-                },
-                EOF => {
-                    try t.parseError(.EOFInTag);
-                    try t.emitEOF();
-                },
-                else => |c| try t.appendCurrentAttributeValue(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\'' => {
+                        t.finishAttributeValue();
+                        t.changeTo(.AfterAttributeValueQuoted);
+                    },
+                    '&' => t.toCharacterReferenceState(.AttributeValueSingleQuoted),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| try t.appendCurrentAttributeValue(c),
+                }
+            } else {
+                try t.parseError(.EOFInTag);
+                try t.emitEOF();
             }
         },
         .AttributeValueUnquoted => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => {
-                    t.finishAttributeValue();
-                    t.changeTo(.BeforeAttributeName);
-                },
-                '&' => t.toCharacterReferenceState(.AttributeValueUnquoted),
-                '>' => {
-                    t.finishAttributeValue();
-                    t.changeTo(.Data);
-                    try t.emitCurrentTag();
-                },
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
-                },
-                EOF => {
-                    try t.parseError(.EOFInTag);
-                    try t.emitEOF();
-                },
-                else => |c| {
-                    switch (c) {
-                        '"', '\'', '<', '=', '`' => try t.parseError(.UnexpectedCharacterInUnquotedAttributeValue),
-                        else => {},
-                    }
-                    try t.appendCurrentAttributeValue(c);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => {
+                        t.finishAttributeValue();
+                        t.changeTo(.BeforeAttributeName);
+                    },
+                    '&' => t.toCharacterReferenceState(.AttributeValueUnquoted),
+                    '>' => {
+                        t.finishAttributeValue();
+                        t.changeTo(.Data);
+                        try t.emitCurrentTag();
+                    },
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| {
+                        switch (c) {
+                            '"', '\'', '<', '=', '`' => try t.parseError(.UnexpectedCharacterInUnquotedAttributeValue),
+                            else => {},
+                        }
+                        try t.appendCurrentAttributeValue(c);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInTag);
+                try t.emitEOF();
             }
         },
         .AfterAttributeValueQuoted => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeAttributeName),
-                '/' => t.changeTo(.SelfClosingStartTag),
-                '>' => {
-                    t.changeTo(.Data);
-                    try t.emitCurrentTag();
-                },
-                EOF => {
-                    try t.parseError(.EOFInTag);
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.parseError(.MissingWhitespaceBetweenAttributes);
-                    t.reconsume(.BeforeAttributeName);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeAttributeName),
+                    '/' => t.changeTo(.SelfClosingStartTag),
+                    '>' => {
+                        t.changeTo(.Data);
+                        try t.emitCurrentTag();
+                    },
+
+                    else => {
+                        try t.parseError(.MissingWhitespaceBetweenAttributes);
+                        t.reconsume(.BeforeAttributeName);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInTag);
+                try t.emitEOF();
             }
         },
         .SelfClosingStartTag => {
-            switch (try t.nextInputChar()) {
-                '>' => {
-                    t.makeCurrentTagSelfClosing();
-                    t.changeTo(.Data);
-                    try t.emitCurrentTag();
-                },
-                EOF => {
-                    try t.parseError(.EOFInTag);
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.parseError(.UnexpectedSolidusInTag);
-                    t.reconsume(.BeforeAttributeName);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '>' => {
+                        t.makeCurrentTagSelfClosing();
+                        t.changeTo(.Data);
+                        try t.emitCurrentTag();
+                    },
+
+                    else => {
+                        try t.parseError(.UnexpectedSolidusInTag);
+                        t.reconsume(.BeforeAttributeName);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInTag);
+                try t.emitEOF();
             }
         },
         .BogusComment => {
-            switch (try t.nextInputChar()) {
-                '>' => {
-                    t.changeTo(.Data);
-                    try t.emitComment();
-                },
-                EOF => {
-                    try t.emitComment();
-                    try t.emitEOF();
-                },
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.appendComment(REPLACEMENT_CHARACTER);
-                },
-                else => |c| try t.appendComment(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '>' => {
+                        t.changeTo(.Data);
+                        try t.emitComment();
+                    },
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.appendComment(REPLACEMENT_CHARACTER);
+                    },
+                    else => |c| try t.appendComment(c),
+                }
+            } else {
+                try t.emitComment();
+                try t.emitEOF();
             }
         },
         .MarkupDeclarationOpen => {
@@ -1453,7 +1497,7 @@ pub fn run(t: *Self) !void {
             }
         },
         .CommentStart => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '-' => t.changeTo(.CommentStartDash),
                 '>' => {
                     try t.parseError(.AbruptClosingOfEmptyComment);
@@ -1464,45 +1508,49 @@ pub fn run(t: *Self) !void {
             }
         },
         .CommentStartDash => {
-            switch (try t.nextInputChar()) {
-                '-' => t.changeTo(.CommentEnd),
-                '>' => {
-                    try t.parseError(.AbruptClosingOfEmptyComment);
-                    t.changeTo(.Data);
-                    try t.emitComment();
-                },
-                EOF => {
-                    try t.parseError(.EOFInComment);
-                    try t.emitComment();
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.appendComment('-');
-                    t.reconsume(.Comment);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '-' => t.changeTo(.CommentEnd),
+                    '>' => {
+                        try t.parseError(.AbruptClosingOfEmptyComment);
+                        t.changeTo(.Data);
+                        try t.emitComment();
+                    },
+
+                    else => {
+                        try t.appendComment('-');
+                        t.reconsume(.Comment);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInComment);
+                try t.emitComment();
+                try t.emitEOF();
             }
         },
         .Comment => {
-            switch (try t.nextInputChar()) {
-                '<' => {
-                    try t.appendComment('<');
-                    t.changeTo(.CommentLessThanSign);
-                },
-                '-' => t.changeTo(.CommentEndDash),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.appendComment(REPLACEMENT_CHARACTER);
-                },
-                EOF => {
-                    try t.parseError(.EOFInComment);
-                    try t.emitComment();
-                    try t.emitEOF();
-                },
-                else => |c| try t.appendComment(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '<' => {
+                        try t.appendComment('<');
+                        t.changeTo(.CommentLessThanSign);
+                    },
+                    '-' => t.changeTo(.CommentEndDash),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.appendComment(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| try t.appendComment(c),
+                }
+            } else {
+                try t.parseError(.EOFInComment);
+                try t.emitComment();
+                try t.emitEOF();
             }
         },
         .CommentLessThanSign => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '!' => {
                     try t.appendComment('!');
                     t.changeTo(.CommentLessThanSignBang);
@@ -1512,507 +1560,551 @@ pub fn run(t: *Self) !void {
             }
         },
         .CommentLessThanSignBang => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '-' => t.changeTo(.CommentLessThanSignBangDash),
                 else => t.reconsume(.Comment),
             }
         },
         .CommentLessThanSignBangDash => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '-' => t.changeTo(.CommentLessThanSignBangDashDash),
                 else => t.reconsume(.CommentEndDash),
             }
         },
         .CommentLessThanSignBangDashDash => {
-            switch (try t.nextInputChar()) {
-                '>', EOF => t.reconsume(.CommentEnd),
-                else => {
-                    try t.parseError(.NestedComment);
-                    t.reconsume(.CommentEnd);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '>' => t.reconsume(.CommentEnd),
+                    else => {
+                        try t.parseError(.NestedComment);
+                        t.reconsume(.CommentEnd);
+                    },
+                }
+            } else {
+                t.reconsume(.CommentEnd);
             }
         },
         .CommentEndDash => {
-            switch (try t.nextInputChar()) {
-                '-' => t.changeTo(.CommentEnd),
-                EOF => {
-                    try t.parseError(.EOFInComment);
-                    try t.emitComment();
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.appendComment('-');
-                    t.reconsume(.Comment);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '-' => t.changeTo(.CommentEnd),
+
+                    else => {
+                        try t.appendComment('-');
+                        t.reconsume(.Comment);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInComment);
+                try t.emitComment();
+                try t.emitEOF();
             }
         },
         .CommentEnd => {
-            switch (try t.nextInputChar()) {
-                '>' => {
-                    t.changeTo(.Data);
-                    try t.emitComment();
-                },
-                '!' => t.changeTo(.CommentEndBang),
-                '-' => try t.appendComment('-'),
-                EOF => {
-                    try t.parseError(.EOFInComment);
-                    try t.emitComment();
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.appendComment('-');
-                    try t.appendComment('-');
-                    t.reconsume(.Comment);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '>' => {
+                        t.changeTo(.Data);
+                        try t.emitComment();
+                    },
+                    '!' => t.changeTo(.CommentEndBang),
+                    '-' => try t.appendComment('-'),
+
+                    else => {
+                        try t.appendComment('-');
+                        try t.appendComment('-');
+                        t.reconsume(.Comment);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInComment);
+                try t.emitComment();
+                try t.emitEOF();
             }
         },
         .CommentEndBang => {
-            switch (try t.nextInputChar()) {
-                '-' => {
-                    try t.appendComment('-');
-                    try t.appendComment('-');
-                    try t.appendComment('!');
-                    t.changeTo(.CommentEndDash);
-                },
-                '>' => {
-                    try t.parseError(.IncorrectlyClosedComment);
-                    t.changeTo(.Data);
-                    try t.emitComment();
-                },
-                EOF => {
-                    try t.parseError(.EOFInComment);
-                    try t.emitComment();
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.appendComment('-');
-                    try t.appendComment('-');
-                    try t.appendComment('!');
-                    t.reconsume(.Comment);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '-' => {
+                        try t.appendComment('-');
+                        try t.appendComment('-');
+                        try t.appendComment('!');
+                        t.changeTo(.CommentEndDash);
+                    },
+                    '>' => {
+                        try t.parseError(.IncorrectlyClosedComment);
+                        t.changeTo(.Data);
+                        try t.emitComment();
+                    },
+
+                    else => {
+                        try t.appendComment('-');
+                        try t.appendComment('-');
+                        try t.appendComment('!');
+                        t.reconsume(.Comment);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInComment);
+                try t.emitComment();
+                try t.emitEOF();
             }
         },
         .DOCTYPE => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeDOCTYPEName),
-                '>' => t.reconsume(.BeforeDOCTYPEName),
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.createDOCTYPEToken();
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.parseError(.MissingWhitespaceBeforeDOCTYPEName);
-                    t.reconsume(.BeforeDOCTYPEName);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeDOCTYPEName),
+                    '>' => t.reconsume(.BeforeDOCTYPEName),
+
+                    else => {
+                        try t.parseError(.MissingWhitespaceBeforeDOCTYPEName);
+                        t.reconsume(.BeforeDOCTYPEName);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.createDOCTYPEToken();
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .BeforeDOCTYPEName => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => {},
-                'A'...'Z' => |c| {
-                    t.createDOCTYPEToken();
-                    t.markCurrentDOCTYPENameNotMissing();
-                    try t.appendDOCTYPEName(toLowercase(c));
-                    t.changeTo(.DOCTYPEName);
-                },
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    t.createDOCTYPEToken();
-                    t.markCurrentDOCTYPENameNotMissing();
-                    try t.appendDOCTYPEName(REPLACEMENT_CHARACTER);
-                    t.changeTo(.DOCTYPEName);
-                },
-                '>' => {
-                    try t.parseError(.MissingDOCTYPEName);
-                    t.createDOCTYPEToken();
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.createDOCTYPEToken();
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => |c| {
-                    t.createDOCTYPEToken();
-                    t.markCurrentDOCTYPENameNotMissing();
-                    try t.appendDOCTYPEName(c);
-                    t.changeTo(.DOCTYPEName);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => {},
+                    'A'...'Z' => |c| {
+                        t.createDOCTYPEToken();
+                        t.markCurrentDOCTYPENameNotMissing();
+                        try t.appendDOCTYPEName(toLowercase(c));
+                        t.changeTo(.DOCTYPEName);
+                    },
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        t.createDOCTYPEToken();
+                        t.markCurrentDOCTYPENameNotMissing();
+                        try t.appendDOCTYPEName(REPLACEMENT_CHARACTER);
+                        t.changeTo(.DOCTYPEName);
+                    },
+                    '>' => {
+                        try t.parseError(.MissingDOCTYPEName);
+                        t.createDOCTYPEToken();
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+
+                    else => |c| {
+                        t.createDOCTYPEToken();
+                        t.markCurrentDOCTYPENameNotMissing();
+                        try t.appendDOCTYPEName(c);
+                        t.changeTo(.DOCTYPEName);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.createDOCTYPEToken();
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .DOCTYPEName => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => t.changeTo(.AfterDOCTYPEName),
-                '>' => {
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                'A'...'Z' => |c| try t.appendDOCTYPEName(toLowercase(c)),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.appendDOCTYPEName(REPLACEMENT_CHARACTER);
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => |c| try t.appendDOCTYPEName(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => t.changeTo(.AfterDOCTYPEName),
+                    '>' => {
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+                    'A'...'Z' => |c| try t.appendDOCTYPEName(toLowercase(c)),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.appendDOCTYPEName(REPLACEMENT_CHARACTER);
+                    },
+
+                    else => |c| try t.appendDOCTYPEName(c),
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .AfterDOCTYPEName => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => {},
-                '>' => {
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => |c| {
-                    if (caseInsensitiveEql(c, 'P') and t.nextFewCharsCaseInsensitiveEql("UBLIC")) {
-                        try t.consumeN(5);
-                        t.changeTo(.AfterDOCTYPEPublicKeyword);
-                    } else if (caseInsensitiveEql(c, 'S') and t.nextFewCharsCaseInsensitiveEql("YSTEM")) {
-                        try t.consumeN(5);
-                        t.changeTo(.AfterDOCTYPESystemKeyword);
-                    } else {
-                        try t.parseError(.InvalidCharacterSequenceAfterDOCTYPEName);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.reconsume(.BogusDOCTYPE);
-                    }
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => {},
+                    '>' => {
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+
+                    else => |c| {
+                        if (caseInsensitiveEql(c, 'P') and t.nextFewCharsCaseInsensitiveEql("UBLIC")) {
+                            try t.consumeN(5);
+                            t.changeTo(.AfterDOCTYPEPublicKeyword);
+                        } else if (caseInsensitiveEql(c, 'S') and t.nextFewCharsCaseInsensitiveEql("YSTEM")) {
+                            try t.consumeN(5);
+                            t.changeTo(.AfterDOCTYPESystemKeyword);
+                        } else {
+                            try t.parseError(.InvalidCharacterSequenceAfterDOCTYPEName);
+                            t.currentDOCTYPETokenForceQuirks();
+                            t.reconsume(.BogusDOCTYPE);
+                        }
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .AfterDOCTYPEPublicKeyword => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeDOCTYPEPublicIdentifier),
-                '"' => {
-                    try t.parseError(.MissingWhitespaceAfterDOCTYPEPublicKeyword);
-                    t.markCurrentDOCTYPEPublicIdentifierNotMissing();
-                    t.changeTo(.DOCTYPEPublicIdentifierDoubleQuoted);
-                },
-                '\'' => {
-                    try t.parseError(.MissingWhitespaceAfterDOCTYPEPublicKeyword);
-                    t.markCurrentDOCTYPEPublicIdentifierNotMissing();
-                    t.changeTo(.DOCTYPEPublicIdentifierSingleQuoted);
-                },
-                '>' => {
-                    try t.parseError(.MissingDOCTYPEPublicIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.parseError(.MissingQuoteBeforeDOCTYPEPublicIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.reconsume(.BogusDOCTYPE);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeDOCTYPEPublicIdentifier),
+                    '"' => {
+                        try t.parseError(.MissingWhitespaceAfterDOCTYPEPublicKeyword);
+                        t.markCurrentDOCTYPEPublicIdentifierNotMissing();
+                        t.changeTo(.DOCTYPEPublicIdentifierDoubleQuoted);
+                    },
+                    '\'' => {
+                        try t.parseError(.MissingWhitespaceAfterDOCTYPEPublicKeyword);
+                        t.markCurrentDOCTYPEPublicIdentifierNotMissing();
+                        t.changeTo(.DOCTYPEPublicIdentifierSingleQuoted);
+                    },
+                    '>' => {
+                        try t.parseError(.MissingDOCTYPEPublicIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+
+                    else => {
+                        try t.parseError(.MissingQuoteBeforeDOCTYPEPublicIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.reconsume(.BogusDOCTYPE);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .BeforeDOCTYPEPublicIdentifier => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => {},
-                '"' => {
-                    t.markCurrentDOCTYPEPublicIdentifierNotMissing();
-                    t.changeTo(.DOCTYPEPublicIdentifierDoubleQuoted);
-                },
-                '\'' => {
-                    t.markCurrentDOCTYPEPublicIdentifierNotMissing();
-                    t.changeTo(.DOCTYPEPublicIdentifierSingleQuoted);
-                },
-                '>' => {
-                    try t.parseError(.MissingDOCTYPEPublicIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.parseError(.MissingQuoteBeforeDOCTYPEPublicIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.reconsume(.BogusDOCTYPE);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => {},
+                    '"' => {
+                        t.markCurrentDOCTYPEPublicIdentifierNotMissing();
+                        t.changeTo(.DOCTYPEPublicIdentifierDoubleQuoted);
+                    },
+                    '\'' => {
+                        t.markCurrentDOCTYPEPublicIdentifierNotMissing();
+                        t.changeTo(.DOCTYPEPublicIdentifierSingleQuoted);
+                    },
+                    '>' => {
+                        try t.parseError(.MissingDOCTYPEPublicIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+
+                    else => {
+                        try t.parseError(.MissingQuoteBeforeDOCTYPEPublicIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.reconsume(.BogusDOCTYPE);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .DOCTYPEPublicIdentifierDoubleQuoted => {
-            switch (try t.nextInputChar()) {
-                '"' => t.changeTo(.AfterDOCTYPEPublicIdentifier),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.appendDOCTYPEPublicIdentifier(REPLACEMENT_CHARACTER);
-                },
-                '>' => {
-                    try t.parseError(.AbruptDOCTYPEPublicIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => |c| try t.appendDOCTYPEPublicIdentifier(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '"' => t.changeTo(.AfterDOCTYPEPublicIdentifier),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.appendDOCTYPEPublicIdentifier(REPLACEMENT_CHARACTER);
+                    },
+                    '>' => {
+                        try t.parseError(.AbruptDOCTYPEPublicIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+
+                    else => |c| try t.appendDOCTYPEPublicIdentifier(c),
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         // Nearly identical to DOCTYPEPublicIdentifierDoubleQuoted.
         .DOCTYPEPublicIdentifierSingleQuoted => {
-            switch (try t.nextInputChar()) {
-                '\'' => t.changeTo(.AfterDOCTYPEPublicIdentifier),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.appendDOCTYPEPublicIdentifier(REPLACEMENT_CHARACTER);
-                },
-                '>' => {
-                    try t.parseError(.AbruptDOCTYPEPublicIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => |c| try t.appendDOCTYPEPublicIdentifier(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\'' => t.changeTo(.AfterDOCTYPEPublicIdentifier),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.appendDOCTYPEPublicIdentifier(REPLACEMENT_CHARACTER);
+                    },
+                    '>' => {
+                        try t.parseError(.AbruptDOCTYPEPublicIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+
+                    else => |c| try t.appendDOCTYPEPublicIdentifier(c),
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .AfterDOCTYPEPublicIdentifier => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => t.changeTo(.BetweenDOCTYPEPublicAndSystemIdentifiers),
-                '>' => {
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                '"' => {
-                    try t.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
-                    t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                    t.changeTo(.DOCTYPESystemIdentifierDoubleQuoted);
-                },
-                '\'' => {
-                    try t.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
-                    t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                    t.changeTo(.DOCTYPESystemIdentifierSingleQuoted);
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.reconsume(.BogusDOCTYPE);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => t.changeTo(.BetweenDOCTYPEPublicAndSystemIdentifiers),
+                    '>' => {
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+                    '"' => {
+                        try t.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
+                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
+                        t.changeTo(.DOCTYPESystemIdentifierDoubleQuoted);
+                    },
+                    '\'' => {
+                        try t.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
+                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
+                        t.changeTo(.DOCTYPESystemIdentifierSingleQuoted);
+                    },
+
+                    else => {
+                        try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.reconsume(.BogusDOCTYPE);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .BetweenDOCTYPEPublicAndSystemIdentifiers => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => {},
-                '>' => {
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                '"' => {
-                    t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                    t.changeTo(.DOCTYPESystemIdentifierDoubleQuoted);
-                },
-                '\'' => {
-                    t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                    t.changeTo(.DOCTYPESystemIdentifierSingleQuoted);
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.reconsume(.BogusDOCTYPE);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => {},
+                    '>' => {
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+                    '"' => {
+                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
+                        t.changeTo(.DOCTYPESystemIdentifierDoubleQuoted);
+                    },
+                    '\'' => {
+                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
+                        t.changeTo(.DOCTYPESystemIdentifierSingleQuoted);
+                    },
+
+                    else => {
+                        try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.reconsume(.BogusDOCTYPE);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .AfterDOCTYPESystemKeyword => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeDOCTYPESystemIdentifier),
-                '"' => {
-                    try t.parseError(.MissingWhitespaceAfterDOCTYPESystemKeyword);
-                    t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                    t.changeTo(.DOCTYPESystemIdentifierDoubleQuoted);
-                },
-                '\'' => {
-                    try t.parseError(.MissingWhitespaceAfterDOCTYPESystemKeyword);
-                    t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                    t.changeTo(.DOCTYPESystemIdentifierSingleQuoted);
-                },
-                '>' => {
-                    try t.parseError(.MissingDOCTYPESystemIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.reconsume(.BogusDOCTYPE);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => t.changeTo(.BeforeDOCTYPESystemIdentifier),
+                    '"' => {
+                        try t.parseError(.MissingWhitespaceAfterDOCTYPESystemKeyword);
+                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
+                        t.changeTo(.DOCTYPESystemIdentifierDoubleQuoted);
+                    },
+                    '\'' => {
+                        try t.parseError(.MissingWhitespaceAfterDOCTYPESystemKeyword);
+                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
+                        t.changeTo(.DOCTYPESystemIdentifierSingleQuoted);
+                    },
+                    '>' => {
+                        try t.parseError(.MissingDOCTYPESystemIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+
+                    else => {
+                        try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.reconsume(.BogusDOCTYPE);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .BeforeDOCTYPESystemIdentifier => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => {},
-                '"' => {
-                    t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                    t.changeTo(.DOCTYPESystemIdentifierDoubleQuoted);
-                },
-                '\'' => {
-                    t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                    t.changeTo(.DOCTYPESystemIdentifierSingleQuoted);
-                },
-                '>' => {
-                    try t.parseError(.MissingDOCTYPESystemIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.reconsume(.BogusDOCTYPE);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => {},
+                    '"' => {
+                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
+                        t.changeTo(.DOCTYPESystemIdentifierDoubleQuoted);
+                    },
+                    '\'' => {
+                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
+                        t.changeTo(.DOCTYPESystemIdentifierSingleQuoted);
+                    },
+                    '>' => {
+                        try t.parseError(.MissingDOCTYPESystemIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+
+                    else => {
+                        try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.reconsume(.BogusDOCTYPE);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .DOCTYPESystemIdentifierDoubleQuoted => {
-            switch (try t.nextInputChar()) {
-                '"' => t.changeTo(.AfterDOCTYPESystemIdentifier),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.appendDOCTYPESystemIdentifier(REPLACEMENT_CHARACTER);
-                },
-                '>' => {
-                    try t.parseError(.AbruptDOCTYPESystemIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => |c| try t.appendDOCTYPESystemIdentifier(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '"' => t.changeTo(.AfterDOCTYPESystemIdentifier),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.appendDOCTYPESystemIdentifier(REPLACEMENT_CHARACTER);
+                    },
+                    '>' => {
+                        try t.parseError(.AbruptDOCTYPESystemIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+
+                    else => |c| try t.appendDOCTYPESystemIdentifier(c),
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         // Nearly identical to DOCTYPESystemIdentifierDoubleQuoted
         .DOCTYPESystemIdentifierSingleQuoted => {
-            switch (try t.nextInputChar()) {
-                '\'' => t.changeTo(.AfterDOCTYPESystemIdentifier),
-                0x00 => {
-                    try t.parseError(.UnexpectedNullCharacter);
-                    try t.appendDOCTYPESystemIdentifier(REPLACEMENT_CHARACTER);
-                },
-                '>' => {
-                    try t.parseError(.AbruptDOCTYPESystemIdentifier);
-                    t.currentDOCTYPETokenForceQuirks();
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => |c| try t.appendDOCTYPESystemIdentifier(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\'' => t.changeTo(.AfterDOCTYPESystemIdentifier),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.appendDOCTYPESystemIdentifier(REPLACEMENT_CHARACTER);
+                    },
+                    '>' => {
+                        try t.parseError(.AbruptDOCTYPESystemIdentifier);
+                        t.currentDOCTYPETokenForceQuirks();
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+
+                    else => |c| try t.appendDOCTYPESystemIdentifier(c),
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .AfterDOCTYPESystemIdentifier => {
-            switch (try t.nextInputChar()) {
-                '\t', '\n', 0x0C, ' ' => {},
-                '>' => {
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                EOF => {
-                    try t.parseError(.EOFInDOCTYPE);
-                    t.currentDOCTYPETokenForceQuirks();
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => {
-                    try t.parseError(.UnexpectedCharacterAfterDOCTYPESystemIdentifier);
-                    t.reconsume(.BogusDOCTYPE);
-                },
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => {},
+                    '>' => {
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+
+                    else => {
+                        try t.parseError(.UnexpectedCharacterAfterDOCTYPESystemIdentifier);
+                        t.reconsume(.BogusDOCTYPE);
+                    },
+                }
+            } else {
+                try t.parseError(.EOFInDOCTYPE);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .BogusDOCTYPE => {
-            switch (try t.nextInputChar()) {
-                '>' => {
-                    t.changeTo(.Data);
-                    try t.emitDOCTYPE();
-                },
-                0x00 => try t.parseError(.UnexpectedNullCharacter),
-                EOF => {
-                    try t.emitDOCTYPE();
-                    try t.emitEOF();
-                },
-                else => {},
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    '>' => {
+                        t.changeTo(.Data);
+                        try t.emitDOCTYPE();
+                    },
+                    0x00 => try t.parseError(.UnexpectedNullCharacter),
+
+                    else => {},
+                }
+            } else {
+                try t.emitDOCTYPE();
+                try t.emitEOF();
             }
         },
         .CDATASection => {
-            switch (try t.nextInputChar()) {
-                ']' => t.changeTo(.CDATASectionBracket),
-                EOF => {
-                    try t.parseError(.EOFInCDATA);
-                    try t.emitEOF();
-                },
-                else => |c| try t.emitCharacter(c),
+            if (try t.nextInputChar()) |current_input_char| {
+                switch (current_input_char) {
+                    ']' => t.changeTo(.CDATASectionBracket),
+
+                    else => |c| try t.emitCharacter(c),
+                }
+            } else {
+                try t.parseError(.EOFInCDATA);
+                try t.emitEOF();
             }
         },
         .CDATASectionBracket => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 ']' => t.changeTo(.CDATASectionEnd),
                 else => {
                     try t.emitCharacter(']');
@@ -2021,7 +2113,7 @@ pub fn run(t: *Self) !void {
             }
         },
         .CDATASectionEnd => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 ']' => try t.emitCharacter(']'),
                 '>' => t.changeTo(.Data),
                 else => {
@@ -2034,7 +2126,7 @@ pub fn run(t: *Self) !void {
             // NOTE: This is not exactly as the spec says, but should yield the same results.
             t.clearTempBuffer();
             try t.appendTempBuffer('&');
-            switch (t.peekInputChar()) {
+            switch (t.peekInputChar() orelse REPLACEMENT_CHARACTER) {
                 '0'...'9', 'A'...'Z', 'a'...'z' => {
                     t.changeTo(.NamedCharacterReference);
                 },
@@ -2054,7 +2146,7 @@ pub fn run(t: *Self) !void {
             const chars = try t.findNamedCharacterReference();
             const match_found = chars[0] != null;
             if (match_found) {
-                const historical_reasons = t.isPartOfAnAttribute() and t.tempBufferLast() != ';' and switch (t.peekInputChar()) {
+                const historical_reasons = t.isPartOfAnAttribute() and t.tempBufferLast() != ';' and switch (t.peekInputChar() orelse REPLACEMENT_CHARACTER) {
                     '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
                     else => false,
                 };
@@ -2077,7 +2169,7 @@ pub fn run(t: *Self) !void {
             }
         },
         .AmbiguousAmpersand => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '0'...'9', 'A'...'Z', 'a'...'z' => |c| if (t.isPartOfAnAttribute()) try t.appendCurrentAttributeValue(c) else try t.emitCharacter(c),
                 ';' => {
                     try t.parseError(.UnknownNamedCharacterReference);
@@ -2088,7 +2180,7 @@ pub fn run(t: *Self) !void {
         },
         .NumericCharacterReference => {
             t.character_reference_code = 0;
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 'x', 'X' => |c| {
                     try t.appendTempBuffer(c);
                     t.changeTo(.HexadecimalCharacterReferenceStart);
@@ -2097,7 +2189,7 @@ pub fn run(t: *Self) !void {
             }
         },
         .HexadecimalCharacterReferenceStart => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '0'...'9', 'A'...'F', 'a'...'f' => t.reconsume(.HexadecimalCharacterReference),
                 else => {
                     try t.parseError(.AbsenceOfDigitsInNumericCharacterReference);
@@ -2107,7 +2199,7 @@ pub fn run(t: *Self) !void {
             }
         },
         .DecimalCharacterReferenceStart => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '0'...'9' => t.reconsume(.DecimalCharacterReference),
                 else => {
                     try t.parseError(.AbsenceOfDigitsInNumericCharacterReference);
@@ -2117,7 +2209,7 @@ pub fn run(t: *Self) !void {
             }
         },
         .HexadecimalCharacterReference => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '0'...'9' => |c| t.characterReferenceCodeAddDigit(16, decimalCharToNumber(c)),
                 'A'...'F' => |c| t.characterReferenceCodeAddDigit(16, upperHexCharToNumber(c)),
                 'a'...'f' => |c| t.characterReferenceCodeAddDigit(16, lowerHexCharToNumber(c)),
@@ -2129,7 +2221,7 @@ pub fn run(t: *Self) !void {
             }
         },
         .DecimalCharacterReference => {
-            switch (try t.nextInputChar()) {
+            switch ((try t.nextInputChar()) orelse REPLACEMENT_CHARACTER) {
                 '0'...'9' => |c| t.characterReferenceCodeAddDigit(10, decimalCharToNumber(c)),
                 ';' => t.changeTo(.NumericCharacterReferenceEnd),
                 else => {
@@ -2233,39 +2325,41 @@ pub fn run(t: *Self) !void {
     }
 }
 
-fn endTagName(t: *Self, current_input_char: u21, next_state: State) !void {
-    switch (current_input_char) {
-        '\t', '\n', 0x0C, ' ' => {
-            if (t.isAppropriateEndTag()) {
-                t.changeTo(.BeforeAttributeName);
+fn endTagName(t: *Self, next_state: State) !void {
+    if (try t.nextInputChar()) |current_input_char| {
+        switch (current_input_char) {
+            '\t', '\n', 0x0C, ' ' => {
+                if (t.isAppropriateEndTag()) {
+                    t.changeTo(.BeforeAttributeName);
+                    return;
+                }
+            },
+            '/' => {
+                if (t.isAppropriateEndTag()) {
+                    t.changeTo(.SelfClosingStartTag);
+                    return;
+                }
+            },
+            '>' => {
+                if (t.isAppropriateEndTag()) {
+                    t.changeTo(.Data);
+                    try t.emitCurrentTag();
+                    return;
+                }
+            },
+            // These 2 prongs don't switch state (this could be in a loop)
+            'A'...'Z' => |c| {
+                try t.appendCurrentTagName(toLowercase(c));
+                try t.appendTempBuffer(c);
                 return;
-            }
-        },
-        '/' => {
-            if (t.isAppropriateEndTag()) {
-                t.changeTo(.SelfClosingStartTag);
+            },
+            'a'...'z' => |c| {
+                try t.appendCurrentTagName(c);
+                try t.appendTempBuffer(c);
                 return;
-            }
-        },
-        '>' => {
-            if (t.isAppropriateEndTag()) {
-                t.changeTo(.Data);
-                try t.emitCurrentTag();
-                return;
-            }
-        },
-        // These 2 prongs don't switch state (this could be in a loop)
-        'A'...'Z' => |c| {
-            try t.appendCurrentTagName(toLowercase(c));
-            try t.appendTempBuffer(c);
-            return;
-        },
-        'a'...'z' => |c| {
-            try t.appendCurrentTagName(c);
-            try t.appendTempBuffer(c);
-            return;
-        },
-        else => {},
+            },
+            else => {},
+        }
     }
 
     t.resetCurrentTagName();
