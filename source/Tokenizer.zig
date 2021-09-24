@@ -3,8 +3,50 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-const Self = @This();
+test "Tokenizer usage" {
+    const allocator = std.heap.page_allocator;
 
+    const string = "<!doctype><html>asdf</body hello=world>";
+    const input = input: {
+        var output = std.ArrayList(u21).init(allocator);
+        errdefer output.deinit();
+        var i: usize = 0;
+        while (i < string.len) {
+            const len = std.unicode.utf8ByteSequenceLength(string[i]) catch unreachable;
+            try output.append(std.unicode.utf8Decode(string[i .. i + len]) catch unreachable);
+            i += len;
+        }
+        break :input output.toOwnedSlice();
+    };
+    defer allocator.free(input);
+
+    var all_tokens = std.ArrayList(Token).init(allocator);
+    defer {
+        for (all_tokens.items) |*t| t.deinit(allocator);
+        all_tokens.deinit();
+    }
+
+    var all_parse_errors = std.ArrayList(ParseError).init(allocator);
+    defer all_parse_errors.deinit();
+
+    var tokenizer = init(input, allocator);
+    defer tokenizer.deinit();
+
+    while (try tokenizer.run()) |result| {
+        try all_tokens.appendSlice(result.tokens);
+        try all_parse_errors.appendSlice(result.parse_errors);
+    }
+
+    const expected_parse_errors = &[2]ParseError{
+        .MissingDOCTYPEName,
+        .EndTagWithAttributes,
+    };
+
+    try std.testing.expectEqual(@as(usize, 8), all_tokens.items.len);
+    try std.testing.expectEqualSlices(ParseError, expected_parse_errors, all_parse_errors.items);
+}
+
+const Self = @This();
 const named_characters = @import("named-character-references");
 
 const std = @import("std");
@@ -47,7 +89,11 @@ allocator: *Allocator,
 tokens: ArrayListUnmanaged(Token) = .{},
 parse_errors: ArrayListUnmanaged(ParseError) = .{},
 
-pub fn init(input: []const u21, allocator: *Allocator, state: State) Self {
+pub fn init(input: []const u21, allocator: *Allocator) Self {
+    return initState(input, allocator, .Data);
+}
+
+pub fn initState(input: []const u21, allocator: *Allocator, state: State) Self {
     return Self{
         .input = input,
         .allocator = allocator,
@@ -75,6 +121,19 @@ pub fn deinit(self: *Self) void {
     for (self.tokens.items) |*token| token.deinit(self.allocator);
     self.tokens.deinit(self.allocator);
     self.parse_errors.deinit(self.allocator);
+}
+
+pub const RunResult = struct {
+    tokens: []const Token,
+    parse_errors: []const ParseError,
+};
+
+pub fn run(self: *Self) !?RunResult {
+    if (self.reached_eof) return null;
+    self.tokens.clearRetainingCapacity();
+    self.parse_errors.clearRetainingCapacity();
+    try processInput(self);
+    return RunResult{ .tokens = self.tokens.items, .parse_errors = self.parse_errors.items };
 }
 
 pub const State = enum {
@@ -248,7 +307,7 @@ pub const Token = union(enum) {
     character: TokenCharacter,
     eof: TokenEOF,
 
-    fn deinit(self: *Token, allocator: *Allocator) void {
+    pub fn deinit(self: *Token, allocator: *Allocator) void {
         switch (self.*) {
             .doctype => |d| {
                 if (d.name) |name| allocator.free(name);
@@ -272,6 +331,59 @@ pub const Token = union(enum) {
             },
             .character => {},
             .eof => {},
+        }
+    }
+
+    pub fn copy(self: Token, allocator: *Allocator) !Token {
+        switch (self) {
+            .doctype => |d| {
+                const name = if (d.name) |s| try allocator.dupe(u8, s) else null;
+                errdefer if (name) |s| allocator.free(s);
+                const public_identifier = if (d.public_identifier) |s| try allocator.dupe(u8, s) else null;
+                errdefer if (public_identifier) |s| allocator.free(s);
+                const system_identifier = if (d.system_identifier) |s| try allocator.dupe(u8, s) else null;
+                errdefer if (system_identifier) |s| allocator.free(s);
+                return Token{ .doctype = .{
+                    .name = name,
+                    .public_identifier = public_identifier,
+                    .system_identifier = system_identifier,
+                    .force_quirks = d.force_quirks,
+                } };
+            },
+            .start_tag => |st| {
+                const name = try allocator.dupe(u8, st.name);
+                errdefer allocator.free(name);
+
+                var attributes = AttributeSet{};
+                errdefer {
+                    var iterator = attributes.iterator();
+                    while (iterator.next()) |attr| {
+                        allocator.free(attr.key_ptr.*);
+                        allocator.free(attr.value_ptr.*);
+                    }
+                    attributes.deinit(allocator);
+                }
+
+                var iterator = st.attributes.iterator();
+                while (iterator.next()) |attr| {
+                    const key = try allocator.dupe(u8, attr.key_ptr.*);
+                    errdefer allocator.free(key);
+                    const value = try allocator.dupe(u8, attr.value_ptr.*);
+                    errdefer allocator.free(value);
+                    try attributes.putNoClobber(allocator, key, value);
+                }
+
+                return Token{ .start_tag = .{ .name = name, .attributes = attributes, .self_closing = st.self_closing } };
+            },
+            .end_tag => |et| {
+                const name = try allocator.dupe(u8, et.name);
+                return Token{ .end_tag = .{ .name = name } };
+            },
+            .comment => |c| {
+                const data = try allocator.dupe(u8, c.data);
+                return Token{ .comment = .{ .data = data } };
+            },
+            .character, .eof => return self,
         }
     }
 
@@ -790,7 +902,7 @@ fn adjustedCurrentNodeInHtmlNamepsace(self: *Self) bool {
     return self.adjusted_current_node_is_in_html_namespace;
 }
 
-pub fn run(t: *Self) !void {
+fn processInput(t: *Self) !void {
     switch (t.state) {
         .Data => {
             if (try t.nextInputChar()) |current_input_char| {

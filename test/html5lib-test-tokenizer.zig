@@ -23,6 +23,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+const ArrayList = std.ArrayList;
 const Progress = std.Progress;
 
 const Tokenizer = @import("Tokenizer");
@@ -152,33 +153,43 @@ fn runTestFile(file_path: []const u8) !void {
 }
 
 fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: []Token, expected_errors: []ErrorInfo, initial_state: TokenizerState, last_start_tag_name: []const u8) !void {
-    var tokenizer = Tokenizer.init(input, allocator, initial_state);
+    var tokenizer = Tokenizer.initState(input, allocator, initial_state);
     defer tokenizer.deinit();
     tokenizer.last_start_tag_name = try allocator.dupe(u8, last_start_tag_name);
 
-    while (!tokenizer.reached_eof) {
-        try tokenizer.run();
+    var all_tokens = ArrayList(Token).init(allocator);
+    defer {
+        for (all_tokens.items) |*t| t.deinit(allocator);
+        all_tokens.deinit();
     }
 
-    try std.testing.expect(tokenizer.tokens.items[tokenizer.tokens.items.len - 1] == .eof);
-    std.testing.expectEqual(expected_tokens.len, tokenizer.tokens.items.len - 1) catch {
-        std.debug.print("Unequal number of tokens\n Expected {}: {any}\n Actual {}: {any}\n", .{ expected_tokens.len, expected_tokens, tokenizer.tokens.items.len - 1, tokenizer.tokens.items[0 .. tokenizer.tokens.items.len - 1] });
+    var all_parse_errors = ArrayList(ParseError).init(allocator);
+    defer all_parse_errors.deinit();
+
+    while (try tokenizer.run()) |result| {
+        try all_tokens.appendSlice(result.tokens);
+        try all_parse_errors.appendSlice(result.parse_errors);
+    }
+
+    try std.testing.expect(all_tokens.items[all_tokens.items.len - 1] == .eof);
+    std.testing.expectEqual(expected_tokens.len, all_tokens.items.len - 1) catch {
+        std.debug.print("Unequal number of tokens\n Expected {}: {any}\n Actual {}: {any}\n", .{ expected_tokens.len, expected_tokens, all_tokens.items.len - 1, all_tokens.items[0 .. all_tokens.items.len - 1] });
         return error.UnequalNumberOfTokens;
     };
     for (expected_tokens) |token, i| {
-        expectEqualTokens(token, tokenizer.tokens.items[i]) catch {
-            std.debug.print("Mismatched tokens\n Expected: {any}\n Actual: {any}\n", .{ token, tokenizer.tokens.items[i] });
+        expectEqualTokens(token, all_tokens.items[i]) catch {
+            std.debug.print("Mismatched tokens\n Expected: {any}\n Actual: {any}\n", .{ token, all_tokens.items[i] });
             return error.MismatchedTokens;
         };
     }
 
-    std.testing.expectEqual(expected_errors.len, tokenizer.parse_errors.items.len) catch {
-        std.debug.print("Unequal number of parse errors\n Expected {}: {any}\n Actual {}: {any}\n", .{ expected_errors.len, expected_errors, tokenizer.parse_errors.items.len, tokenizer.parse_errors.items });
+    std.testing.expectEqual(expected_errors.len, all_parse_errors.items.len) catch {
+        std.debug.print("Unequal number of parse errors\n Expected {}: {any}\n Actual {}: {any}\n", .{ expected_errors.len, expected_errors, all_parse_errors.items.len, all_parse_errors.items });
         return error.UnequalNumberOfParseErrors;
     };
     for (expected_errors) |err, i| {
-        testing.expectEqualSlices(u8, err.id, ErrorInfo.errorToSpecId(tokenizer.parse_errors.items[i])) catch {
-            std.debug.print("Mismatched parse errors\n Expected: {s}\n Actual: {s}\n", .{ err.id, ErrorInfo.errorToSpecId(tokenizer.parse_errors.items[i]) });
+        testing.expectEqualSlices(u8, err.id, ErrorInfo.errorToSpecId(all_parse_errors.items[i])) catch {
+            std.debug.print("Mismatched parse errors\n Expected: {s}\n Actual: {s}\n", .{ err.id, ErrorInfo.errorToSpecId(all_parse_errors.items[i]) });
             return error.MismatchedParseErrors;
         };
     }
