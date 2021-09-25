@@ -90,6 +90,9 @@ test "unicode chars problematic" {
 // }
 
 fn runTestFile(file_path: []const u8) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(!gpa.deinit());
+
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     var allocator = &arena.allocator;
@@ -139,7 +142,7 @@ fn runTestFile(file_path: []const u8) !void {
         const last_start_tag_name = if (test_obj.Object.get("lastStartTag")) |lastStartTagObj| lastStartTagObj.String else "";
 
         for (states[0..num_states]) |state| {
-            runTest(allocator, input, expected_tokens.items, expected_errors.items, state, last_start_tag_name) catch |err| {
+            runTest(&gpa.allocator, input, expected_tokens.items, expected_errors.items, state, last_start_tag_name) catch |err| {
                 std.debug.print("Test \"{s}\" with initial state \"{s}\" failed\n", .{ description, @tagName(state) });
                 return err;
             };
@@ -153,10 +156,6 @@ fn runTestFile(file_path: []const u8) !void {
 }
 
 fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: []Token, expected_errors: []ErrorInfo, initial_state: TokenizerState, last_start_tag_name: []const u8) !void {
-    var tokenizer = Tokenizer.initState(input, allocator, initial_state);
-    defer tokenizer.deinit();
-    tokenizer.last_start_tag_name = try allocator.dupe(u8, last_start_tag_name);
-
     var all_tokens = ArrayList(Token).init(allocator);
     defer {
         for (all_tokens.items) |*t| t.deinit(allocator);
@@ -166,10 +165,11 @@ fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: [
     var all_parse_errors = ArrayList(ParseError).init(allocator);
     defer all_parse_errors.deinit();
 
-    while (try tokenizer.run()) |result| {
-        try all_tokens.appendSlice(result.tokens);
-        try all_parse_errors.appendSlice(result.parse_errors);
-    }
+    var tokenizer = Tokenizer.initState(input, allocator, initial_state, &all_tokens, &all_parse_errors);
+    defer tokenizer.deinit();
+    tokenizer.last_start_tag_name = try allocator.dupe(u8, last_start_tag_name);
+
+    while (try tokenizer.run()) {}
 
     try std.testing.expect(all_tokens.items[all_tokens.items.len - 1] == .eof);
     std.testing.expectEqual(expected_tokens.len, all_tokens.items.len - 1) catch {
