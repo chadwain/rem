@@ -5,6 +5,8 @@ const ArrayList = std.ArrayList;
 
 const html5 = @import("html5");
 const Dom = html5.dom;
+const Tokenizer = html5.Tokenizer;
+const TreeConstructor = html5.tree_construction.TreeConstructor;
 
 fn eql(str1: []const u8, str2: []const u8) bool {
     return std.mem.eql(u8, str1, str2);
@@ -19,7 +21,7 @@ fn endsWith(str1: []const u8, str2: []const u8) bool {
 }
 
 test {
-    try runTestFile("test/html5lib-tests/tree-construction/tests5.dat");
+    try runTestFile("test/html5lib-tests/tree-construction/tests15.dat");
 }
 
 fn runTestFile(file_path: []const u8) !void {
@@ -31,13 +33,26 @@ fn runTestFile(file_path: []const u8) !void {
     defer allocator.free(contents);
 
     var tests = std.mem.split(u8, contents[0 .. contents.len - 1], "\n\n");
+    var count: usize = 1;
     while (tests.next()) |t| {
-        try printTest(t, allocator);
-        std.debug.print("\n", .{});
+        std.debug.print("Test {}\n", .{count});
+        const the_test = try createTest(t, allocator);
+        try runTest(the_test, allocator);
     }
 }
 
-fn printTest(test_string: []const u8, allocator: *Allocator) !void {
+const Test = struct {
+    input: []const u8,
+    errors: usize,
+    new_errors: usize,
+    fragment: ?[]const u8,
+    script: ScriptOption,
+    expected_dom: Dom.Dom,
+
+    const ScriptOption = enum { on, off, both };
+};
+
+fn createTest(test_string: []const u8, allocator: *Allocator) !Test {
     var lines = std.mem.split(u8, test_string, "\n");
     var section = lines.next().?;
 
@@ -48,7 +63,7 @@ fn printTest(test_string: []const u8, allocator: *Allocator) !void {
     }
     if (data.len > 0) data.len -= 1;
     section = lines.next().?;
-    std.debug.print("#data\n{s}\n", .{data});
+    //std.debug.print("#data\n{s}\n", .{data});
 
     assert(eql(section, "#errors"));
     var errors: []const u8 = lines.rest()[0..0];
@@ -56,7 +71,7 @@ fn printTest(test_string: []const u8, allocator: *Allocator) !void {
         errors.len += lines.next().?.len + 1;
     }
     section = lines.next().?;
-    std.debug.print("#errors\n{s}", .{errors});
+    //std.debug.print("#errors\n{s}", .{errors});
 
     var new_errors: []const u8 = lines.rest()[0..0];
     if (startsWith(section, "#new-errors")) {
@@ -65,7 +80,7 @@ fn printTest(test_string: []const u8, allocator: *Allocator) !void {
             new_errors.len += lines.next().?.len + 1;
         }
         section = lines.next().?;
-        std.debug.print("#new-errors\n{s}", .{new_errors});
+        //std.debug.print("#new-errors\n{s}", .{new_errors});
     }
 
     var document_fragment: []const u8 = lines.rest()[0..0];
@@ -73,10 +88,10 @@ fn printTest(test_string: []const u8, allocator: *Allocator) !void {
         _ = lines.next();
         document_fragment = lines.next().?;
         section = lines.next().?;
-        std.debug.print("#document-fragment\n{s}\n", .{document_fragment});
+        //std.debug.print("#document-fragment\n{s}\n", .{document_fragment});
     }
 
-    var script: enum { on, off, both } = .both;
+    var script: Test.ScriptOption = .both;
     if (startsWith(section, "#script")) {
         if (eql(section, "#script-off")) {
             script = .off;
@@ -87,15 +102,24 @@ fn printTest(test_string: []const u8, allocator: *Allocator) !void {
         }
         section = lines.next().?;
     }
-    std.debug.print("#script-{s}\n", .{@tagName(script)});
+    //std.debug.print("#script-{s}\n", .{@tagName(script)});
 
     assert(eql(section, "#document"));
     var document: []const u8 = lines.rest();
-    std.debug.print("#document\n{s}\n", .{document});
+    //std.debug.print("#document\n{s}\n", .{document});
 
     var dom = try parseDomTree(document, allocator);
-    var stdout = std.io.getStdOut().writer();
-    try Dom.printDom(dom, stdout, allocator);
+    //var stderr = std.io.getStdErr().writer();
+    //try Dom.printDom(dom, stderr, allocator);
+
+    return Test{
+        .input = data,
+        .errors = std.mem.count(u8, errors, "\n"),
+        .new_errors = std.mem.count(u8, new_errors, "\n"),
+        .fragment = if (document_fragment.len > 0) document_fragment else null,
+        .script = script,
+        .expected_dom = dom,
+    };
 }
 
 fn parseDomTree(string: []const u8, allocator: *Allocator) !Dom.Dom {
@@ -150,30 +174,27 @@ fn parseDomTree(string: []const u8, allocator: *Allocator) !Dom.Dom {
             const tag_name = data[1 .. data.len - 1];
 
             var namespace: Dom.WhatWgNamespace = undefined;
-            var namespace_prefix: ?[]u8 = undefined;
-            var local_name: []u8 = undefined;
+            var namespace_prefix: ?[]u8 = null;
+            errdefer if (namespace_prefix) |ns| allocator.free(ns);
+            var local_name: []u8 = "";
+            errdefer allocator.free(local_name);
             var element_type: Dom.ElementType = undefined;
+
             if (startsWith(tag_name, "svg ")) {
                 namespace = .svg;
                 namespace_prefix = try allocator.dupe(u8, "svg");
-                errdefer allocator.free(namespace_prefix.?);
                 local_name = try allocator.dupe(u8, tag_name[4..]);
                 element_type = unreachable;
             } else if (startsWith(tag_name, "math ")) {
                 namespace = .mathml;
                 namespace_prefix = try allocator.dupe(u8, "math");
-                errdefer allocator.free(namespace_prefix.?);
                 local_name = try allocator.dupe(u8, tag_name[5..]);
                 element_type = unreachable;
             } else {
                 namespace = .html;
                 namespace_prefix = null;
                 local_name = try allocator.dupe(u8, tag_name);
-                element_type = Dom.ElementType.fromStringHtml(local_name).?;
-            }
-            errdefer {
-                if (namespace_prefix) |ns| allocator.free(ns);
-                allocator.free(local_name);
+                element_type = Dom.ElementType.fromStringHtml(local_name) orelse @panic("Unknown HTML element or custom element");
             }
 
             const element = Dom.Element{
@@ -217,4 +238,40 @@ fn parseDomTree(string: []const u8, allocator: *Allocator) !Dom.Dom {
     }
 
     return dom;
+}
+
+fn runTest(t: Test, allocator: *Allocator) !void {
+    // TODO: Fragment tests
+    if (t.fragment != null) return;
+
+    const input = input: {
+        var list = ArrayList(u21).init(allocator);
+        errdefer list.deinit();
+        var i: usize = 0;
+        while (i < t.input.len) {
+            const len = std.unicode.utf8ByteSequenceLength(t.input[i]) catch unreachable;
+            const value = std.unicode.utf8Decode(t.input[i .. i + len]) catch unreachable;
+            try list.append(value);
+            i += len;
+        }
+        break :input list.toOwnedSlice();
+    };
+
+    var tokens = ArrayList(Tokenizer.Token).init(allocator);
+    defer tokens.deinit();
+
+    var parse_errors = ArrayList(Tokenizer.ParseError).init(allocator);
+    defer parse_errors.deinit();
+
+    var tokenizer = Tokenizer.init(input, allocator, &tokens, &parse_errors);
+    defer tokenizer.deinit();
+
+    while (try tokenizer.run()) {}
+
+    var result_dom = Dom.Dom{};
+    var constructor = TreeConstructor.init(&result_dom, allocator);
+
+    for (tokens.items) |token| {
+        try constructor.run(token);
+    }
 }

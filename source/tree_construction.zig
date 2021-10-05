@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
-const html5 = @import("html5");
+const html5 = @import("../html5.zig");
 
 const Tokenizer = html5.Tokenizer;
 const Token = Tokenizer.Token;
@@ -33,7 +33,7 @@ const ParentNode = union(enum) {
     element: *Element,
 };
 
-const TreeConstructor = struct {
+pub const TreeConstructor = struct {
     dom: *Dom.Dom,
     allocator: *Allocator,
 
@@ -60,14 +60,14 @@ const TreeConstructor = struct {
         not_ok,
     };
 
-    fn init(dom: *Dom.Dom, allocator: *Allocator) TreeConstructor {
+    pub fn init(dom: *Dom.Dom, allocator: *Allocator) TreeConstructor {
         return TreeConstructor{
             .dom = dom,
             .allocator = allocator,
         };
     }
 
-    fn run(self: *TreeConstructor, token: Token) !void {
+    pub fn run(self: *TreeConstructor, token: Token) !void {
         if (self.ignore_next_lf_token) {
             self.ignore_next_lf_token = false;
             if (token == .character and token.character.data == '\n') return;
@@ -76,7 +76,6 @@ const TreeConstructor = struct {
         var should_process = true;
         while (should_process) {
             self.reprocess = false;
-            // TODO: Must call dispatcher instead.
             try dispatcher(self, token);
             should_process = self.reprocess;
         }
