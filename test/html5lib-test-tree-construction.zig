@@ -173,7 +173,7 @@ fn parseDomTree(string: []const u8, allocator: *Allocator) !Dom.Dom {
             assert(data[data.len - 1] == '>');
             const tag_name = data[1 .. data.len - 1];
 
-            var namespace: Dom.WhatWgNamespace = undefined;
+            var namespace: Dom.Namespace = undefined;
             var namespace_prefix: ?[]u8 = null;
             errdefer if (namespace_prefix) |ns| allocator.free(ns);
             var local_name: []u8 = "";

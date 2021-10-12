@@ -26,11 +26,60 @@ const ElementType = Dom.ElementType;
 const CharacterData = Dom.CharacterData;
 const CharacterDataInterface = Dom.CharacterDataInterface;
 
+test {
+    const allocator = std.heap.page_allocator;
+
+    const string = "<!doctype><html>asdf</body hello=world>";
+    const input = &decodeComptimeString(string);
+
+    var all_tokens = std.ArrayList(Token).init(allocator);
+    defer {
+        for (all_tokens.items) |*t| t.deinit(allocator);
+        all_tokens.deinit();
+    }
+
+    var all_parse_errors = std.ArrayList(Tokenizer.ParseError).init(allocator);
+    defer all_parse_errors.deinit();
+
+    var tokenizer = Tokenizer.init(input, allocator, &all_tokens, &all_parse_errors);
+    defer tokenizer.deinit();
+
+    while (try tokenizer.run()) {}
+
+    var dom = Dom.Dom{};
+    var constructor = TreeConstructor.init(&dom, allocator);
+    for (all_tokens.items) |token| {
+        const run_result = try constructor.run(token);
+        if (run_result.new_tokenizer_state != null) @panic("TODO: Changing the tokenizer state.");
+    }
+}
+
+fn decodeComptimeStringLen(comptime string: []const u8) usize {
+    var i: usize = 0;
+    var decoded_len: usize = 0;
+    while (i < string.len) {
+        i += std.unicode.utf8ByteSequenceLength(string[i]) catch unreachable;
+        decoded_len += 1;
+    }
+    return decoded_len;
+}
+
+fn decodeComptimeString(comptime string: []const u8) [decodeComptimeStringLen(string)]u21 {
+    var result: [decodeComptimeStringLen(string)]u21 = undefined;
+    if (result.len == 0) return result;
+    var decoded_it = std.unicode.Utf8View.initComptime(string).iterator();
+    var i: usize = 0;
+    while (decoded_it.nextCodepoint()) |codepoint| {
+        result[i] = codepoint;
+        i += 1;
+    }
+    return result;
+}
+
 const report_parse_errors = true;
 
-const ParentNode = union(enum) {
-    document: *Document,
-    element: *Element,
+const RunResult = struct {
+    new_tokenizer_state: ?Tokenizer.State = null,
 };
 
 pub const TreeConstructor = struct {
@@ -40,7 +89,9 @@ pub const TreeConstructor = struct {
     insertion_mode: InsertionMode = .Initial,
     original_insertion_mode: InsertionMode = undefined,
     open_elements: ArrayListUnmanaged(*Dom.Element) = .{},
-    active_formatting_elements: ArrayListUnmanaged(*Dom.Element) = .{},
+    active_formatting_elements: ArrayListUnmanaged(FormattingElement) = .{},
+    active_formatting_element_original_attributes: ArrayListUnmanaged(Dom.ElementAttributes) = .{},
+    index_of_last_marker: ?usize = null,
     template_insertion_modes: ArrayListUnmanaged(InsertionMode) = .{},
     head_element_pointer: ?*Dom.Element = null,
     form_element_pointer: ?*Dom.Element = null,
@@ -54,6 +105,7 @@ pub const TreeConstructor = struct {
     frameset_ok: FramesetOk = .ok,
     scripting: bool = false,
     foster_parenting: bool = false,
+    new_tokenizer_state: ?Tokenizer.State = null,
 
     const FramesetOk = enum {
         ok,
@@ -67,10 +119,12 @@ pub const TreeConstructor = struct {
         };
     }
 
-    pub fn run(self: *TreeConstructor, token: Token) !void {
+    pub fn run(self: *TreeConstructor, token: Token) !RunResult {
+        var result = RunResult{};
+
         if (self.ignore_next_lf_token) {
             self.ignore_next_lf_token = false;
-            if (token == .character and token.character.data == '\n') return;
+            if (token == .character and token.character.data == '\n') return result;
         }
 
         var should_process = true;
@@ -79,45 +133,11 @@ pub const TreeConstructor = struct {
             try dispatcher(self, token);
             should_process = self.reprocess;
         }
-    }
 
-    fn changeTo(self: *TreeConstructor, insertion_mode: InsertionMode) void {
-        self.insertion_mode = insertion_mode;
-        std.debug.print("Change to: {s}\n", .{@tagName(insertion_mode)});
-    }
+        result.new_tokenizer_state = self.new_tokenizer_state;
+        self.new_tokenizer_state = null;
 
-    fn changeToOriginalInsertionMode(self: *TreeConstructor) void {
-        self.changeTo(self.original_insertion_mode);
-        self.original_insertion_mode = undefined;
-    }
-
-    fn reprocessIn(self: *TreeConstructor, insertion_mode: InsertionMode) void {
-        self.reprocess = true;
-        self.insertion_mode = insertion_mode;
-        std.debug.print("Reprocess in: {s}\n", .{@tagName(insertion_mode)});
-    }
-
-    fn reprocessInOriginalInsertionMode(self: *TreeConstructor) void {
-        self.reprocessIn(self.original_insertion_mode);
-        self.original_insertion_mode = undefined;
-    }
-
-    fn stop(self: *TreeConstructor) void {
-        // TODO: Stopping parsing has more steps.
-        self.stopped = true;
-        std.debug.print("Stopped parsing.", .{});
-    }
-
-    fn currentNode(self: *TreeConstructor) *Element {
-        return self.open_elements.items[self.open_elements.items.len - 1];
-    }
-
-    fn adjustedCurrentNode(self: *TreeConstructor) *Element {
-        if (self.is_fragment_parser and self.open_elements.items.len == 1) {
-            @panic("TODO: Adjusted current node, fragment case");
-        } else {
-            return self.currentNode();
-        }
+        return result;
     }
 };
 
@@ -152,11 +172,47 @@ const ParseError = enum {
     NonVoidHtmlElementStartTagWithTrailingSolidus,
 };
 
+fn changeTo(c: *TreeConstructor, insertion_mode: InsertionMode) void {
+    c.insertion_mode = insertion_mode;
+    std.debug.print("Change to: {s}\n", .{@tagName(insertion_mode)});
+}
+
+fn changeToOriginalInsertionMode(c: *TreeConstructor) void {
+    changeTo(c, c.original_insertion_mode);
+    c.original_insertion_mode = undefined;
+}
+
+fn changeToAndSetOriginalInsertionMode(c: *TreeConstructor, insertion_mode: InsertionMode, original_insertion_mode: InsertionMode) void {
+    c.original_insertion_mode = original_insertion_mode;
+    changeTo(c, insertion_mode);
+}
+
+fn reprocessIn(c: *TreeConstructor, insertion_mode: InsertionMode) void {
+    c.reprocess = true;
+    c.insertion_mode = insertion_mode;
+    std.debug.print("Reprocess in: {s}\n", .{@tagName(insertion_mode)});
+}
+
+fn reprocessInOriginalInsertionMode(c: *TreeConstructor) void {
+    reprocessIn(c, c.original_insertion_mode);
+    c.original_insertion_mode = undefined;
+}
+
+fn stop(c: *TreeConstructor) void {
+    // TODO: Stopping parsing has more steps.
+    c.stopped = true;
+    std.debug.print("Stopped parsing.", .{});
+}
+
+fn setTokenizerState(c: *TreeConstructor, state: Tokenizer.State) void {
+    c.new_tokenizer_state = state;
+}
+
 fn dispatcher(c: *TreeConstructor, token: Token) !void {
     if (c.open_elements.items.len == 0) return processToken(c, token);
 
-    const adjusted_current_node = c.adjustedCurrentNode();
-    if (adjusted_current_node.namespace == .html or
+    const adjusted_current_node = adjustedCurrentNode(c);
+    if (adjusted_current_node.namespace() == .html or
         token == .eof
     // TODO: or a bunch of other stuff according to the "tree construction dispatcher" in section 13.2.6
     ) try processToken(c, token) else processTokenForeignContent(c, token);
@@ -190,7 +246,7 @@ pub fn processToken(c: *TreeConstructor, token: Token) !void {
             } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"head"})) {
                 const node = try insertHtmlElementForTheToken(c, token.start_tag);
                 c.head_element_pointer = node;
-                c.changeTo(.InHead);
+                changeTo(c, .InHead);
             } else if (token == .end_tag and
                 // End tags with these names will be handled in the final else case.
                 !strEqlAny(token.end_tag.name, &.{ "head", "body", "html", "br" }))
@@ -204,7 +260,7 @@ pub fn processToken(c: *TreeConstructor, token: Token) !void {
                     .self_closing = false,
                 });
                 c.head_element_pointer = node;
-                c.reprocessIn(.InHead);
+                reprocessIn(c, .InHead);
             }
         },
         .InHead => try inHead(c, token),
@@ -222,24 +278,19 @@ pub fn processToken(c: *TreeConstructor, token: Token) !void {
             } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"body"})) {
                 _ = try insertHtmlElementForTheToken(c, token.start_tag);
                 c.frameset_ok = .not_ok;
-                c.changeTo(.InBody);
+                changeTo(c, .InBody);
             } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"frameset"})) {
                 _ = try insertHtmlElementForTheToken(c, token.start_tag);
-                c.changeTo(.InFrameset);
+                changeTo(c, .InFrameset);
             } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{ "base", "basefont", "bgsound", "link", "meta", "noframes", "script", "style", "template", "title" })) {
                 parseError(.Generic);
                 if (c.head_element_pointer) |head| {
                     try c.open_elements.append(c.allocator, head);
                     try inHead(c, token);
-                    // Remove the node pointed to by the head element pointer from the stack of open elements.
-                    for (c.open_elements.items) |e, i| {
-                        if (e == c.head_element_pointer.?) {
-                            _ = c.open_elements.orderedRemove(i);
-                        }
-                    }
+                    removeFromStackOfOpenElements(c, c.head_element_pointer.?);
                 } else unreachable;
             } else if (token == .end_tag and strEqlAny(token.end_tag.name, &.{"template"})) {
-                processInHeadTemplateEndTag(c, token.end_tag);
+                inHeadEndTagTemplate(c, token.end_tag);
             } else if (token == .end_tag and strEqlAny(token.end_tag.name, &.{ "body", "html", "br" })) {
                 // NOTE: Same as "anything else".
                 _ = try insertHtmlElementForTheToken(c, TokenStartTag{
@@ -247,7 +298,7 @@ pub fn processToken(c: *TreeConstructor, token: Token) !void {
                     .attributes = .{},
                     .self_closing = false,
                 });
-                c.reprocessIn(.InBody);
+                reprocessIn(c, .InBody);
             } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"head"}) or token == .end_tag) {
                 parseError(.Generic);
                 // Ignore the token.
@@ -257,7 +308,7 @@ pub fn processToken(c: *TreeConstructor, token: Token) !void {
                     .attributes = .{},
                     .self_closing = false,
                 });
-                c.reprocessIn(.InBody);
+                reprocessIn(c, .InBody);
             }
         },
         .InBody => try inBody(c, token),
@@ -291,7 +342,7 @@ fn initial(c: *TreeConstructor, token: Token) !void {
         },
         .comment => |comment| try insertCommentToDocument(c, comment),
         .doctype => |d| {
-            if ((d.name != null and !strEqlAny(d.name.?, &.{"html"})) or (d.public_identifier != null) or (d.system_identifier != null and !strEqlAny(d.system_identifier.?, &.{"about:legacy-compat"}))) {
+            if (!eqlNullStrings(d.name, "html") or (d.public_identifier != null) or (d.system_identifier != null and !strEql(d.system_identifier.?, "about:legacy-compat"))) {
                 parseError(.Generic);
             }
 
@@ -308,7 +359,7 @@ fn initial(c: *TreeConstructor, token: Token) !void {
             }
 
             _ = try c.dom.document.insertDocumentType(c.allocator, d.name, d.public_identifier, d.system_identifier);
-            c.changeTo(.BeforeHtml);
+            changeTo(c, .BeforeHtml);
         },
         else => initialAnythingElse(c),
     }
@@ -321,7 +372,7 @@ fn initialAnythingElse(c: *TreeConstructor) void {
     if (!c.parser_cannot_change_the_mode) {
         c.dom.document.quirks_mode = .quirks;
     }
-    c.reprocessIn(.BeforeHtml);
+    reprocessIn(c, .BeforeHtml);
 }
 
 fn beforeHtml(c: *TreeConstructor, token: Token) !void {
@@ -339,11 +390,11 @@ fn beforeHtml(c: *TreeConstructor, token: Token) !void {
             }
         },
         .start_tag => |start_tag| {
-            if (strEqlAny(start_tag.name, &.{"html"})) {
+            if (strEql(start_tag.name, "html")) {
                 const element = try createAnElementForTheToken(c, start_tag, .html, .{ .document = &c.dom.document });
                 const element_ptr = c.dom.document.insertElement(element);
                 try c.open_elements.append(c.allocator, element_ptr);
-                c.changeTo(.BeforeHead);
+                changeTo(c, .BeforeHead);
             } else {
                 try beforeHtmlAnythingElse(c);
             }
@@ -361,19 +412,14 @@ fn beforeHtml(c: *TreeConstructor, token: Token) !void {
 }
 
 fn beforeHtmlAnythingElse(c: *TreeConstructor) !void {
-    const local_name = try c.allocator.dupe(u8, "html");
-    errdefer c.allocator.free(local_name);
     const element = c.dom.document.insertElement(Dom.Element{
-        .attributes = .{},
-        .namespace = .html,
-        .namespace_prefix = null,
-        .local_name = local_name,
-        .is = null,
         .element_type = .html_html,
+        .attributes = .{},
+        .is = null,
         .children = .{},
     });
     try c.open_elements.append(c.allocator, element);
-    c.reprocessIn(.BeforeHead);
+    reprocessIn(c, .BeforeHead);
 }
 
 fn inHead(c: *TreeConstructor, token: Token) !void {
@@ -413,43 +459,41 @@ fn inHead(c: *TreeConstructor, token: Token) !void {
         //     }
         // }
     } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"title"})) {
-        @panic("TODO generic RCDATA element parsing algorithm");
-        // RCDATAParseElement();
+        try textParsingAlgorithm(.RCDATA, c, token.start_tag);
     } else if ((token == .start_tag and strEqlAny(token.start_tag.name, &.{"noscript"}) and c.scripting == true) or
         (token == .start_tag and strEqlAny(token.start_tag.name, &.{ "noframes", "style" })))
     {
-        @panic("TODO generic raw text element parsing algorithm");
-        // RAWTEXTParseElement();
+        try textParsingAlgorithm(.RAWTEXT, c, token.start_tag);
     } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"noscript"}) and c.scripting == false) {
         _ = try insertHtmlElementForTheToken(c, token.start_tag);
-        c.changeTo(.InHeadNoscript);
+        changeTo(c, .InHeadNoscript);
     } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"script"})) {
         @panic("TODO script start tag in InHead");
     } else if (token == .end_tag and strEqlAny(token.end_tag.name, &.{"head"})) {
         // NOTE: NOT the same as "anything else".
         const current_node = c.open_elements.pop();
         assert(current_node.element_type == .html_head);
-        c.changeTo(.AfterHead);
+        changeTo(c, .AfterHead);
     } else if (token == .end_tag and strEqlAny(token.end_tag.name, &.{ "body", "html", "br" })) {
         // NOTE: Same as "anything else".
         const current_node = c.open_elements.pop();
         assert(current_node.element_type == .html_head);
-        c.reprocessIn(.AfterHead);
+        reprocessIn(c, .AfterHead);
     } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"template"})) {
         @panic("TODO template start tag in InHead");
     } else if (token == .end_tag and strEqlAny(token.end_tag.name, &.{"template"})) {
-        processInHeadTemplateEndTag(c, token.end_tag);
+        inHeadEndTagTemplate(c, token.end_tag);
     } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"head"}) or token == .end_tag) {
         parseError(.Generic);
         // Ignore the token.
     } else {
         const current_node = c.open_elements.pop();
         assert(current_node.element_type == .html_head);
-        c.reprocessIn(.AfterHead);
+        reprocessIn(c, .AfterHead);
     }
 }
 
-fn processInHeadTemplateEndTag(c: *TreeConstructor, end_tag: TokenEndTag) void {
+fn inHeadEndTagTemplate(c: *TreeConstructor, end_tag: TokenEndTag) void {
     _ = c;
     _ = end_tag;
     @panic("TODO template end tag in InHead");
@@ -459,17 +503,6 @@ fn inTemplate(c: *TreeConstructor, token: Token) void {
     _ = c;
     _ = token;
     @panic("TODO InTemplate insertion mode");
-}
-
-fn acknowledgeSelfClosingFlag(c: *TreeConstructor) void {
-    // NOTE: The self-closing flag is acknowledged in the following insertion modes:
-    // In head
-    // In body
-    // In table
-    // In column group
-    // In frameset
-    // Foreign content
-    c.self_closing_flag_acknowledged = true;
 }
 
 fn inBody(c: *TreeConstructor, token: Token) !void {
@@ -494,7 +527,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 inTemplate(c, token);
             } else {
                 checkValidInBodyEndTag(c);
-                c.stop();
+                stop(c);
             }
         },
         .start_tag => |start_tag| {
@@ -507,10 +540,8 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 parseError(.Generic);
                 if (c.open_elements.items.len == 1 or
                     (c.open_elements.items.len > 1 and c.open_elements.items[1].element_type != .html_body) or
-                    for (c.open_elements.items) |e|
+                    stackOfOpenElementsHas(c, .html_template))
                 {
-                    if (e.element_type == .html_template) break true;
-                } else false) {
                     assert(c.is_fragment_parser);
                     // Ignore the token.
                 } else {
@@ -536,7 +567,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     // second.detachFromParent();
                     // c.open_elements.shrinkRetainingCapacity(1);
                     // _ = try insertHtmlElementForTheToken(c, token);
-                    // c.changeTo(.InFrameset);
+                    // changeTo(c, .InFrameset);
                 }
             } else if (strEqlAny(start_tag.name, &.{
                 "address",
@@ -564,22 +595,22 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 "summary",
                 "ul",
             })) {
-                if (hasElementInButtonScope(c, .html_p)) {
+                if (hasElementInButtonScope(c, ElementType.html_p)) {
                     closePElement(c);
                 }
                 _ = try insertHtmlElementForTheToken(c, start_tag);
             } else if (strEqlAny(start_tag.name, &.{ "h1", "h2", "h3", "h4", "h5", "h6" })) {
-                if (hasElementInButtonScope(c, .html_p)) {
+                if (hasElementInButtonScope(c, ElementType.html_p)) {
                     closePElement(c);
                 }
-                const current_node = c.currentNode();
-                if (current_node.namespace == .html and strEqlAny(current_node.local_name, &.{ "h1", "h2", "h3", "h4", "h5", "h6" })) {
+                const current_node = currentNode(c);
+                if (current_node.namespace() == .html and elemTypeEqlAny(current_node.element_type, &.{ .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 })) {
                     parseError(.Generic);
                     _ = c.open_elements.pop();
                 }
                 _ = try insertHtmlElementForTheToken(c, start_tag);
             } else if (strEqlAny(start_tag.name, &.{ "pre", "listing" })) {
-                if (hasElementInButtonScope(c, .html_p)) {
+                if (hasElementInButtonScope(c, ElementType.html_p)) {
                     closePElement(c);
                 }
                 _ = try insertHtmlElementForTheToken(c, start_tag);
@@ -591,7 +622,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     parseError(.Generic);
                     // Ignore the token.
                 } else {
-                    if (hasElementInButtonScope(c, .html_p)) {
+                    if (hasElementInButtonScope(c, ElementType.html_p)) {
                         closePElement(c);
                     }
                     const element = try insertHtmlElementForTheToken(c, start_tag);
@@ -602,12 +633,11 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
             } else if (strEqlAny(start_tag.name, &.{"li"})) {
                 c.frameset_ok = .not_ok;
                 var index = c.open_elements.items.len;
-                var node = c.open_elements.items[index - 1];
-                // TODO: Rewrite this.
                 while (true) {
+                    const node = c.open_elements.items[index - 1];
                     if (node.element_type == .html_li) {
                         generateImpliedEndTags(c, .html_li);
-                        if (c.currentNode().element_type != .html_li) {
+                        if (currentNode(c).element_type != .html_li) {
                             parseError(.Generic);
                         }
                         while (c.open_elements.pop().element_type != .html_li) {}
@@ -616,13 +646,140 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                         break;
                     } else {
                         index -= 1;
-                        node = c.open_elements.items[index - 1];
                     }
                 }
+                if (hasElementInButtonScope(c, ElementType.html_p)) {
+                    closePElement(c);
+                }
+                _ = try insertHtmlElementForTheToken(c, start_tag);
+            } else if (strEqlAny(start_tag.name, &.{ "dd", "dt" })) {
+                c.frameset_ok = .not_ok;
+                var index = c.open_elements.items.len;
+                while (true) {
+                    const node = c.open_elements.items[index - 1];
+                    if (node.element_type == .html_dd) {
+                        generateImpliedEndTags(c, .html_dd);
+                        if (currentNode(c).element_type != .html_dd) {
+                            parseError(.Generic);
+                        }
+                        while (c.open_elements.pop().element_type != .html_dd) {}
+                        break;
+                    } else if (node.element_type == .html_dt) {
+                        generateImpliedEndTags(c, .html_dt);
+                        if (currentNode(c).element_type != .html_dt) {
+                            parseError(.Generic);
+                        }
+                        while (c.open_elements.pop().element_type != .html_dt) {}
+                        break;
+                    } else if (isSpecialElement(node.element_type) and node.element_type != .html_address and node.element_type != .html_div and node.element_type != .html_p) {
+                        break;
+                    } else {
+                        index -= 1;
+                    }
+                }
+                if (hasElementInButtonScope(c, ElementType.html_p)) {
+                    closePElement(c);
+                }
+                _ = try insertHtmlElementForTheToken(c, start_tag);
+            } else if (strEql(start_tag.name, "plaintext")) {
+                if (hasElementInButtonScope(c, ElementType.html_p)) {
+                    closePElement(c);
+                }
+                _ = try insertHtmlElementForTheToken(c, start_tag);
+                // TODO: Special case this?
+                setTokenizerState(c, .PLAINTEXT);
+            } else if (strEql(start_tag.name, "button")) {
+                if (hasElementInScope(c, ElementType.html_button)) {
+                    parseError(.Generic);
+                    generateImpliedEndTags(c, null);
+                    while (c.open_elements.pop().element_type != .html_button) {}
+                }
+                reconstructActiveFormattingElements(c);
+                _ = try insertHtmlElementForTheToken(c, start_tag);
+                c.frameset_ok = .not_ok;
+            } else if (strEql(start_tag.name, "a")) {
+                const begin = if (c.index_of_last_marker) |lm| lm + 1 else 0;
+                for (c.active_formatting_elements.items[begin..]) |fe, i| {
+                    if (fe.element.element_type == .html_a) {
+                        parseError(.Generic);
+                        const removed = adoptionAgencyAlgorithm(c, start_tag.name);
+                        if (!removed) removeFromStackOfOpenElements(c, fe.element);
+                        removeFromListOfActiveFormattingElements(c, begin + i);
+                        break;
+                    }
+                }
+                reconstructActiveFormattingElements(c);
+                const element = try insertHtmlElementForTheToken(c, start_tag);
+                try pushOntoListOfActiveFormattingElements(c, element);
+            } else if (strEqlAny(start_tag.name, &.{ "b", "big", "code", "em", "font", "i", "s", "small", "strike", "strong", "tt", "u" })) {
+                reconstructActiveFormattingElements(c);
+                const element = try insertHtmlElementForTheToken(c, start_tag);
+                try pushOntoListOfActiveFormattingElements(c, element);
+            } else if (strEql(start_tag.name, "nobr")) {
+                reconstructActiveFormattingElements(c);
+                if (hasElementInScope(c, ElementType.html_nobr)) {
+                    parseError(.Generic);
+                    _ = adoptionAgencyAlgorithm(c, start_tag.name);
+                    reconstructActiveFormattingElements(c);
+                }
+                const element = try insertHtmlElementForTheToken(c, start_tag);
+                try pushOntoListOfActiveFormattingElements(c, element);
+            } else if (strEqlAny(start_tag.name, &.{ "applet", "marquee", "object" })) {
+                reconstructActiveFormattingElements(c);
+                _ = try insertHtmlElementForTheToken(c, start_tag);
+                try insertAMarker(c);
+                c.frameset_ok = .not_ok;
+            } else if (strEql(start_tag.name, "table")) {
+                if (c.dom.document.quirks_mode != .quirks and !hasElementInButtonScope(c, .html_p)) {
+                    closePElement(c);
+                }
+                _ = try insertHtmlElementForTheToken(c, start_tag);
+                c.frameset_ok = .not_ok;
+                changeTo(c, .InTable);
+            } else if (strEqlAny(start_tag.name, &.{ "area", "br", "embed", "img", "keygen", "wbr" })) {
+                reconstructActiveFormattingElements(c);
+                _ = try insertHtmlElementForTheToken(c, start_tag);
+                _ = c.open_elements.pop();
+                acknowledgeSelfClosingFlag(c);
+                c.frameset_ok = .not_ok;
+            } else if (strEql(start_tag.name, "input")) {
+                reconstructActiveFormattingElements(c);
+                _ = try insertHtmlElementForTheToken(c, start_tag);
+                _ = c.open_elements.pop();
+                acknowledgeSelfClosingFlag(c);
+                const @"type" = start_tag.attributes.get("type");
+                if (@"type" == null or strEql(@"type".?, "hidden")) {
+                    c.frameset_ok = .not_ok;
+                }
+            } else if (strEqlAny(start_tag.name, &.{ "param", "source", "track" })) {
+                _ = try insertHtmlElementForTheToken(c, start_tag);
+                _ = c.open_elements.pop();
+                acknowledgeSelfClosingFlag(c);
+            } else if (strEql(start_tag.name, "hr")) {
                 if (hasElementInButtonScope(c, .html_p)) {
                     closePElement(c);
                 }
                 _ = try insertHtmlElementForTheToken(c, start_tag);
+                _ = c.open_elements.pop();
+                acknowledgeSelfClosingFlag(c);
+                c.frameset_ok = .not_ok;
+            } else if (strEql(start_tag.name, "image")) {
+                parseError(.Generic);
+                reconstructActiveFormattingElements(c);
+                _ = try insertHtmlElementForTheToken(c, TokenStartTag{
+                    .name = "img",
+                    .attributes = start_tag.attributes,
+                    .self_closing = start_tag.self_closing,
+                });
+                _ = c.open_elements.pop();
+                acknowledgeSelfClosingFlag(c);
+                c.frameset_ok = .not_ok;
+            } else if (strEql(start_tag.name, "textarea")) {
+                _ = try insertHtmlElementForTheToken(c, start_tag);
+                c.ignore_next_lf_token = true;
+                setTokenizerState(c, .RCDATA);
+                c.frameset_ok = .not_ok;
+                changeToAndSetOriginalInsertionMode(c, .Text, c.insertion_mode);
             } else {
                 @panic("TODO InBody insertion mode is incomplete");
             }
@@ -632,21 +789,153 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 // TODO: Jump straight to the appropriate handler.
                 try inHead(c, token);
             } else if (strEqlAny(end_tag.name, &.{"body"})) {
-                if (!hasElementInScope(c, .html_body)) {
+                if (!hasElementInScope(c, ElementType.html_body)) {
                     parseError(.Generic);
                     // Ignore the token.
                 } else {
                     checkValidInBodyEndTag(c);
-                    c.changeTo(.AfterBody);
+                    changeTo(c, .AfterBody);
                 }
             } else if (strEqlAny(end_tag.name, &.{"html"})) {
-                if (!hasElementInScope(c, .html_body)) {
+                if (!hasElementInScope(c, ElementType.html_body)) {
                     parseError(.Generic);
                     // Ignore the token.
                 } else {
                     checkValidInBodyEndTag(c);
-                    c.reprocessIn(.AfterBody);
+                    reprocessIn(c, .AfterBody);
                 }
+            } else if (strEqlAny(end_tag.name, &.{
+                "address", "article",  "aside",      "blockquote", "button",
+                "center",  "details",  "dialog",     "dir",        "div",
+                "dl",      "fieldset", "figcaption", "figure",     "footer",
+                "header",  "hgroup",   "listing",    "main",       "menu",
+                "nav",     "ol",       "pre",        "section",    "summary",
+                "ul",
+            })) {
+                const element_type = Dom.ElementType.fromStringHtml(end_tag.name).?;
+                if (!hasElementInScope(c, element_type)) {
+                    parseError(.Generic);
+                    // Ignore the token.
+                } else {
+                    generateImpliedEndTags(c, null);
+                    if (currentNode(c).element_type != element_type) {
+                        parseError(.Generic);
+                    }
+                    while (c.open_elements.pop().element_type != element_type) {}
+                }
+            } else if (strEql(end_tag.name, "form")) {
+                if (stackOfOpenElementsHas(c, .html_template)) {
+                    const form = c.form_element_pointer;
+                    c.form_element_pointer = null;
+
+                    if (form == null or !hasElementInScope(c, form.?)) {
+                        parseError(.Generic);
+                        // Ignore the token;
+                        return;
+                    }
+                    // form is not null at this point.
+
+                    generateImpliedEndTags(c, null);
+                    if (currentNode(c) != form.?) {
+                        parseError(.Generic);
+                    }
+                    removeFromStackOfOpenElements(c, form.?);
+                } else {
+                    if (!hasElementInScope(c, ElementType.html_form)) {
+                        parseError(.Generic);
+                        // Ignore the token.
+                        return;
+                    }
+                    generateImpliedEndTags(c, null);
+                    if (currentNode(c).element_type != .html_form) {
+                        parseError(.Generic);
+                    }
+                    while (c.open_elements.pop().element_type != .html_form) {}
+                }
+            } else if (strEql(end_tag.name, "p")) {
+                if (!hasElementInButtonScope(c, ElementType.html_p)) {
+                    parseError(.Generic);
+                    _ = try insertHtmlElementForTheToken(c, TokenStartTag{
+                        .name = "p",
+                        .attributes = .{},
+                        .self_closing = false,
+                    });
+                    closePElement(c);
+                }
+            } else if (strEql(end_tag.name, "li")) {
+                if (!hasElementInListItemScope(c, ElementType.html_li)) {
+                    parseError(.Generic);
+                    // Ignore the token.
+                } else {
+                    generateImpliedEndTags(c, .html_li);
+                    if (currentNode(c).element_type != .html_li) {
+                        parseError(.Generic);
+                    }
+                    while (c.open_elements.pop().element_type != .html_li) {}
+                }
+            } else if (strEqlAny(end_tag.name, &.{ "dd", "dt" })) {
+                const element_type: ElementType = switch (end_tag.name[1]) {
+                    'd' => .html_dd,
+                    't' => .html_dt,
+                    else => unreachable,
+                };
+                if (!hasElementInScope(c, element_type)) {
+                    parseError(.Generic);
+                    // Ignore the token.
+                } else {
+                    generateImpliedEndTags(c, element_type);
+                    if (currentNode(c).element_type != element_type) {
+                        parseError(.Generic);
+                    }
+                    while (c.open_elements.pop().element_type != element_type) {}
+                }
+            } else if (strEqlAny(end_tag.name, &.{ "h1", "h2", "h3", "h4", "h5", "h6" })) {
+                if (!hasElementInScope(c, @as([]const ElementType, &[_]ElementType{ .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 }))) {
+                    parseError(.Generic);
+                    // Ignore the token.
+                } else {
+                    generateImpliedEndTags(c, null);
+                    const element_type: ElementType = switch (end_tag.name[1]) {
+                        '1' => .html_h1,
+                        '2' => .html_h2,
+                        '3' => .html_h3,
+                        '4' => .html_h4,
+                        '5' => .html_h5,
+                        '6' => .html_h6,
+                        else => unreachable,
+                    };
+                    if (currentNode(c).element_type != element_type) {
+                        parseError(.Generic);
+                    }
+                    var bottom_of_stack = c.open_elements.pop();
+                    while (elemTypeEqlAny(bottom_of_stack.element_type, &.{ .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 })) {
+                        bottom_of_stack = c.open_elements.pop();
+                    }
+                }
+            } else if (strEqlAny(end_tag.name, &.{ "a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong", "tt", "u" })) {
+                _ = adoptionAgencyAlgorithm(c, end_tag.name);
+            } else if (strEqlAny(end_tag.name, &.{ "applet", "marquee", "object" })) {
+                const element_type = Dom.ElementType.fromStringHtml(end_tag.name).?;
+                if (!hasElementInScope(c, element_type)) {
+                    parseError(.Generic);
+                    // Ignore the token.
+                } else {
+                    generateImpliedEndTags(c, null);
+                    if (currentNode(c).element_type != element_type) {
+                        parseError(.Generic);
+                    }
+                    while (c.open_elements.pop().element_type != element_type) {}
+                    clearListOfActiveFormattingElementsUpToLastMarker(c);
+                }
+            } else if (strEql(end_tag.name, "br")) {
+                reconstructActiveFormattingElements(c);
+                _ = try insertHtmlElementForTheToken(c, TokenStartTag{
+                    .name = "br",
+                    .attributes = .{},
+                    .self_closing = false,
+                });
+                _ = c.open_elements.pop();
+                c.frameset_ok = .not_ok;
             } else {
                 @panic("TODO InBody insertion mode is incomplete");
             }
@@ -692,14 +981,18 @@ fn text(c: *TreeConstructor, token: Token) !void {
                 // Mark the script element as "already started".
                 @panic("TODO Text eof");
             }
-            c.reprocessInOriginalInsertionMode();
+            reprocessInOriginalInsertionMode(
+                c,
+            );
         },
         .end_tag => |end_tag| {
             if (strEqlAny(end_tag.name, &.{"script"})) {
                 @panic("TODO Text end tag script");
             } else {
                 _ = c.open_elements.pop();
-                c.changeToOriginalInsertionMode();
+                changeToOriginalInsertionMode(
+                    c,
+                );
             }
         },
         else => unreachable,
@@ -721,13 +1014,13 @@ fn afterBody(c: *TreeConstructor, token: Token) void {
             parseError(.Generic);
             // Ignore the token.
         } else {
-            c.changeTo(.AfterAfterBody);
+            changeTo(c, .AfterAfterBody);
         }
     } else if (token == .eof) {
-        c.stop();
+        stop(c);
     } else {
         parseError(.Generic);
-        c.reprocessIn(.InBody);
+        reprocessIn(c, .InBody);
     }
 }
 
@@ -751,20 +1044,40 @@ fn afterAfterBody(c: *TreeConstructor, token: Token) !void {
                 afterAfterBodyAnythingElse(c);
             }
         },
-        .eof => c.stop(),
+        .eof => stop(c),
         else => afterAfterBodyAnythingElse(c),
     }
 }
 
 fn afterAfterBodyAnythingElse(c: *TreeConstructor) void {
     parseError(.Generic);
-    c.reprocessIn(.InBody);
+    reprocessIn(c, .InBody);
 }
 
 fn processTokenForeignContent(c: *TreeConstructor, token: Token) void {
     _ = c;
     _ = token;
     @panic("TODO Parsing tokens in foreign content");
+}
+
+fn acknowledgeSelfClosingFlag(c: *TreeConstructor) void {
+    // NOTE: The self-closing flag is acknowledged in the following insertion modes:
+    // In head
+    // In body
+    // In table
+    // In column group
+    // In frameset
+    // Foreign content
+    c.self_closing_flag_acknowledged = true;
+}
+
+fn textParsingAlgorithm(variant: enum { RAWTEXT, RCDATA }, c: *TreeConstructor, start_tag: TokenStartTag) !void {
+    _ = try insertHtmlElementForTheToken(c, start_tag);
+    switch (variant) {
+        .RAWTEXT => setTokenizerState(c, .RAWTEXT),
+        .RCDATA => setTokenizerState(c, .RCDATA),
+    }
+    changeToAndSetOriginalInsertionMode(c, .Text, c.insertion_mode);
 }
 
 fn isNullCharacter(character: u21) bool {
@@ -798,14 +1111,26 @@ fn doctypeEnablesLimitedQuirks(doctype: TokenDOCTYPE) bool {
     return false;
 }
 
-fn strEqlAny(string: []const u8, comptime compare_to: []const []const u8) bool {
+fn strEql(string: []const u8, other: []const u8) bool {
+    return std.mem.eql(u8, string, other);
+}
+
+fn strEqlAny(string: []const u8, compare_to: []const []const u8) bool {
     for (compare_to) |s| {
         if (std.mem.eql(u8, string, s)) return true;
     }
     return false;
 }
 
-fn elemTypeEqlAny(element_type: ElementType, comptime compare_to: []const ElementType) bool {
+fn eqlNullStrings(s1: ?[]const u8, s2: ?[]const u8) bool {
+    if (s1) |a| {
+        if (s2) |b| return std.mem.eql(u8, a, b) else return false;
+    } else {
+        return s2 == null;
+    }
+}
+
+fn elemTypeEqlAny(element_type: ElementType, compare_to: []const ElementType) bool {
     for (compare_to) |t| {
         if (element_type == t) return true;
     }
@@ -816,6 +1141,11 @@ fn parseError(err: ParseError) void {
     // TODO: Handle parse errors.
     std.debug.print("Tree construction parse error: {s}\n", .{@tagName(err)});
 }
+
+const ParentNode = union(enum) {
+    document: *Document,
+    element: *Element,
+};
 
 const NodeInsertionLocation = struct {
     parent: ParentNode,
@@ -860,8 +1190,20 @@ const NodeInsertionLocation = struct {
     }
 };
 
+fn currentNode(c: *TreeConstructor) *Element {
+    return c.open_elements.items[c.open_elements.items.len - 1];
+}
+
+fn adjustedCurrentNode(c: *TreeConstructor) *Element {
+    if (c.is_fragment_parser and c.open_elements.items.len == 1) {
+        @panic("TODO: Adjusted current node, fragment case");
+    } else {
+        return currentNode(c);
+    }
+}
+
 fn appropriateNodeInsertionLocation(c: *TreeConstructor) NodeInsertionLocation {
-    return appropriateNodeInsertionLocationWithTarget(c, c.currentNode());
+    return appropriateNodeInsertionLocationWithTarget(c, currentNode(c));
 }
 
 fn appropriateNodeInsertionLocationWithTarget(c: *TreeConstructor, target: *Element) NodeInsertionLocation {
@@ -939,7 +1281,7 @@ fn insertCommentToDocument(c: *TreeConstructor, comment: TokenComment) !void {
 fn createAnElementForTheToken(
     c: *TreeConstructor,
     start_tag: TokenStartTag,
-    namespace: Dom.WhatWgNamespace,
+    namespace: Dom.Namespace,
     intended_parent: ParentNode,
 ) !Element {
     // TODO: Speculative HTML parser.
@@ -951,18 +1293,10 @@ fn createAnElementForTheToken(
     // NOTE: Custom element definition lookup is done twice using the same arguments:
     //       once here, and again when creating an element.
     // TODO: Find a better way to set element_type.
-    var element_type: ElementType = undefined;
-    if (std.mem.eql(u8, start_tag.name, "html")) {
-        element_type = .html_html;
-    } else if (std.mem.eql(u8, start_tag.name, "head")) {
-        element_type = .html_head;
-    } else if (std.mem.eql(u8, start_tag.name, "body")) {
-        element_type = .html_body;
-    } else {
-        @panic("TODO: Set the HTML element type.");
-    }
-    var element = try Dom.createAnElement(c.allocator, local_name, namespace, null, is, element_type, false);
+    var element_type: ElementType = if (namespace == .html) Dom.ElementType.fromStringHtml(local_name) orelse @panic("TODO: Unknown HTML element type") else @panic("TODO: Create an element in non-HTML namespace");
+    var element = try Dom.createAnElement(c.allocator, element_type, is, false);
     errdefer element.deinit(c.allocator);
+    // TODO This should follow https://dom.spec.whatwg.org/#concept-element-attributes-append
     var attr_it = start_tag.attributes.iterator();
     while (attr_it.next()) |attr| {
         try element.addAttribute(c.allocator, attr.key_ptr.*, attr.value_ptr.*);
@@ -974,7 +1308,7 @@ fn createAnElementForTheToken(
     return element;
 }
 
-fn insertForeignElementForTheToken(c: *TreeConstructor, start_tag: TokenStartTag, namespace: Dom.WhatWgNamespace) !*Element {
+fn insertForeignElementForTheToken(c: *TreeConstructor, start_tag: TokenStartTag, namespace: Dom.Namespace) !*Element {
     const adjusted_insertion_location = appropriateNodeInsertionLocation(c);
     var element = try createAnElementForTheToken(c, start_tag, namespace, adjusted_insertion_location.parent);
     errdefer element.deinit(c.allocator);
@@ -998,9 +1332,124 @@ fn stackOfOpenElementsHas(c: *TreeConstructor, element_type: ElementType) bool {
     return false;
 }
 
+const FormattingElement = struct {
+    element: *Element,
+    original_attributes_index: usize,
+
+    fn eql(self: FormattingElement, c: *TreeConstructor, element: *Element) bool {
+        if (self.element.element_type != element.element_type) return false;
+        const original_attributes = c.active_formatting_element_original_attributes.items[self.original_attributes_index];
+        if (original_attributes.count() != element.attributes.count()) return false;
+        var attr_it = element.attributes.iterator();
+        while (attr_it.next()) |attr| {
+            const original_entry = original_attributes.get(attr.key_ptr.*) orelse return false;
+            if (!strEql(attr.value_ptr.*, original_entry)) return false;
+        }
+        return true;
+    }
+};
+
+fn addFormattingElementOriginalAttributes(c: *TreeConstructor, element: *Element) !usize {
+    const attributes_copy = try c.active_formatting_element_original_attributes.addOne(c.allocator);
+    errdefer _ = c.active_formatting_element_original_attributes.pop();
+
+    attributes_copy.* = Dom.ElementAttributes{};
+    errdefer html5.util.freeStringHashMap(attributes_copy, c.allocator);
+    try attributes_copy.ensureTotalCapacity(c.allocator, element.attributes.count());
+
+    var iterator = element.attributes.iterator();
+    while (iterator.next()) |attr| {
+        const key = try c.allocator.dupe(u8, attr.key_ptr.*);
+        errdefer c.allocator.free(key);
+        const value = try c.allocator.dupe(u8, attr.value_ptr.*);
+        errdefer c.allocator.free(value);
+        attributes_copy.putAssumeCapacity(key, value);
+    }
+    return c.active_formatting_element_original_attributes.items.len - 1;
+}
+
+fn deleteFormattingElementOriginalAttributes(c: *TreeConstructor, index: usize) void {
+    for (c.active_formatting_elements.items) |*fe| {
+        if (fe.original_attributes_index == index) {
+            // There should be no active formatting elements referring to this
+            // if it is being deleted.
+            unreachable;
+        } else if (fe.original_attributes_index > index) {
+            fe.original_attributes_index -= 1;
+        }
+    }
+    const original_attributes = &c.active_formatting_element_original_attributes.items[index];
+    html5.util.freeStringHashMap(original_attributes, c.allocator);
+    _ = c.active_formatting_element_original_attributes.orderedRemove(index);
+}
+
+fn addToListOfActiveFormattingElementsWithoutMatch(c: *TreeConstructor, element: *Element) !void {
+    const result = try c.active_formatting_elements.addOne(c.allocator);
+    errdefer _ = c.active_formatting_elements.pop();
+    const original_attributes_index = try addFormattingElementOriginalAttributes(c, element);
+    result.* = .{ .element = element, .original_attributes_index = original_attributes_index };
+}
+
+fn addToListOfActiveFormattingElementsWithMatch(c: *TreeConstructor, element: *Element, formatting_element: FormattingElement) !void {
+    try c.active_formatting_elements.append(c.allocator, .{
+        .element = element,
+        .original_attributes_index = formatting_element.original_attributes_index,
+    });
+}
+
+fn removeFromListOfActiveFormattingElements(c: *TreeConstructor, index: usize) void {
+    const original_attributes_index = c.active_formatting_elements.items[index].original_attributes_index;
+    _ = c.active_formatting_elements.orderedRemove(index);
+    for (c.active_formatting_elements.items) |fe| {
+        if (fe.original_attributes_index == original_attributes_index) return;
+    }
+    // NOTE: Alternatively, we could just never free the original attributes.
+    deleteFormattingElementOriginalAttributes(c, original_attributes_index);
+}
+
+fn insertAMarker(c: *TreeConstructor) !void {
+    _ = c;
+    @panic("TODO Insert a marker onto the list of active formatting elements");
+}
+
+fn pushOntoListOfActiveFormattingElements(c: *TreeConstructor, element: *Element) !void {
+    var matching_element_count: u2 = 0;
+    var first_matching_element_index: usize = undefined;
+
+    var i = if (c.index_of_last_marker) |lm| lm + 1 else 0;
+    while (i < c.active_formatting_elements.items.len) : (i += 1) {
+        const formatting_element = c.active_formatting_elements.items[i];
+        if (!formatting_element.eql(c, element)) continue;
+
+        matching_element_count += 1;
+        if (matching_element_count == 1) {
+            first_matching_element_index = i;
+        } else if (matching_element_count == 3) {
+            removeFromListOfActiveFormattingElements(c, first_matching_element_index);
+            break;
+        }
+    }
+
+    if (matching_element_count > 0)
+        try addToListOfActiveFormattingElementsWithMatch(c, element, c.active_formatting_elements.items[first_matching_element_index])
+    else
+        try addToListOfActiveFormattingElementsWithoutMatch(c, element);
+}
+
 fn reconstructActiveFormattingElements(c: *TreeConstructor) void {
     if (c.active_formatting_elements.items.len == 0) return;
     @panic("TODO Reconstruct the active formatting elements");
+}
+
+fn clearListOfActiveFormattingElementsUpToLastMarker(c: *TreeConstructor) void {
+    _ = c;
+    @panic("TODO Clear the list of active formatting elements up to the last marker");
+}
+
+fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8) bool {
+    _ = c;
+    _ = tag_name;
+    @panic("TODO adoption agency algorithm");
 }
 
 fn isSpecialElement(element_type: ElementType) bool {
@@ -1101,18 +1550,32 @@ fn isSpecialElement(element_type: ElementType) bool {
     };
 }
 
-fn hasElementInSpecificScope(c: *TreeConstructor, target: ElementType, comptime list: []const ElementType) bool {
+fn hasElementInSpecificScope(c: *TreeConstructor, target: anytype, comptime list: []const ElementType) bool {
     var index = c.open_elements.items.len;
     var node = c.open_elements.items[index - 1];
-    while (node.element_type != target) {
-        if (std.mem.indexOfScalar(ElementType, list, node.element_type) != null) return false;
-        index -= 1;
-        node = c.open_elements.items[index - 1];
+
+    switch (@TypeOf(target)) {
+        *Element => while (node != target) {
+            if (std.mem.indexOfScalar(ElementType, list, node.element_type) != null) return false;
+            index -= 1;
+            node = c.open_elements.items[index - 1];
+        },
+        ElementType => while (node.element_type != target) {
+            if (std.mem.indexOfScalar(ElementType, list, node.element_type) != null) return false;
+            index -= 1;
+            node = c.open_elements.items[index - 1];
+        },
+        []const ElementType => while (!elemTypeEqlAny(node.element_type, target)) {
+            if (std.mem.indexOfScalar(ElementType, list, node.element_type) != null) return false;
+            index -= 1;
+            node = c.open_elements.items[index - 1];
+        },
+        else => |T| @compileError("target must be either '" ++ @typeName(*Element) ++ "', '" ++ @typeName(ElementType) ++ "', or '" ++ @typeName([]const ElementType) ++ "', instead found '" ++ @typeName(T) ++ "'"),
     }
     return true;
 }
 
-fn hasElementInScope(c: *TreeConstructor, target: ElementType) bool {
+fn hasElementInScope(c: *TreeConstructor, target: anytype) bool {
     const list = &[_]ElementType{
         .html_applet,
         .html_caption,
@@ -1161,6 +1624,32 @@ fn hasElementInButtonScope(c: *TreeConstructor, target: ElementType) bool {
     return hasElementInSpecificScope(c, target, list);
 }
 
+fn hasElementInListItemScope(c: *TreeConstructor, target: ElementType) bool {
+    const list = &[_]ElementType{
+        .html_applet,
+        .html_caption,
+        .html_html,
+        .html_table,
+        .html_td,
+        .html_th,
+        .html_marquee,
+        .html_object,
+        .html_ol,
+        .html_template,
+        .html_ul,
+        .mathml_mi,
+        .mathml_mo,
+        .mathml_mn,
+        .mathml_ms,
+        .mathml_mtext,
+        .mathml_annotation_xml,
+        .svg_foreign_object,
+        .svg_desc,
+        .svg_title,
+    };
+    return hasElementInSpecificScope(c, target, list);
+}
+
 fn generateImpliedEndTags(c: *TreeConstructor, exception: ?ElementType) void {
     const list = &[_]ElementType{
         .html_dd,
@@ -1175,11 +1664,11 @@ fn generateImpliedEndTags(c: *TreeConstructor, exception: ?ElementType) void {
         .html_rtc,
     };
 
-    var element_type = c.currentNode().element_type;
+    var element_type = currentNode(c).element_type;
     while (std.mem.indexOfScalar(ElementType, list, element_type)) |_| {
         if (exception == null or element_type != exception.?) {
             _ = c.open_elements.pop();
-            element_type = c.currentNode().element_type;
+            element_type = currentNode(c).element_type;
         } else {
             break;
         }
@@ -1188,43 +1677,48 @@ fn generateImpliedEndTags(c: *TreeConstructor, exception: ?ElementType) void {
 
 fn closePElement(c: *TreeConstructor) void {
     generateImpliedEndTags(c, .html_p);
-    if (c.currentNode().element_type != .html_p) {
+    if (currentNode(c).element_type != .html_p) {
         parseError(.Generic);
     }
     while (c.open_elements.pop().element_type != .html_p) {}
 }
 
+fn removeFromStackOfOpenElements(c: *TreeConstructor, element: *Element) void {
+    for (c.open_elements.items) |e, i| {
+        if (e == element) {
+            _ = c.open_elements.orderedRemove(i);
+            return;
+        }
+    }
+    unreachable;
+}
+
 fn checkValidInBodyEndTag(c: *TreeConstructor) void {
     if (comptime report_parse_errors) {
-        // TODO: Check the stack of open elements for parse errors
-        _ = c;
-        //const validTypes = [_]NodeType{
-        //    .dd,
-        //    .dt,
-        //    .li,
-        //    .optgroup,
-        //    .option,
-        //    .p,
-        //    .rb,
-        //    .rp,
-        //    .rt,
-        //    .rtc,
-        //    .tbody,
-        //    .td,
-        //    .tfoot,
-        //    .th,
-        //    .thead,
-        //    .tr,
-        //    .body,
-        //    .html,
-        //};
-        //outer: for (c.open_elements) |elem| {
-        //    for (validTypes) |t| {
-        //        if (elem.isType(t)) {
-        //            continue :outer;
-        //        }
-        //    }
-        //    parseError(.Generic);
-        //}
+        const valid_types = &[_]ElementType{
+            .html_dd,
+            .html_dt,
+            .html_li,
+            .html_optgroup,
+            .html_option,
+            .html_p,
+            .html_rb,
+            .html_rp,
+            .html_rt,
+            .html_rtc,
+            .html_tbody,
+            .html_td,
+            .html_tfoot,
+            .html_th,
+            .html_thead,
+            .html_tr,
+            .html_body,
+            .html_html,
+        };
+        for (c.open_elements.items) |e| {
+            if (!elemTypeEqlAny(e.element_type, valid_types)) {
+                parseError(.Generic);
+            }
+        }
     }
 }

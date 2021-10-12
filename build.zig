@@ -25,7 +25,7 @@ pub fn build(b: *std.build.Builder) void {
     lib.install();
     lib.addPackage(named_character_references_pkg);
 
-    const lib_tests = b.addTest("source/Tokenizer.zig");
+    const lib_tests = b.addTest("html5.zig");
     lib_tests.setBuildMode(mode);
     lib_tests.addPackage(named_character_references_pkg);
     const lib_tests_step = b.step("test", "Run library tests");

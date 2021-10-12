@@ -102,10 +102,11 @@ pub const DocumentType = struct {
 
 pub const ElementAttributes = StringHashMapUnmanaged([]u8);
 
-pub const WhatWgNamespace = enum {
+pub const Namespace = enum {
     html,
     svg,
     mathml,
+    unknown,
 };
 
 pub const ElementType = enum {
@@ -169,6 +170,7 @@ pub const ElementType = enum {
     html_menu,
     html_meta,
     html_nav,
+    html_nobr,
     html_noembed,
     html_noframes,
     html_noscript,
@@ -220,6 +222,31 @@ pub const ElementType = enum {
     svg_foreign_object,
     svg_desc,
     svg_title,
+
+    unknown,
+
+    pub fn namespace(self: ElementType) Namespace {
+        // TODO: Some metaprogramming to make this less fragile.
+        const html_lowest = std.meta.fieldInfo(ElementType, .html_a).value;
+        const html_highest = std.meta.fieldInfo(ElementType, .html_xmp).value;
+
+        const mathml_lowest = std.meta.fieldInfo(ElementType, .mathml_mi).value;
+        const mathml_highest = std.meta.fieldInfo(ElementType, .mathml_annotation_xml).value;
+
+        const svg_lowest = std.meta.fieldInfo(ElementType, .svg_foreign_object).value;
+        const svg_highest = std.meta.fieldInfo(ElementType, .svg_title).value;
+
+        const value = @enumToInt(self);
+        if (value >= html_lowest and value <= html_highest) {
+            return .html;
+        } else if (value >= mathml_lowest and value <= mathml_highest) {
+            return .mathml;
+        } else if (value >= svg_lowest and value <= svg_highest) {
+            return .svg;
+        } else {
+            return .unknown;
+        }
+    }
 
     const html_map = html_map: {
         @setEvalBranchQuota(5000);
@@ -284,6 +311,7 @@ pub const ElementType = enum {
             .{ "menu", .html_menu },
             .{ "meta", .html_meta },
             .{ "nav", .html_nav },
+            .{ "nobr", .html_nobr },
             .{ "noembed", .html_noembed },
             .{ "noframes", .html_noframes },
             .{ "noscript", .html_noscript },
@@ -333,12 +361,9 @@ pub const ElementType = enum {
 };
 
 pub const Element = struct {
-    attributes: ElementAttributes,
-    namespace: WhatWgNamespace,
-    namespace_prefix: ?[]u8,
-    local_name: []u8,
-    is: ?[]u8,
     element_type: ElementType,
+    attributes: ElementAttributes,
+    is: ?[]u8,
     children: ArrayListUnmanaged(ElementOrCharacterData),
 
     pub fn deinit(self: *Element, allocator: *Allocator) void {
@@ -348,9 +373,12 @@ pub const Element = struct {
             allocator.free(attr.value_ptr.*);
         }
         self.attributes.deinit(allocator);
-        if (self.namespace_prefix) |ns| allocator.free(ns);
-        allocator.free(self.local_name);
         if (self.is) |is| allocator.free(is);
+        self.children.deinit(allocator);
+    }
+
+    pub fn namespace(self: Element) Namespace {
+        return self.element_type.namespace();
     }
 
     pub fn addAttribute(self: *Element, allocator: *Allocator, key: []const u8, value: []const u8) !void {
@@ -416,31 +444,21 @@ pub const ElementOrCharacterData = union(enum) {
 
 pub fn createAnElement(
     allocator: *Allocator,
-    local_name: []const u8,
-    namespace: WhatWgNamespace,
-    prefix: ?[]const u8,
-    is: ?[]const u8,
     element_type: ElementType,
+    is: ?[]const u8,
     // TODO: Figure out what synchronous_custom_elements does.
     synchronous_custom_elements: bool,
 ) !Element {
     _ = synchronous_custom_elements;
     // TODO: Do custom element definition lookup.
     // TODO: Handle all 3 different cases for this procedure.
-    const element_local_name = try allocator.dupe(u8, local_name);
-    errdefer allocator.free(element_local_name);
-    const element_prefix = if (prefix) |p| try allocator.dupe(u8, p) else null;
-    errdefer if (element_prefix) |p| allocator.free(p);
     const element_is = if (is) |s| try allocator.dupe(u8, s) else null;
     errdefer if (element_is) |s| allocator.free(s);
     var result = Element{
+        .element_type = element_type,
         .attributes = .{},
-        .namespace = namespace,
-        .namespace_prefix = element_prefix,
-        .local_name = element_local_name,
         // TODO: Set the custom element state and custom element defintion.
         .is = element_is,
-        .element_type = element_type,
         .children = .{},
     };
     // TODO: Check for a valid custom element name.
