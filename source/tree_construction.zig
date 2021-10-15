@@ -78,8 +78,9 @@ fn decodeComptimeString(comptime string: []const u8) [decodeComptimeStringLen(st
 
 const report_parse_errors = true;
 
-const RunResult = struct {
+pub const RunResult = struct {
     new_tokenizer_state: ?Tokenizer.State = null,
+    adjusted_current_node_is_not_in_html_namespace: bool = undefined,
 };
 
 pub const TreeConstructor = struct {
@@ -121,6 +122,7 @@ pub const TreeConstructor = struct {
 
     pub fn run(self: *TreeConstructor, token: Token) !RunResult {
         var result = RunResult{};
+        defer result.adjusted_current_node_is_not_in_html_namespace = self.open_elements.items.len > 0 and adjustedCurrentNode(self).namespace() != .html;
 
         if (self.ignore_next_lf_token) {
             self.ignore_next_lf_token = false;
@@ -242,7 +244,7 @@ pub fn processToken(c: *TreeConstructor, token: Token) !void {
                 parseError(.Generic);
                 // Ignore the token.
             } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"html"})) {
-                inBodyStartTagHtml(c, token.start_tag);
+                try inBodyStartTagHtml(c, token.start_tag);
             } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"head"})) {
                 const node = try insertHtmlElementForTheToken(c, token.start_tag);
                 c.head_element_pointer = node;
@@ -274,7 +276,7 @@ pub fn processToken(c: *TreeConstructor, token: Token) !void {
                 parseError(.Generic);
                 // Ignore the token.
             } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"html"})) {
-                inBodyStartTagHtml(c, token.start_tag);
+                try inBodyStartTagHtml(c, token.start_tag);
             } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"body"})) {
                 _ = try insertHtmlElementForTheToken(c, token.start_tag);
                 c.frameset_ok = .not_ok;
@@ -323,7 +325,7 @@ pub fn processToken(c: *TreeConstructor, token: Token) !void {
         .InSelect => @panic("TODO InSelect insertion mode"),
         .InSelectInTable => @panic("TODO InSelectInTable insertion mode"),
         .InTemplate => inTemplate(c, token),
-        .AfterBody => afterBody(c, token),
+        .AfterBody => try afterBody(c, token),
         .InFrameset => @panic("TODO InFrameset insertion mode"),
         .AfterFrameset => @panic("TODO AfterFrameset insertion mode"),
         .AfterAfterBody => try afterAfterBody(c, token),
@@ -431,7 +433,7 @@ fn inHead(c: *TreeConstructor, token: Token) !void {
         parseError(.Generic);
         // Ignore the token.
     } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"html"})) {
-        inBodyStartTagHtml(c, token.start_tag);
+        try inBodyStartTagHtml(c, token.start_tag);
     } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{ "base", "basefont", "bgsound", "link" })) {
         _ = try insertHtmlElementForTheToken(c, token.start_tag);
         _ = c.open_elements.pop();
@@ -531,414 +533,528 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
             }
         },
         .start_tag => |start_tag| {
-            if (strEqlAny(start_tag.name, &.{"html"})) {
-                inBodyStartTagHtml(c, start_tag);
-            } else if (strEqlAny(start_tag.name, &.{ "base", "basefont", "bgsound", "link", "meta", "noframes", "script", "style", "template", "title" })) {
-                // TODO: Jump straight to the appropriate handler.
-                try inHead(c, token);
-            } else if (strEqlAny(start_tag.name, &.{"body"})) {
-                parseError(.Generic);
-                if (c.open_elements.items.len == 1 or
-                    (c.open_elements.items.len > 1 and c.open_elements.items[1].element_type != .html_body) or
-                    stackOfOpenElementsHas(c, .html_template))
-                {
-                    assert(c.is_fragment_parser);
-                    // Ignore the token.
-                } else {
-                    c.frameset_ok = .not_ok;
-                    const body = c.open_elements.items[1];
-                    assert(body.element_type == .html_body);
-                    var attr_it = start_tag.attributes.iterator();
-                    while (attr_it.next()) |attr| {
-                        try body.addAttributeNoReplace(c.allocator, attr.key_ptr.*, attr.value_ptr.*);
+            if (ElementType.fromStringHtml(start_tag.name)) |token_element_type| switch (token_element_type) {
+                .html_html => {
+                    try inBodyStartTagHtml(c, start_tag);
+                },
+                .html_base, .html_basefont, .html_bgsound, .html_link, .html_meta, .html_noframes, .html_script, .html_style, .html_template, .html_title => {
+                    // TODO: Jump straight to the appropriate handler.
+                    try inHead(c, token);
+                },
+                .html_body => {
+                    parseError(.Generic);
+                    if (c.open_elements.items.len == 1 or
+                        (c.open_elements.items.len > 1 and c.open_elements.items[1].element_type != .html_body) or
+                        stackOfOpenElementsHas(c, .html_template))
+                    {
+                        assert(c.is_fragment_parser);
+                        // Ignore the token.
+                    } else {
+                        c.frameset_ok = .not_ok;
+                        const body = c.open_elements.items[1];
+                        assert(body.element_type == .html_body);
+                        var attr_it = start_tag.attributes.iterator();
+                        while (attr_it.next()) |attr| {
+                            try body.addAttributeNoReplace(c.allocator, attr.key_ptr.*, attr.value_ptr.*);
+                        }
                     }
-                }
-            } else if (strEqlAny(start_tag.name, &.{"frameset"})) {
-                parseError(.Generic);
-                if (c.open_elements.items.len == 1 or c.open_elements.items[1].element_type != .html_body) {
-                    assert(c.is_fragment_parser);
-                    // Ignore the token.
-                } else if (c.frameset_ok == .not_ok) {
-                    // Ignore the token.
-                } else {
-                    @panic("TODO: InBody start tag frameset, removing an element");
-                    // The stack of open elements has at least 2 elements because of previous checks.
-                    // const second = c.open_elements.items[1];
-                    // second.detachFromParent();
-                    // c.open_elements.shrinkRetainingCapacity(1);
-                    // _ = try insertHtmlElementForTheToken(c, token);
-                    // changeTo(c, .InFrameset);
-                }
-            } else if (strEqlAny(start_tag.name, &.{
-                "address",
-                "article",
-                "aside",
-                "blockquote",
-                "center",
-                "details",
-                "dialog",
-                "dir",
-                "div",
-                "dl",
-                "fieldset",
-                "figcaption",
-                "figure",
-                "footer",
-                "header",
-                "hgroup",
-                "main",
-                "menu",
-                "nav",
-                "ol",
-                "p",
-                "section",
-                "summary",
-                "ul",
-            })) {
-                if (hasElementInButtonScope(c, ElementType.html_p)) {
-                    closePElement(c);
-                }
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-            } else if (strEqlAny(start_tag.name, &.{ "h1", "h2", "h3", "h4", "h5", "h6" })) {
-                if (hasElementInButtonScope(c, ElementType.html_p)) {
-                    closePElement(c);
-                }
-                const current_node = currentNode(c);
-                if (current_node.namespace() == .html and elemTypeEqlAny(current_node.element_type, &.{ .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 })) {
+                },
+                .html_frameset => {
                     parseError(.Generic);
-                    _ = c.open_elements.pop();
-                }
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-            } else if (strEqlAny(start_tag.name, &.{ "pre", "listing" })) {
-                if (hasElementInButtonScope(c, ElementType.html_p)) {
-                    closePElement(c);
-                }
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-                c.ignore_next_lf_token = true;
-                c.frameset_ok = .not_ok;
-            } else if (strEqlAny(start_tag.name, &.{"form"})) {
-                const stack_has_template_element = stackOfOpenElementsHas(c, .html_template);
-                if (c.form_element_pointer != null and !stack_has_template_element) {
-                    parseError(.Generic);
-                    // Ignore the token.
-                } else {
+                    if (c.open_elements.items.len == 1 or c.open_elements.items[1].element_type != .html_body) {
+                        assert(c.is_fragment_parser);
+                        // Ignore the token.
+                    } else if (c.frameset_ok == .not_ok) {
+                        // Ignore the token.
+                    } else {
+                        @panic("TODO: InBody start tag frameset, removing an element");
+                        // The stack of open elements has at least 2 elements because of previous checks.
+                        // const second = c.open_elements.items[1];
+                        // second.detachFromParent();
+                        // c.open_elements.shrinkRetainingCapacity(1);
+                        // _ = try insertHtmlElementForTheToken(c, token);
+                        // changeTo(c, .InFrameset);
+                    }
+                },
+                .html_address,
+                .html_article,
+                .html_aside,
+                .html_blockquote,
+                .html_center,
+                .html_details,
+                .html_dialog,
+                .html_dir,
+                .html_div,
+                .html_dl,
+                .html_fieldset,
+                .html_figcaption,
+                .html_figure,
+                .html_footer,
+                .html_header,
+                .html_hgroup,
+                .html_main,
+                .html_menu,
+                .html_nav,
+                .html_ol,
+                .html_p,
+                .html_section,
+                .html_summary,
+                .html_ul,
+                => {
                     if (hasElementInButtonScope(c, ElementType.html_p)) {
                         closePElement(c);
                     }
-                    const element = try insertHtmlElementForTheToken(c, start_tag);
-                    if (!stack_has_template_element) {
-                        c.form_element_pointer = element;
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                },
+                .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 => {
+                    if (hasElementInButtonScope(c, ElementType.html_p)) {
+                        closePElement(c);
                     }
+                    const current_node = currentNode(c);
+                    if (current_node.namespace() == .html and elemTypeEqlAny(current_node.element_type, &.{ .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 })) {
+                        parseError(.Generic);
+                        _ = c.open_elements.pop();
+                    }
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                },
+                .html_pre, .html_listing => {
+                    if (hasElementInButtonScope(c, ElementType.html_p)) {
+                        closePElement(c);
+                    }
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                    c.ignore_next_lf_token = true;
+                    c.frameset_ok = .not_ok;
+                },
+                .html_form => {
+                    const stack_has_template_element = stackOfOpenElementsHas(c, .html_template);
+                    if (c.form_element_pointer != null and !stack_has_template_element) {
+                        parseError(.Generic);
+                        // Ignore the token.
+                    } else {
+                        if (hasElementInButtonScope(c, ElementType.html_p)) {
+                            closePElement(c);
+                        }
+                        const element = try insertHtmlElementForTheToken(c, start_tag);
+                        if (!stack_has_template_element) {
+                            c.form_element_pointer = element;
+                        }
+                    }
+                },
+                .html_li => {
+                    c.frameset_ok = .not_ok;
+                    var index = c.open_elements.items.len;
+                    while (true) {
+                        const node = c.open_elements.items[index - 1];
+                        if (node.element_type == .html_li) {
+                            generateImpliedEndTags(c, .html_li);
+                            if (currentNode(c).element_type != .html_li) {
+                                parseError(.Generic);
+                            }
+                            while (c.open_elements.pop().element_type != .html_li) {}
+                            break;
+                        } else if (isSpecialElement(node.element_type) and node.element_type != .html_address and node.element_type != .html_div and node.element_type != .html_p) {
+                            break;
+                        } else {
+                            index -= 1;
+                        }
+                    }
+                    if (hasElementInButtonScope(c, ElementType.html_p)) {
+                        closePElement(c);
+                    }
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                },
+                .html_dd, .html_dt => {
+                    c.frameset_ok = .not_ok;
+                    var index = c.open_elements.items.len;
+                    while (true) {
+                        const node = c.open_elements.items[index - 1];
+                        if (node.element_type == .html_dd) {
+                            generateImpliedEndTags(c, .html_dd);
+                            if (currentNode(c).element_type != .html_dd) {
+                                parseError(.Generic);
+                            }
+                            while (c.open_elements.pop().element_type != .html_dd) {}
+                            break;
+                        } else if (node.element_type == .html_dt) {
+                            generateImpliedEndTags(c, .html_dt);
+                            if (currentNode(c).element_type != .html_dt) {
+                                parseError(.Generic);
+                            }
+                            while (c.open_elements.pop().element_type != .html_dt) {}
+                            break;
+                        } else if (isSpecialElement(node.element_type) and node.element_type != .html_address and node.element_type != .html_div and node.element_type != .html_p) {
+                            break;
+                        } else {
+                            index -= 1;
+                        }
+                    }
+                    if (hasElementInButtonScope(c, ElementType.html_p)) {
+                        closePElement(c);
+                    }
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                },
+                .html_plaintext => {
+                    if (hasElementInButtonScope(c, ElementType.html_p)) {
+                        closePElement(c);
+                    }
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                    // TODO: Special case this?
+                    setTokenizerState(c, .PLAINTEXT);
+                },
+                .html_button => {
+                    if (hasElementInScope(c, ElementType.html_button)) {
+                        parseError(.Generic);
+                        generateImpliedEndTags(c, null);
+                        while (c.open_elements.pop().element_type != .html_button) {}
+                    }
+                    reconstructActiveFormattingElements(c);
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                    c.frameset_ok = .not_ok;
+                },
+                .html_a => {
+                    const begin = if (c.index_of_last_marker) |lm| lm + 1 else 0;
+                    for (c.active_formatting_elements.items[begin..]) |fe, i| {
+                        if (fe.element.element_type == .html_a) {
+                            parseError(.Generic);
+                            const removed = adoptionAgencyAlgorithm(c, start_tag.name);
+                            if (!removed) removeFromStackOfOpenElements(c, fe.element);
+                            removeFromListOfActiveFormattingElements(c, begin + i);
+                            break;
+                        }
+                    }
+                    reconstructActiveFormattingElements(c);
+                    const element = try insertHtmlElementForTheToken(c, start_tag);
+                    try pushOntoListOfActiveFormattingElements(c, element);
+                },
+                .html_b, .html_big, .html_code, .html_em, .html_font, .html_i, .html_s, .html_small, .html_strike, .html_strong, .html_tt, .html_u => {
+                    reconstructActiveFormattingElements(c);
+                    const element = try insertHtmlElementForTheToken(c, start_tag);
+                    try pushOntoListOfActiveFormattingElements(c, element);
+                },
+                .html_nobr => {
+                    reconstructActiveFormattingElements(c);
+                    if (hasElementInScope(c, ElementType.html_nobr)) {
+                        parseError(.Generic);
+                        _ = adoptionAgencyAlgorithm(c, start_tag.name);
+                        reconstructActiveFormattingElements(c);
+                    }
+                    const element = try insertHtmlElementForTheToken(c, start_tag);
+                    try pushOntoListOfActiveFormattingElements(c, element);
+                },
+                .html_applet, .html_marquee, .html_object => {
+                    reconstructActiveFormattingElements(c);
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                    try insertAMarker(c);
+                    c.frameset_ok = .not_ok;
+                },
+                .html_table => {
+                    if (c.dom.document.quirks_mode != .quirks and !hasElementInButtonScope(c, .html_p)) {
+                        closePElement(c);
+                    }
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                    c.frameset_ok = .not_ok;
+                    changeTo(c, .InTable);
+                },
+                .html_area, .html_br, .html_embed, .html_img, .html_keygen, .html_wbr => {
+                    reconstructActiveFormattingElements(c);
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                    _ = c.open_elements.pop();
+                    acknowledgeSelfClosingFlag(c);
+                    c.frameset_ok = .not_ok;
+                },
+                .html_input => {
+                    reconstructActiveFormattingElements(c);
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                    _ = c.open_elements.pop();
+                    acknowledgeSelfClosingFlag(c);
+                    const @"type" = start_tag.attributes.get("type");
+                    if (@"type" == null or strEql(@"type".?, "hidden")) {
+                        c.frameset_ok = .not_ok;
+                    }
+                },
+                .html_param, .html_source, .html_track => {
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                    _ = c.open_elements.pop();
+                    acknowledgeSelfClosingFlag(c);
+                },
+                .html_hr => {
+                    if (hasElementInButtonScope(c, .html_p)) {
+                        closePElement(c);
+                    }
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                    _ = c.open_elements.pop();
+                    acknowledgeSelfClosingFlag(c);
+                    c.frameset_ok = .not_ok;
+                },
+
+                .html_textarea => {
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                    c.ignore_next_lf_token = true;
+                    setTokenizerState(c, .RCDATA);
+                    c.frameset_ok = .not_ok;
+                    changeToAndSetOriginalInsertionMode(c, .Text, c.insertion_mode);
+                },
+                .html_xmp => {
+                    if (hasElementInButtonScope(c, .html_p)) {
+                        closePElement(c);
+                    }
+                    reconstructActiveFormattingElements(c);
+                    c.frameset_ok = .not_ok;
+                    try textParsingAlgorithm(.RAWTEXT, c, start_tag);
+                },
+                .html_iframe => {
+                    c.frameset_ok = .not_ok;
+                    try textParsingAlgorithm(.RAWTEXT, c, start_tag);
+                },
+                .html_noembed => try textParsingAlgorithm(.RAWTEXT, c, start_tag),
+                .html_noscript => try inBodyStartTagNoscript(c, start_tag),
+                .html_select => {
+                    reconstructActiveFormattingElements(c);
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                    c.frameset_ok = .not_ok;
+                    switch (c.insertion_mode) {
+                        .InTable, .InCaption, .InTableBody, .InRow, .InCell => changeTo(c, .InSelectInTable),
+                        else => changeTo(c, .InSelect),
+                    }
+                },
+                .html_optgroup, .html_option => {
+                    if (currentNode(c).element_type == .html_option) {
+                        _ = c.open_elements.pop();
+                    }
+                    reconstructActiveFormattingElements(c);
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                },
+                .html_rb, .html_rtc => {
+                    if (hasElementInScope(c, ElementType.html_ruby)) {
+                        generateImpliedEndTags(c, null);
+                        if (currentNode(c).element_type != .html_ruby) {
+                            parseError(.Generic);
+                        }
+                    }
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                },
+                .html_rp, .html_rt => {
+                    if (hasElementInScope(c, ElementType.html_ruby)) {
+                        generateImpliedEndTags(c, .html_rtc);
+                        const current_node_elem_type = currentNode(c).element_type;
+                        if (current_node_elem_type != .html_rtc and current_node_elem_type != .html_ruby) {
+                            parseError(.Generic);
+                        }
+                    }
+                    _ = try insertHtmlElementForTheToken(c, start_tag);
+                },
+                .html_caption, .html_col, .html_colgroup, .html_frame, .html_head, .html_tbody, .html_td, .html_tfoot, .html_th, .html_thead, .html_tr => {
+                    parseError(.Generic);
+                    // Ignore the token.
+                },
+                else => try inBodyStartTagAnythingElse(c, start_tag),
+            } else {
+                if (strEql(start_tag.name, "image")) {
+                    parseError(.Generic);
+                    reconstructActiveFormattingElements(c);
+                    _ = try insertHtmlElementForTheToken(c, TokenStartTag{
+                        .name = "img",
+                        .attributes = start_tag.attributes,
+                        .self_closing = start_tag.self_closing,
+                    });
+                    _ = c.open_elements.pop();
+                    acknowledgeSelfClosingFlag(c);
+                    c.frameset_ok = .not_ok;
+                } else if (strEql(start_tag.name, "math")) {
+                    reconstructActiveFormattingElements(c);
+                    // TODO adjustMathMlAttributes
+                    // TODO adjustForeignAttributes
+                    _ = try insertForeignElementForTheToken(c, start_tag, .mathml);
+                    if (start_tag.self_closing) {
+                        _ = c.open_elements.pop();
+                        acknowledgeSelfClosingFlag(c);
+                    }
+                } else if (strEql(start_tag.name, "svg")) {
+                    reconstructActiveFormattingElements(c);
+                    // TODO adjustSvgAttributes
+                    // TODO adjustForeignAttributes
+                    _ = try insertForeignElementForTheToken(c, start_tag, .svg);
+                    if (start_tag.self_closing) {
+                        _ = c.open_elements.pop();
+                        acknowledgeSelfClosingFlag(c);
+                    }
+                } else {
+                    try inBodyStartTagAnythingElse(c, start_tag);
                 }
-            } else if (strEqlAny(start_tag.name, &.{"li"})) {
-                c.frameset_ok = .not_ok;
-                var index = c.open_elements.items.len;
-                while (true) {
-                    const node = c.open_elements.items[index - 1];
-                    if (node.element_type == .html_li) {
+            }
+        },
+        .end_tag => |end_tag| {
+            if (ElementType.fromStringHtml(end_tag.name)) |token_element_type| switch (token_element_type) {
+                .html_template => {
+                    // TODO: Jump straight to the appropriate handler.
+                    try inHead(c, token);
+                },
+                .html_body => {
+                    if (!hasElementInScope(c, ElementType.html_body)) {
+                        parseError(.Generic);
+                        // Ignore the token.
+                    } else {
+                        checkValidInBodyEndTag(c);
+                        changeTo(c, .AfterBody);
+                    }
+                },
+                .html_html => {
+                    if (!hasElementInScope(c, ElementType.html_body)) {
+                        parseError(.Generic);
+                        // Ignore the token.
+                    } else {
+                        checkValidInBodyEndTag(c);
+                        reprocessIn(c, .AfterBody);
+                    }
+                },
+                .html_address,
+                .html_article,
+                .html_aside,
+                .html_blockquote,
+                .html_button,
+                .html_center,
+                .html_details,
+                .html_dialog,
+                .html_dir,
+                .html_div,
+                .html_dl,
+                .html_fieldset,
+                .html_figcaption,
+                .html_figure,
+                .html_footer,
+                .html_header,
+                .html_hgroup,
+                .html_listing,
+                .html_main,
+                .html_menu,
+                .html_nav,
+                .html_ol,
+                .html_pre,
+                .html_section,
+                .html_summary,
+                .html_ul,
+                => {
+                    if (!hasElementInScope(c, token_element_type)) {
+                        parseError(.Generic);
+                        // Ignore the token.
+                    } else {
+                        generateImpliedEndTags(c, null);
+                        if (currentNode(c).element_type != token_element_type) {
+                            parseError(.Generic);
+                        }
+                        while (c.open_elements.pop().element_type != token_element_type) {}
+                    }
+                },
+                .html_form => {
+                    if (stackOfOpenElementsHas(c, .html_template)) {
+                        const form = c.form_element_pointer;
+                        c.form_element_pointer = null;
+
+                        if (form == null or !hasElementInScope(c, form.?)) {
+                            parseError(.Generic);
+                            // Ignore the token;
+                            return;
+                        }
+                        // form is not null at this point.
+
+                        generateImpliedEndTags(c, null);
+                        if (currentNode(c) != form.?) {
+                            parseError(.Generic);
+                        }
+                        removeFromStackOfOpenElements(c, form.?);
+                    } else {
+                        if (!hasElementInScope(c, ElementType.html_form)) {
+                            parseError(.Generic);
+                            // Ignore the token.
+                            return;
+                        }
+                        generateImpliedEndTags(c, null);
+                        if (currentNode(c).element_type != .html_form) {
+                            parseError(.Generic);
+                        }
+                        while (c.open_elements.pop().element_type != .html_form) {}
+                    }
+                },
+                .html_p => {
+                    if (!hasElementInButtonScope(c, ElementType.html_p)) {
+                        parseError(.Generic);
+                        _ = try insertHtmlElementForTheToken(c, TokenStartTag{
+                            .name = "p",
+                            .attributes = .{},
+                            .self_closing = false,
+                        });
+                        closePElement(c);
+                    }
+                },
+                .html_li => {
+                    if (!hasElementInListItemScope(c, ElementType.html_li)) {
+                        parseError(.Generic);
+                        // Ignore the token.
+                    } else {
                         generateImpliedEndTags(c, .html_li);
                         if (currentNode(c).element_type != .html_li) {
                             parseError(.Generic);
                         }
                         while (c.open_elements.pop().element_type != .html_li) {}
-                        break;
-                    } else if (isSpecialElement(node.element_type) and node.element_type != .html_address and node.element_type != .html_div and node.element_type != .html_p) {
-                        break;
-                    } else {
-                        index -= 1;
                     }
-                }
-                if (hasElementInButtonScope(c, ElementType.html_p)) {
-                    closePElement(c);
-                }
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-            } else if (strEqlAny(start_tag.name, &.{ "dd", "dt" })) {
-                c.frameset_ok = .not_ok;
-                var index = c.open_elements.items.len;
-                while (true) {
-                    const node = c.open_elements.items[index - 1];
-                    if (node.element_type == .html_dd) {
-                        generateImpliedEndTags(c, .html_dd);
-                        if (currentNode(c).element_type != .html_dd) {
-                            parseError(.Generic);
-                        }
-                        while (c.open_elements.pop().element_type != .html_dd) {}
-                        break;
-                    } else if (node.element_type == .html_dt) {
-                        generateImpliedEndTags(c, .html_dt);
-                        if (currentNode(c).element_type != .html_dt) {
-                            parseError(.Generic);
-                        }
-                        while (c.open_elements.pop().element_type != .html_dt) {}
-                        break;
-                    } else if (isSpecialElement(node.element_type) and node.element_type != .html_address and node.element_type != .html_div and node.element_type != .html_p) {
-                        break;
-                    } else {
-                        index -= 1;
-                    }
-                }
-                if (hasElementInButtonScope(c, ElementType.html_p)) {
-                    closePElement(c);
-                }
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-            } else if (strEql(start_tag.name, "plaintext")) {
-                if (hasElementInButtonScope(c, ElementType.html_p)) {
-                    closePElement(c);
-                }
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-                // TODO: Special case this?
-                setTokenizerState(c, .PLAINTEXT);
-            } else if (strEql(start_tag.name, "button")) {
-                if (hasElementInScope(c, ElementType.html_button)) {
-                    parseError(.Generic);
-                    generateImpliedEndTags(c, null);
-                    while (c.open_elements.pop().element_type != .html_button) {}
-                }
-                reconstructActiveFormattingElements(c);
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-                c.frameset_ok = .not_ok;
-            } else if (strEql(start_tag.name, "a")) {
-                const begin = if (c.index_of_last_marker) |lm| lm + 1 else 0;
-                for (c.active_formatting_elements.items[begin..]) |fe, i| {
-                    if (fe.element.element_type == .html_a) {
-                        parseError(.Generic);
-                        const removed = adoptionAgencyAlgorithm(c, start_tag.name);
-                        if (!removed) removeFromStackOfOpenElements(c, fe.element);
-                        removeFromListOfActiveFormattingElements(c, begin + i);
-                        break;
-                    }
-                }
-                reconstructActiveFormattingElements(c);
-                const element = try insertHtmlElementForTheToken(c, start_tag);
-                try pushOntoListOfActiveFormattingElements(c, element);
-            } else if (strEqlAny(start_tag.name, &.{ "b", "big", "code", "em", "font", "i", "s", "small", "strike", "strong", "tt", "u" })) {
-                reconstructActiveFormattingElements(c);
-                const element = try insertHtmlElementForTheToken(c, start_tag);
-                try pushOntoListOfActiveFormattingElements(c, element);
-            } else if (strEql(start_tag.name, "nobr")) {
-                reconstructActiveFormattingElements(c);
-                if (hasElementInScope(c, ElementType.html_nobr)) {
-                    parseError(.Generic);
-                    _ = adoptionAgencyAlgorithm(c, start_tag.name);
-                    reconstructActiveFormattingElements(c);
-                }
-                const element = try insertHtmlElementForTheToken(c, start_tag);
-                try pushOntoListOfActiveFormattingElements(c, element);
-            } else if (strEqlAny(start_tag.name, &.{ "applet", "marquee", "object" })) {
-                reconstructActiveFormattingElements(c);
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-                try insertAMarker(c);
-                c.frameset_ok = .not_ok;
-            } else if (strEql(start_tag.name, "table")) {
-                if (c.dom.document.quirks_mode != .quirks and !hasElementInButtonScope(c, .html_p)) {
-                    closePElement(c);
-                }
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-                c.frameset_ok = .not_ok;
-                changeTo(c, .InTable);
-            } else if (strEqlAny(start_tag.name, &.{ "area", "br", "embed", "img", "keygen", "wbr" })) {
-                reconstructActiveFormattingElements(c);
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-                _ = c.open_elements.pop();
-                acknowledgeSelfClosingFlag(c);
-                c.frameset_ok = .not_ok;
-            } else if (strEql(start_tag.name, "input")) {
-                reconstructActiveFormattingElements(c);
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-                _ = c.open_elements.pop();
-                acknowledgeSelfClosingFlag(c);
-                const @"type" = start_tag.attributes.get("type");
-                if (@"type" == null or strEql(@"type".?, "hidden")) {
-                    c.frameset_ok = .not_ok;
-                }
-            } else if (strEqlAny(start_tag.name, &.{ "param", "source", "track" })) {
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-                _ = c.open_elements.pop();
-                acknowledgeSelfClosingFlag(c);
-            } else if (strEql(start_tag.name, "hr")) {
-                if (hasElementInButtonScope(c, .html_p)) {
-                    closePElement(c);
-                }
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-                _ = c.open_elements.pop();
-                acknowledgeSelfClosingFlag(c);
-                c.frameset_ok = .not_ok;
-            } else if (strEql(start_tag.name, "image")) {
-                parseError(.Generic);
-                reconstructActiveFormattingElements(c);
-                _ = try insertHtmlElementForTheToken(c, TokenStartTag{
-                    .name = "img",
-                    .attributes = start_tag.attributes,
-                    .self_closing = start_tag.self_closing,
-                });
-                _ = c.open_elements.pop();
-                acknowledgeSelfClosingFlag(c);
-                c.frameset_ok = .not_ok;
-            } else if (strEql(start_tag.name, "textarea")) {
-                _ = try insertHtmlElementForTheToken(c, start_tag);
-                c.ignore_next_lf_token = true;
-                setTokenizerState(c, .RCDATA);
-                c.frameset_ok = .not_ok;
-                changeToAndSetOriginalInsertionMode(c, .Text, c.insertion_mode);
-            } else {
-                @panic("TODO InBody insertion mode is incomplete");
-            }
-        },
-        .end_tag => |end_tag| {
-            if (strEqlAny(end_tag.name, &.{"template"})) {
-                // TODO: Jump straight to the appropriate handler.
-                try inHead(c, token);
-            } else if (strEqlAny(end_tag.name, &.{"body"})) {
-                if (!hasElementInScope(c, ElementType.html_body)) {
-                    parseError(.Generic);
-                    // Ignore the token.
-                } else {
-                    checkValidInBodyEndTag(c);
-                    changeTo(c, .AfterBody);
-                }
-            } else if (strEqlAny(end_tag.name, &.{"html"})) {
-                if (!hasElementInScope(c, ElementType.html_body)) {
-                    parseError(.Generic);
-                    // Ignore the token.
-                } else {
-                    checkValidInBodyEndTag(c);
-                    reprocessIn(c, .AfterBody);
-                }
-            } else if (strEqlAny(end_tag.name, &.{
-                "address", "article",  "aside",      "blockquote", "button",
-                "center",  "details",  "dialog",     "dir",        "div",
-                "dl",      "fieldset", "figcaption", "figure",     "footer",
-                "header",  "hgroup",   "listing",    "main",       "menu",
-                "nav",     "ol",       "pre",        "section",    "summary",
-                "ul",
-            })) {
-                const element_type = Dom.ElementType.fromStringHtml(end_tag.name).?;
-                if (!hasElementInScope(c, element_type)) {
-                    parseError(.Generic);
-                    // Ignore the token.
-                } else {
-                    generateImpliedEndTags(c, null);
-                    if (currentNode(c).element_type != element_type) {
-                        parseError(.Generic);
-                    }
-                    while (c.open_elements.pop().element_type != element_type) {}
-                }
-            } else if (strEql(end_tag.name, "form")) {
-                if (stackOfOpenElementsHas(c, .html_template)) {
-                    const form = c.form_element_pointer;
-                    c.form_element_pointer = null;
-
-                    if (form == null or !hasElementInScope(c, form.?)) {
-                        parseError(.Generic);
-                        // Ignore the token;
-                        return;
-                    }
-                    // form is not null at this point.
-
-                    generateImpliedEndTags(c, null);
-                    if (currentNode(c) != form.?) {
-                        parseError(.Generic);
-                    }
-                    removeFromStackOfOpenElements(c, form.?);
-                } else {
-                    if (!hasElementInScope(c, ElementType.html_form)) {
+                },
+                .html_dd, .html_dt => {
+                    if (!hasElementInScope(c, token_element_type)) {
                         parseError(.Generic);
                         // Ignore the token.
-                        return;
+                    } else {
+                        generateImpliedEndTags(c, token_element_type);
+                        if (currentNode(c).element_type != token_element_type) {
+                            parseError(.Generic);
+                        }
+                        while (c.open_elements.pop().element_type != token_element_type) {}
                     }
-                    generateImpliedEndTags(c, null);
-                    if (currentNode(c).element_type != .html_form) {
+                },
+                .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 => {
+                    if (!hasElementInScope(c, @as([]const ElementType, &[_]ElementType{ .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 }))) {
                         parseError(.Generic);
+                        // Ignore the token.
+                    } else {
+                        generateImpliedEndTags(c, null);
+                        if (currentNode(c).element_type != token_element_type) {
+                            parseError(.Generic);
+                        }
+                        var bottom_of_stack = c.open_elements.pop();
+                        while (elemTypeEqlAny(bottom_of_stack.element_type, &.{ .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 })) {
+                            bottom_of_stack = c.open_elements.pop();
+                        }
                     }
-                    while (c.open_elements.pop().element_type != .html_form) {}
-                }
-            } else if (strEql(end_tag.name, "p")) {
-                if (!hasElementInButtonScope(c, ElementType.html_p)) {
-                    parseError(.Generic);
+                },
+                .html_a, .html_b, .html_big, .html_code, .html_em, .html_font, .html_i, .html_nobr, .html_s, .html_small, .html_strike, .html_strong, .html_tt, .html_u => {
+                    _ = adoptionAgencyAlgorithm(c, end_tag.name);
+                },
+                .html_applet, .html_marquee, .html_object => {
+                    if (!hasElementInScope(c, token_element_type)) {
+                        parseError(.Generic);
+                        // Ignore the token.
+                    } else {
+                        generateImpliedEndTags(c, null);
+                        if (currentNode(c).element_type != token_element_type) {
+                            parseError(.Generic);
+                        }
+                        while (c.open_elements.pop().element_type != token_element_type) {}
+                        clearListOfActiveFormattingElementsUpToLastMarker(c);
+                    }
+                },
+                .html_br => {
+                    reconstructActiveFormattingElements(c);
                     _ = try insertHtmlElementForTheToken(c, TokenStartTag{
-                        .name = "p",
+                        .name = "br",
                         .attributes = .{},
                         .self_closing = false,
                     });
-                    closePElement(c);
-                }
-            } else if (strEql(end_tag.name, "li")) {
-                if (!hasElementInListItemScope(c, ElementType.html_li)) {
-                    parseError(.Generic);
-                    // Ignore the token.
-                } else {
-                    generateImpliedEndTags(c, .html_li);
-                    if (currentNode(c).element_type != .html_li) {
-                        parseError(.Generic);
-                    }
-                    while (c.open_elements.pop().element_type != .html_li) {}
-                }
-            } else if (strEqlAny(end_tag.name, &.{ "dd", "dt" })) {
-                const element_type: ElementType = switch (end_tag.name[1]) {
-                    'd' => .html_dd,
-                    't' => .html_dt,
-                    else => unreachable,
-                };
-                if (!hasElementInScope(c, element_type)) {
-                    parseError(.Generic);
-                    // Ignore the token.
-                } else {
-                    generateImpliedEndTags(c, element_type);
-                    if (currentNode(c).element_type != element_type) {
-                        parseError(.Generic);
-                    }
-                    while (c.open_elements.pop().element_type != element_type) {}
-                }
-            } else if (strEqlAny(end_tag.name, &.{ "h1", "h2", "h3", "h4", "h5", "h6" })) {
-                if (!hasElementInScope(c, @as([]const ElementType, &[_]ElementType{ .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 }))) {
-                    parseError(.Generic);
-                    // Ignore the token.
-                } else {
-                    generateImpliedEndTags(c, null);
-                    const element_type: ElementType = switch (end_tag.name[1]) {
-                        '1' => .html_h1,
-                        '2' => .html_h2,
-                        '3' => .html_h3,
-                        '4' => .html_h4,
-                        '5' => .html_h5,
-                        '6' => .html_h6,
-                        else => unreachable,
-                    };
-                    if (currentNode(c).element_type != element_type) {
-                        parseError(.Generic);
-                    }
-                    var bottom_of_stack = c.open_elements.pop();
-                    while (elemTypeEqlAny(bottom_of_stack.element_type, &.{ .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 })) {
-                        bottom_of_stack = c.open_elements.pop();
-                    }
-                }
-            } else if (strEqlAny(end_tag.name, &.{ "a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong", "tt", "u" })) {
-                _ = adoptionAgencyAlgorithm(c, end_tag.name);
-            } else if (strEqlAny(end_tag.name, &.{ "applet", "marquee", "object" })) {
-                const element_type = Dom.ElementType.fromStringHtml(end_tag.name).?;
-                if (!hasElementInScope(c, element_type)) {
-                    parseError(.Generic);
-                    // Ignore the token.
-                } else {
-                    generateImpliedEndTags(c, null);
-                    if (currentNode(c).element_type != element_type) {
-                        parseError(.Generic);
-                    }
-                    while (c.open_elements.pop().element_type != element_type) {}
-                    clearListOfActiveFormattingElementsUpToLastMarker(c);
-                }
-            } else if (strEql(end_tag.name, "br")) {
-                reconstructActiveFormattingElements(c);
-                _ = try insertHtmlElementForTheToken(c, TokenStartTag{
-                    .name = "br",
-                    .attributes = .{},
-                    .self_closing = false,
-                });
-                _ = c.open_elements.pop();
-                c.frameset_ok = .not_ok;
-            } else {
-                @panic("TODO InBody insertion mode is incomplete");
-            }
+                    _ = c.open_elements.pop();
+                    c.frameset_ok = .not_ok;
+                },
+                else => {
+                    @panic("TODO InBody insertion mode is incomplete");
+                },
+            } else @panic("TODO: InBody any other end tag");
         },
     }
 }
@@ -953,25 +1069,35 @@ fn inBodyWhitespaceCharacter(c: *TreeConstructor, character: TokenCharacter) !vo
     try insertCharacter(c, character);
 }
 
-fn inBodyStartTagHtml(c: *TreeConstructor, start_tag: TokenStartTag) void {
-    _ = c;
-    _ = start_tag;
+fn inBodyStartTagHtml(c: *TreeConstructor, start_tag: TokenStartTag) !void {
     parseError(.Generic);
-    @panic("TODO: InBody start tag html");
-    //for (c.open_elements.items) |e| {
-    //    if (e.isType(.template)) break;
-    //} else {
-    //    const top = c.open_elements.top();
-    //    for (start_tag.attributes) |attr| {
-    //        top.addAttributeNoReplace(attr);
-    //    }
-    //}
+    if (stackOfOpenElementsHas(c, .html_template)) {
+        // Ignore the token.
+    } else {
+        const top_element = c.open_elements.items[0];
+        var iterator = start_tag.attributes.iterator();
+        while (iterator.next()) |attr| {
+            try top_element.addAttributeNoReplace(c.allocator, attr.key_ptr.*, attr.value_ptr.*);
+        }
+    }
+}
+
+fn inBodyStartTagNoscript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
+    if (c.scripting) {
+        try textParsingAlgorithm(.RAWTEXT, c, start_tag);
+    } else {
+        try inBodyStartTagAnythingElse(c, start_tag);
+    }
+}
+
+fn inBodyStartTagAnythingElse(c: *TreeConstructor, start_tag: TokenStartTag) !void {
+    reconstructActiveFormattingElements(c);
+    _ = try insertHtmlElementForTheToken(c, start_tag);
 }
 
 fn text(c: *TreeConstructor, token: Token) !void {
     switch (token) {
         .character => |character| {
-            assert(!isNullCharacter(character.data));
             try insertCharacter(c, character);
         },
         .eof => {
@@ -979,27 +1105,23 @@ fn text(c: *TreeConstructor, token: Token) !void {
             const current_node = c.open_elements.pop();
             if (current_node.element_type == .html_script) {
                 // Mark the script element as "already started".
-                @panic("TODO Text eof");
+                @panic("TODO Text eof, current node is a script");
             }
-            reprocessInOriginalInsertionMode(
-                c,
-            );
+            reprocessInOriginalInsertionMode(c);
         },
         .end_tag => |end_tag| {
-            if (strEqlAny(end_tag.name, &.{"script"})) {
+            if (strEql(end_tag.name, "script")) {
                 @panic("TODO Text end tag script");
             } else {
                 _ = c.open_elements.pop();
-                changeToOriginalInsertionMode(
-                    c,
-                );
+                changeToOriginalInsertionMode(c);
             }
         },
         else => unreachable,
     }
 }
 
-fn afterBody(c: *TreeConstructor, token: Token) void {
+fn afterBody(c: *TreeConstructor, token: Token) !void {
     if (isWhitespace(token)) {
         @panic("TODO Process using InBody whitespace rules.");
     } else if (token == .comment) {
@@ -1008,7 +1130,7 @@ fn afterBody(c: *TreeConstructor, token: Token) void {
         parseError(.Generic);
         // Ignore the token.
     } else if (token == .start_tag and strEqlAny(token.start_tag.name, &.{"html"})) {
-        inBodyStartTagHtml(c, token.start_tag);
+        try inBodyStartTagHtml(c, token.start_tag);
     } else if (token == .end_tag and strEqlAny(token.end_tag.name, &.{"html"})) {
         if (c.is_fragment_parser) {
             parseError(.Generic);

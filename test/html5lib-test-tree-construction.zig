@@ -21,7 +21,7 @@ fn endsWith(str1: []const u8, str2: []const u8) bool {
 }
 
 test {
-    try runTestFile("test/html5lib-tests/tree-construction/tests15.dat");
+    try runTestFile("test/html5lib-tests/tree-construction/tests3.dat");
 }
 
 fn runTestFile(file_path: []const u8) !void {
@@ -36,8 +36,16 @@ fn runTestFile(file_path: []const u8) !void {
     var count: usize = 1;
     while (tests.next()) |t| {
         std.debug.print("Test {}\n", .{count});
-        const the_test = try createTest(t, allocator);
+        defer count += 1;
+        const the_test = createTest(t, allocator) catch |err| switch (err) {
+            error.SkipTest => {
+                std.debug.print("Test {} skipped.\n\n", .{count});
+                continue;
+            },
+            else => return err,
+        };
         try runTest(the_test, allocator);
+        std.debug.print("\n\n", .{});
     }
 }
 
@@ -75,7 +83,6 @@ fn createTest(test_string: []const u8, allocator: *Allocator) !Test {
 
     var new_errors: []const u8 = lines.rest()[0..0];
     if (startsWith(section, "#new-errors")) {
-        _ = lines.next();
         while (!startsWith(lines.rest(), "#")) {
             new_errors.len += lines.next().?.len + 1;
         }
@@ -85,9 +92,9 @@ fn createTest(test_string: []const u8, allocator: *Allocator) !Test {
 
     var document_fragment: []const u8 = lines.rest()[0..0];
     if (startsWith(section, "#document-fragment")) {
-        _ = lines.next();
-        document_fragment = lines.next().?;
-        section = lines.next().?;
+        return error.SkipTest;
+        //document_fragment = lines.next().?;
+        //section = lines.next().?;
         //std.debug.print("#document-fragment\n{s}\n", .{document_fragment});
     }
 
@@ -173,37 +180,19 @@ fn parseDomTree(string: []const u8, allocator: *Allocator) !Dom.Dom {
             assert(data[data.len - 1] == '>');
             const tag_name = data[1 .. data.len - 1];
 
-            var namespace: Dom.Namespace = undefined;
-            var namespace_prefix: ?[]u8 = null;
-            errdefer if (namespace_prefix) |ns| allocator.free(ns);
-            var local_name: []u8 = "";
-            errdefer allocator.free(local_name);
             var element_type: Dom.ElementType = undefined;
-
             if (startsWith(tag_name, "svg ")) {
-                namespace = .svg;
-                namespace_prefix = try allocator.dupe(u8, "svg");
-                local_name = try allocator.dupe(u8, tag_name[4..]);
-                element_type = unreachable;
+                @panic("Element in the SVG namespace");
             } else if (startsWith(tag_name, "math ")) {
-                namespace = .mathml;
-                namespace_prefix = try allocator.dupe(u8, "math");
-                local_name = try allocator.dupe(u8, tag_name[5..]);
-                element_type = unreachable;
+                @panic("Element in the MathML namespace");
             } else {
-                namespace = .html;
-                namespace_prefix = null;
-                local_name = try allocator.dupe(u8, tag_name);
-                element_type = Dom.ElementType.fromStringHtml(local_name) orelse @panic("Unknown HTML element or custom element");
+                element_type = Dom.ElementType.fromStringHtml(tag_name) orelse @panic("Unknown HTML element or custom element");
             }
 
             const element = Dom.Element{
-                .namespace = namespace,
-                .namespace_prefix = namespace_prefix,
-                .local_name = local_name,
-                .is = null,
                 .element_type = element_type,
                 .attributes = .{},
+                .is = null,
                 .children = .{},
             };
             try stack.append(if (depth == 0)
@@ -211,10 +200,25 @@ fn parseDomTree(string: []const u8, allocator: *Allocator) !Dom.Dom {
             else
                 try stack.items[stack.items.len - 1].insertElement(allocator, element));
         } else if (data[0] == '"') {
-            assert(depth > 0);
-            assert(data[data.len - 1] == '"');
-            const text = data[1 .. data.len - 1];
-            try stack.items[stack.items.len - 1].insertCharacterData(allocator, text, .text);
+            var text: []const u8 = undefined;
+            var rest = lines.rest();
+            if (startsWith(rest, "| ")) {
+                assert(data[data.len - 1] == '"');
+                text = data[1 .. data.len - 1];
+            } else {
+                text = data.ptr[1 .. 1 + data.len];
+                while (rest.len > 0 and !startsWith(rest, "| ")) {
+                    text.len += lines.next().?.len + 1;
+                    rest = lines.rest();
+                } else {
+                    assert(endsWith(text, "\"\n"));
+                    text.len -= 2;
+                }
+            }
+            if (depth == 0)
+                try dom.document.insertCharacterData(allocator, text, .text)
+            else
+                try stack.items[stack.items.len - 1].insertCharacterData(allocator, text, .text);
         } else if (eql(data, "content")) {
             @panic("TODO Template contents");
         } else {
@@ -266,12 +270,20 @@ fn runTest(t: Test, allocator: *Allocator) !void {
     var tokenizer = Tokenizer.init(input, allocator, &tokens, &parse_errors);
     defer tokenizer.deinit();
 
-    while (try tokenizer.run()) {}
-
     var result_dom = Dom.Dom{};
     var constructor = TreeConstructor.init(&result_dom, allocator);
 
-    for (tokens.items) |token| {
-        try constructor.run(token);
+    while (try tokenizer.run()) {
+        if (tokens.items.len == 0) continue;
+        for (tokens.items) |token, i| {
+            const result = try constructor.run(token);
+            if (result.new_tokenizer_state) |state| {
+                assert(i == tokens.items.len - 1);
+                tokenizer.setState(state);
+            }
+            tokenizer.setAdjustedCurrentNodeIsNotInHtmlNamespace(result.adjusted_current_node_is_not_in_html_namespace);
+        }
+        tokens.clearRetainingCapacity();
+        parse_errors.clearRetainingCapacity();
     }
 }
