@@ -156,6 +156,8 @@ fn runTestFile(file_path: []const u8) !void {
 }
 
 fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: []Token, expected_errors: []ErrorInfo, initial_state: TokenizerState, last_start_tag_name: []const u8) !void {
+    var input_mutable = input;
+
     var all_tokens = ArrayList(Token).init(allocator);
     defer {
         for (all_tokens.items) |*t| t.deinit(allocator);
@@ -165,11 +167,11 @@ fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: [
     var all_parse_errors = ArrayList(ParseError).init(allocator);
     defer all_parse_errors.deinit();
 
-    var tokenizer = Tokenizer.initState(input, allocator, initial_state, &all_tokens, &all_parse_errors);
+    var tokenizer = Tokenizer.initState(allocator, initial_state, &all_tokens, &all_parse_errors);
     defer tokenizer.deinit();
     tokenizer.last_start_tag_name = try allocator.dupe(u8, last_start_tag_name);
 
-    while (try tokenizer.run()) {}
+    while (try tokenizer.run(&input_mutable)) {}
 
     try std.testing.expect(all_tokens.items[all_tokens.items.len - 1] == .eof);
     std.testing.expectEqual(expected_tokens.len, all_tokens.items.len - 1) catch {
@@ -300,34 +302,7 @@ fn expectEqualNullableSlices(comptime T: type, expected: ?[]const T, actual: ?[]
 }
 
 fn expectEqualTokens(expected: Token, actual: Token) !void {
-    const TokenTag = std.meta.Tag(Token);
-    try testing.expect(@as(TokenTag, actual) == @as(TokenTag, expected));
-    switch (expected) {
-        .doctype => |d| {
-            try expectEqualNullableSlices(u8, d.name, actual.doctype.name);
-            try expectEqualNullableSlices(u8, d.public_identifier, actual.doctype.public_identifier);
-            try expectEqualNullableSlices(u8, d.system_identifier, actual.doctype.system_identifier);
-            try testing.expectEqual(d.force_quirks, actual.doctype.force_quirks);
-        },
-        .start_tag => {
-            try expectEqualNullableSlices(u8, expected.start_tag.name, actual.start_tag.name);
-            try testing.expectEqual(expected.start_tag.self_closing, actual.start_tag.self_closing);
-            try expectEqualAttributes(expected.start_tag.attributes, actual.start_tag.attributes);
-        },
-        .end_tag => {
-            try expectEqualNullableSlices(u8, expected.end_tag.name, actual.end_tag.name);
-            // Don't compare selfClosing or attributes. From the spec:
-            // An end tag that has a / right before the closing > is treated as a regular end tag.
-            // Attributes in end tags are completely ignored and do not make their way into the DOM.
-        },
-        .comment => {
-            try expectEqualNullableSlices(u8, expected.comment.data, actual.comment.data);
-        },
-        .character => {
-            try testing.expectEqual(expected.character.data, actual.character.data);
-        },
-        .eof => unreachable,
-    }
+    try testing.expect(expected.eql(actual));
 }
 
 const ErrorInfo = struct {
