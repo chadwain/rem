@@ -16,6 +16,16 @@ pub fn freeStringHashMap(map: *StringHashMapUnmanaged([]u8), allocator: *Allocat
     map.deinit(allocator);
 }
 
+pub fn eqlStringHashMaps(map1: StringHashMapUnmanaged([]u8), map2: StringHashMapUnmanaged([]u8)) bool {
+    if (map1.count() != map2.count()) return false;
+    var iterator = map1.iterator();
+    while (iterator.next()) |attr| {
+        const map2_value = map2.get(attr.key_ptr.*) orelse return false;
+        if (!std.mem.eql(u8, attr.value_ptr.*, map2_value)) return false;
+    }
+    return true;
+}
+
 pub fn eqlNullSlices(comptime T: type, slice1: ?[]const T, slice2: ?[]const T) bool {
     if (slice1) |a| {
         const b = slice2 orelse return false;

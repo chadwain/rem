@@ -1,3 +1,8 @@
+// Copyright (C) 2021 Chadwain Holness
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -77,11 +82,12 @@ pub const Document = struct {
         }
 
         self.element = element;
+        self.element.?.parent = .document;
         return &self.element.?;
     }
 
     pub fn insertCharacterData(self: *Document, allocator: *Allocator, data: []const u8, interface: CharacterDataInterface) !void {
-        // Document nodes don't contain Text nodes.
+        // Document nodes don't contain Text nodes. (DOM§4.2)
         assert(interface != .text);
         const location = try self.cdata.addOne(allocator);
         errdefer self.cdata.shrinkRetainingCapacity(self.cdata.items.len - 1);
@@ -109,6 +115,9 @@ pub const Namespace = enum {
     unknown,
 };
 
+// TODO There are some Html elements missing from this list.
+// Also, keep note of which elements are obsolete.
+// (https://html.spec.whatwg.org/multipage/obsolete.html#non-conforming-features)
 pub const ElementType = enum {
     html_a,
     html_address,
@@ -219,6 +228,7 @@ pub const ElementType = enum {
     html_wbr,
     html_xmp,
 
+    mathml_math,
     mathml_mi,
     mathml_mo,
     mathml_mn,
@@ -226,10 +236,12 @@ pub const ElementType = enum {
     mathml_mtext,
     mathml_annotation_xml,
 
+    svg_svg,
     svg_foreign_object,
     svg_desc,
     svg_title,
 
+    custom_html,
     unknown,
 
     pub fn namespace(self: ElementType) Namespace {
@@ -237,14 +249,14 @@ pub const ElementType = enum {
         const html_lowest = std.meta.fieldInfo(ElementType, .html_a).value;
         const html_highest = std.meta.fieldInfo(ElementType, .html_xmp).value;
 
-        const mathml_lowest = std.meta.fieldInfo(ElementType, .mathml_mi).value;
+        const mathml_lowest = std.meta.fieldInfo(ElementType, .mathml_math).value;
         const mathml_highest = std.meta.fieldInfo(ElementType, .mathml_annotation_xml).value;
 
-        const svg_lowest = std.meta.fieldInfo(ElementType, .svg_foreign_object).value;
+        const svg_lowest = std.meta.fieldInfo(ElementType, .svg_svg).value;
         const svg_highest = std.meta.fieldInfo(ElementType, .svg_title).value;
 
         const value = @enumToInt(self);
-        if (value >= html_lowest and value <= html_highest) {
+        if ((value >= html_lowest and value <= html_highest) or self == .custom_html) {
             return .html;
         } else if (value >= mathml_lowest and value <= mathml_highest) {
             return .mathml;
@@ -374,10 +386,15 @@ pub const ElementType = enum {
     }
 };
 
+pub const ParentNode = union(enum) {
+    element: *Element,
+    document,
+};
+
 pub const Element = struct {
     element_type: ElementType,
+    parent: ?ParentNode,
     attributes: ElementAttributes,
-    is: ?[]u8,
     children: ArrayListUnmanaged(ElementOrCharacterData),
 
     pub fn deinit(self: *Element, allocator: *Allocator) void {
@@ -387,7 +404,6 @@ pub const Element = struct {
             allocator.free(attr.value_ptr.*);
         }
         self.attributes.deinit(allocator);
-        if (self.is) |is| allocator.free(is);
         self.children.deinit(allocator);
     }
 
@@ -416,6 +432,7 @@ pub const Element = struct {
         errdefer allocator.destroy(element);
         element.* = child;
         child_location.* = .{ .element = element };
+        element.parent = .{ .element = self };
         return element;
     }
 
@@ -457,22 +474,20 @@ pub const ElementOrCharacterData = union(enum) {
 };
 
 pub fn createAnElement(
-    allocator: *Allocator,
     element_type: ElementType,
     is: ?[]const u8,
     // TODO: Figure out what synchronous_custom_elements does.
     synchronous_custom_elements: bool,
-) !Element {
+) Element {
+    _ = is;
     _ = synchronous_custom_elements;
     // TODO: Do custom element definition lookup.
     // TODO: Handle all 3 different cases for this procedure.
-    const element_is = if (is) |s| try allocator.dupe(u8, s) else null;
-    errdefer if (element_is) |s| allocator.free(s);
     var result = Element{
         .element_type = element_type,
+        .parent = null,
         .attributes = .{},
         // TODO: Set the custom element state and custom element defintion.
-        .is = element_is,
         .children = .{},
     };
     // TODO: Check for a valid custom element name.
