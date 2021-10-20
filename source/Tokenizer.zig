@@ -6,8 +6,8 @@
 test "Tokenizer usage" {
     const allocator = std.heap.page_allocator;
 
-    const string = "<!doctype><html>asdf</body hello=world>";
-    var input: []const u21 = &decodeComptimeString(string);
+    const string = "<!doctype><HTML>asdf</body hello=world>";
+    var input: []const u21 = &html5.util.utf8DecodeComptime(string);
 
     var all_tokens = std.ArrayList(Token).init(allocator);
     defer {
@@ -532,7 +532,7 @@ fn consumeN(self: *Self, input: *[]const u21, count: usize) !void {
 
 fn nextFewCharsEql(input: []const u21, comptime string: []const u8) bool {
     var num_consumed: usize = 0;
-    for (decodeComptimeString(string)) |character| {
+    for (html5.util.utf8DecodeComptime(string)) |character| {
         const next_char_info = advancePosition(input[num_consumed..]);
         if (next_char_info.character == null or next_char_info.character.? != character) return false;
         num_consumed += next_char_info.num_consumed;
@@ -542,7 +542,7 @@ fn nextFewCharsEql(input: []const u21, comptime string: []const u8) bool {
 
 fn nextFewCharsCaseInsensitiveEql(input: []const u21, comptime string: []const u8) bool {
     var num_consumed: usize = 0;
-    for (decodeComptimeString(string)) |character| {
+    for (html5.util.utf8DecodeComptime(string)) |character| {
         const next_char_info = advancePosition(input[num_consumed..]);
         if (next_char_info.character == null or !caseInsensitiveEql(next_char_info.character.?, character)) return false;
         num_consumed += next_char_info.num_consumed;
@@ -632,7 +632,7 @@ fn emitCharacter(self: *Self, character: u21) !void {
 }
 
 fn emitString(self: *Self, comptime string: []const u8) !void {
-    for (decodeComptimeString(string)) |character| {
+    for (html5.util.utf8DecodeComptime(string)) |character| {
         try emitCharacter(self, character);
     }
 }
@@ -854,7 +854,7 @@ fn clearTempBuffer(self: *Self) void {
 }
 
 fn tempBufferEql(self: *Self, comptime string: []const u8) bool {
-    return std.mem.eql(u21, self.temp_buffer.items, &decodeComptimeString(string));
+    return std.mem.eql(u21, self.temp_buffer.items, &html5.util.utf8DecodeComptime(string));
 }
 
 fn tempBufferLast(self: *Self) u21 {
@@ -2479,26 +2479,4 @@ fn upperHexCharToNumber(c: u21) u21 {
 
 fn lowerHexCharToNumber(c: u21) u21 {
     return c - 0x57;
-}
-
-fn decodeComptimeStringLen(comptime string: []const u8) usize {
-    var i: usize = 0;
-    var decoded_len: usize = 0;
-    while (i < string.len) {
-        i += std.unicode.utf8ByteSequenceLength(string[i]) catch unreachable;
-        decoded_len += 1;
-    }
-    return decoded_len;
-}
-
-fn decodeComptimeString(comptime string: []const u8) [decodeComptimeStringLen(string)]u21 {
-    var result: [decodeComptimeStringLen(string)]u21 = undefined;
-    if (result.len == 0) return result;
-    var decoded_it = std.unicode.Utf8View.initComptime(string).iterator();
-    var i: usize = 0;
-    while (decoded_it.nextCodepoint()) |codepoint| {
-        result[i] = codepoint;
-        i += 1;
-    }
-    return result;
 }

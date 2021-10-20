@@ -8,10 +8,14 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const ComptimeStringMap = std.ComptimeStringMap;
+const AutoHashMapUnmanaged = std.AutoHashMapUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
 pub const Dom = struct {
     document: Document = .{},
+
+    /// For elements whose local name cannot be determined by looking at its element_type.
+    local_names: AutoHashMapUnmanaged(*const Element, []const u8) = .{},
 };
 
 pub const Document = struct {
@@ -384,6 +388,136 @@ pub const ElementType = enum {
     pub fn fromStringHtml(string: []const u8) ?ElementType {
         return html_map.get(string);
     }
+
+    pub fn toLocalName(self: ElementType) ?[]const u8 {
+        return switch (self) {
+            .html_a => "a",
+            .html_address => "address",
+            .html_applet => "applet",
+            .html_area => "area",
+            .html_article => "article",
+            .html_aside => "aside",
+            .html_b => "b",
+            .html_base => "base",
+            .html_basefont => "basefont",
+            .html_bgsound => "bgsound",
+            .html_big => "big",
+            .html_blockquote => "blockquote",
+            .html_body => "body",
+            .html_br => "br",
+            .html_button => "button",
+            .html_caption => "caption",
+            .html_center => "center",
+            .html_cite => "cite",
+            .html_code => "code",
+            .html_col => "col",
+            .html_colgroup => "colgroup",
+            .html_dd => "dd",
+            .html_details => "details",
+            .html_dialog => "dialog",
+            .html_dir => "dir",
+            .html_div => "div",
+            .html_dl => "dl",
+            .html_dt => "dt",
+            .html_em => "em",
+            .html_embed => "embed",
+            .html_fieldset => "fieldset",
+            .html_figcaption => "figcaption",
+            .html_figure => "figure",
+            .html_font => "font",
+            .html_footer => "footer",
+            .html_form => "form",
+            .html_frame => "frame",
+            .html_frameset => "frameset",
+            .html_h1 => "h1",
+            .html_h2 => "h2",
+            .html_h3 => "h3",
+            .html_h4 => "h4",
+            .html_h5 => "h5",
+            .html_h6 => "h6",
+            .html_head => "head",
+            .html_header => "header",
+            .html_hgroup => "hgroup",
+            .html_hr => "hr",
+            .html_html => "html",
+            .html_i => "i",
+            .html_iframe => "iframe",
+            .html_img => "img",
+            .html_input => "input",
+            .html_keygen => "keygen",
+            .html_li => "li",
+            .html_link => "link",
+            .html_listing => "listing",
+            .html_main => "main",
+            .html_marquee => "marquee",
+            .html_menu => "menu",
+            .html_meta => "meta",
+            .html_nav => "nav",
+            .html_nobr => "nobr",
+            .html_noembed => "noembed",
+            .html_noframes => "noframes",
+            .html_noscript => "noscript",
+            .html_object => "object",
+            .html_ol => "ol",
+            .html_optgroup => "optgroup",
+            .html_option => "option",
+            .html_p => "p",
+            .html_param => "param",
+            .html_plaintext => "plaintext",
+            .html_pre => "pre",
+            .html_rb => "rb",
+            .html_rp => "rp",
+            .html_rt => "rt",
+            .html_rtc => "rtc",
+            .html_ruby => "ruby",
+            .html_s => "s",
+            .html_script => "script",
+            .html_section => "section",
+            .html_select => "select",
+            .html_small => "small",
+            .html_source => "source",
+            .html_spacer => "spacer",
+            .html_span => "span",
+            .html_strike => "strike",
+            .html_strong => "strong",
+            .html_style => "style",
+            .html_summary => "summary",
+            .html_table => "table",
+            .html_tbody => "tbody",
+            .html_td => "td",
+            .html_template => "template",
+            .html_test => "test",
+            .html_textarea => "textarea",
+            .html_tfoot => "tfoot",
+            .html_th => "th",
+            .html_thead => "thead",
+            .html_title => "title",
+            .html_tr => "tr",
+            .html_track => "track",
+            .html_tt => "tt",
+            .html_u => "u",
+            .html_ul => "ul",
+            .html_wbr => "wbr",
+            .html_xmp => "xmp",
+
+            .mathml_math => "math",
+            .mathml_mi => "mi",
+            .mathml_mo => "mo",
+            .mathml_mn => "mn",
+            .mathml_ms => "ms",
+            .mathml_mtext => "mtext",
+            .mathml_annotation_xml => "annotation_xml",
+
+            .svg_svg => "svg",
+            .svg_foreign_object => "foreign_object",
+            .svg_desc => "desc",
+            .svg_title => "title",
+
+            .custom_html,
+            .unknown,
+            => null,
+        };
+    }
 };
 
 pub const ParentNode = union(enum) {
@@ -409,6 +543,10 @@ pub const Element = struct {
 
     pub fn namespace(self: Element) Namespace {
         return self.element_type.namespace();
+    }
+
+    pub fn localName(self: *const Element, dom: Dom) []const u8 {
+        return self.element_type.toLocalName() orelse dom.local_names.get(self) orelse unreachable;
     }
 
     pub fn addAttribute(self: *Element, allocator: *Allocator, key: []const u8, value: []const u8) !void {

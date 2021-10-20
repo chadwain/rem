@@ -26,8 +26,8 @@ fn endsWith(str1: []const u8, str2: []const u8) bool {
     return std.mem.endsWith(u8, str1, str2);
 }
 
-test "test 4" {
-    try runTestFile("test/html5lib-tests/tree-construction/tests4.dat");
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests1.dat");
 }
 
 fn runTestFile(file_path: []const u8) !void {
