@@ -16,6 +16,15 @@ pub fn freeStringHashMap(map: *StringHashMapUnmanaged([]u8), allocator: *Allocat
     map.deinit(allocator);
 }
 
+pub fn freeStringHashMapConst(map: *StringHashMapUnmanaged([]const u8), allocator: *Allocator) void {
+    var iterator = map.iterator();
+    while (iterator.next()) |attr| {
+        allocator.free(attr.key_ptr.*);
+        allocator.free(attr.value_ptr.*);
+    }
+    map.deinit(allocator);
+}
+
 pub fn eqlStringHashMaps(map1: StringHashMapUnmanaged([]u8), map2: StringHashMapUnmanaged([]u8)) bool {
     if (map1.count() != map2.count()) return false;
     var iterator = map1.iterator();
