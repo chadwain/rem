@@ -63,6 +63,16 @@ pub const Parser = struct {
     }
 };
 
+test "Parser" {
+    const allocator = std.heap.page_allocator;
+    var dom = Dom.Dom{ .allocator = allocator };
+    const string = "<!doctype><html>asdf</body hello=world>";
+    const input: []const u21 = &html5.util.utf8DecodeComptime(string);
+
+    var parser = Parser.init(&dom, input, allocator);
+    try parser.run();
+}
+
 pub const FragmentParser = struct {
     context: *Dom.Element,
     inner: Parser,
@@ -84,7 +94,7 @@ pub const FragmentParser = struct {
         // If the API of TreeConstructor is changed, maybe this won't be necessary.
         const dom = try allocator.create(Dom.Dom);
         errdefer allocator.destroy(dom);
-        dom.* = .{};
+        dom.* = .{ .allocator = allocator };
 
         var result = Self{
             // NOTE: Make a duplicate of the context element?
@@ -119,9 +129,11 @@ pub const FragmentParser = struct {
         };
 
         // Steps 5-7
-        const html = Dom.Element{ .element_type = .html_html, .parent = null, .attributes = .{}, .children = .{} };
-        const element = result.dom.document.insertElement(html);
-        try result.inner.constructor.open_elements.append(result.inner.constructor.allocator, element);
+        const html = try result.dom.allocator.create(Dom.Element);
+        errdefer result.dom.allocator.destroy(html);
+        html.* = Dom.Element{ .element_type = .html_html, .parent = null, .attributes = .{}, .children = .{} };
+        try Dom.mutation.documentAppendElement(result.dom, &result.dom.document, html, .Suppress);
+        try result.inner.constructor.open_elements.append(result.inner.constructor.allocator, html);
 
         // Step 8
         if (context.element_type == .html_template) {
@@ -155,3 +167,18 @@ pub const FragmentParser = struct {
         try self.inner.run();
     }
 };
+
+test "FragmentParser" {
+    const allocator = std.heap.page_allocator;
+    var context = Dom.Element{
+        .element_type = .html_div,
+        .attributes = .{},
+        .parent = null,
+        .children = .{},
+    };
+    const string = "<!doctype><html>asdf</body hello=world>";
+    const input: []const u21 = &html5.util.utf8DecodeComptime(string);
+
+    var parser = try FragmentParser.init(&context, input, allocator, false, .no_quirks);
+    try parser.run();
+}

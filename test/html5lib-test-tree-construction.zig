@@ -170,7 +170,7 @@ fn parseDomTree(string: []const u8, fragment: ?Dom.ElementType, allocator: *Allo
         } }
     else
         Expected{
-            .dom = Dom.Dom{},
+            .dom = Dom.Dom{ .allocator = allocator },
         };
 
     var lines = std.mem.split(u8, string, "\n");
@@ -212,7 +212,14 @@ fn parseDomTree(string: []const u8, fragment: ?Dom.ElementType, allocator: *Allo
             if (depth == 0) {
                 switch (result) {
                     .dom => |*dom| try dom.document.insertCharacterData(allocator, comment, .comment),
-                    .fragment => |*e| try e.insertCharacterData(allocator, comment, .comment),
+                    .fragment => |*e| {
+                        const cdata = try allocator.create(Dom.CharacterData);
+                        errdefer allocator.destroy(cdata);
+                        cdata.* = .{ .interface = .comment };
+                        errdefer cdata.deinit(allocator);
+                        try cdata.append(allocator, comment);
+                        try Dom.mutation.elementAppend(dom, e, .{ .cdata = cdata }, .Suppress);
+                    },
                 }
             } else {
                 try stack.items[depth - 1].insertCharacterData(allocator, comment, .comment);
@@ -234,16 +241,19 @@ fn parseDomTree(string: []const u8, fragment: ?Dom.ElementType, allocator: *Allo
                 element_type = Dom.ElementType.fromStringHtml(tag_name) orelse @panic("Unknown HTML element or custom element");
             }
 
-            const element = Dom.Element{
+            const element = try allocator.create(Dom.Element);
+            errdefer allocator.destroy(element);
+            element.* = Dom.Element{
                 .element_type = element_type,
                 .parent = null,
                 .attributes = .{},
                 .children = .{},
             };
+            errdefer element.deinit(allocator);
             try stack.append(if (depth == 0)
                 switch (result) {
                     .dom => |*dom| dom.document.insertElement(element),
-                    .fragment => |*e| try e.insertElement(allocator, element),
+                    .fragment => |*e| try Dom.mutation.elementAppend(dom, e, .{ .element = element }, .Suppress),
                 }
             else
                 try stack.items[stack.items.len - 1].insertElement(allocator, element));
@@ -316,7 +326,7 @@ fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
 
     switch (t.expected) {
         .dom => {
-            var result_dom = Dom.Dom{};
+            var result_dom = Dom.Dom{ .allocator = allocator };
             var parser = Parser.init(&result_dom, input, allocator);
             try parser.run();
         },

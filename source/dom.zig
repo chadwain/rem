@@ -11,17 +11,54 @@ const ComptimeStringMap = std.ComptimeStringMap;
 const AutoHashMapUnmanaged = std.AutoHashMapUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
+pub const mutation = @import("dom/mutation.zig");
+
+pub const DomException = enum {
+    NotFound,
+    HierarchyRequest,
+};
+
 pub const Dom = struct {
     document: Document = .{},
+    allocator: *Allocator,
 
     /// For elements whose local name cannot be determined by looking at its element_type.
     local_names: AutoHashMapUnmanaged(*const Element, []const u8) = .{},
+
+    pub fn makeCdata(self: *Dom, data: []const u8, interface: CharacterDataInterface) !*CharacterData {
+        const cdata = try self.allocator.create(CharacterData);
+        errdefer self.allocator.destroy(cdata);
+        cdata.* = try CharacterData.init(self.allocator, data, interface);
+        return cdata;
+    }
+
+    pub fn freeCdata(self: *Dom, cdata: *CharacterData) void {
+        cdata.deinit(self.allocator);
+        self.allocator.destroy(cdata);
+    }
+
+    pub fn makeDoctype(self: *Dom, doctype_name: ?[]const u8, public_identifier: ?[]const u8, system_identifier: ?[]const u8) !*DocumentType {
+        const doctype = try self.allocator.create(DocumentType);
+        errdefer self.allocator.destroy(doctype);
+        doctype.* = try DocumentType.init(self.allocator, doctype_name, public_identifier, system_identifier);
+        return doctype;
+    }
+
+    pub fn freeDoctype(self: *Dom, doctype: *DocumentType) void {
+        doctype.deinit(self.allocator);
+        self.allocator.destroy(doctype);
+    }
+
+    pub fn exception(self: *Dom, ex: DomException) void {
+        _ = self;
+        std.debug.print("DOM Exception raised: {s}\n", .{@tagName(ex)});
+    }
 };
 
 pub const Document = struct {
-    doctype: ?DocumentType = null,
-    element: ?Element = null,
-    cdata: ArrayListUnmanaged(CharacterData) = .{},
+    doctype: ?*DocumentType = null,
+    element: ?*Element = null,
+    cdata: ArrayListUnmanaged(*CharacterData) = .{},
     cdata_slices: [3]ArraySlice = .{.{ .begin = 0, .end = 0 }} ** 3,
     cdata_current_slice: u2 = 0,
     quirks_mode: QuirksMode = .no_quirks,
@@ -40,74 +77,38 @@ pub const Document = struct {
         quirks,
         limited_quirks,
     };
-
-    pub fn insertDocumentType(
-        self: *Document,
-        allocator: *Allocator,
-        doctype_name: ?[]const u8,
-        public_identifier: ?[]const u8,
-        system_identifier: ?[]const u8,
-    ) !*DocumentType {
-        {
-            assert(self.doctype == null);
-            assert(self.cdata_current_slice == 0);
-            const num_cdatas = self.cdata_slices[0].end;
-            self.cdata_slices[1] = .{ .begin = num_cdatas, .end = num_cdatas };
-            self.cdata_current_slice = 1;
-        }
-
-        const name = doctype_name orelse "";
-        const publicId = public_identifier orelse "";
-        const systemId = system_identifier orelse "";
-        const strings = try allocator.alloc(u8, name.len + publicId.len + systemId.len);
-        self.doctype = DocumentType{
-            .name = strings[0..name.len],
-            .publicId = strings[name.len .. name.len + publicId.len],
-            .systemId = strings[name.len + publicId.len ..],
-        };
-        std.mem.copy(u8, self.doctype.?.name, name);
-        std.mem.copy(u8, self.doctype.?.publicId, publicId);
-        std.mem.copy(u8, self.doctype.?.systemId, systemId);
-        return &self.doctype.?;
-    }
-
-    pub fn insertElement(self: *Document, element: Element) *Element {
-        {
-            assert(self.element == null);
-            assert(self.cdata_current_slice < 2);
-            if (self.cdata_current_slice == 0) {
-                assert(self.doctype == null);
-                const num_cdatas = self.cdata_slices[0].end;
-                self.cdata_slices[1] = .{ .begin = num_cdatas, .end = num_cdatas };
-            }
-            const num_cdatas = self.cdata_slices[1].end;
-            self.cdata_slices[2] = .{ .begin = num_cdatas, .end = num_cdatas };
-            self.cdata_current_slice = 2;
-        }
-
-        self.element = element;
-        self.element.?.parent = .document;
-        return &self.element.?;
-    }
-
-    pub fn insertCharacterData(self: *Document, allocator: *Allocator, data: []const u8, interface: CharacterDataInterface) !void {
-        // Document nodes don't contain Text nodes. (DOM§4.2)
-        assert(interface != .text);
-        const location = try self.cdata.addOne(allocator);
-        errdefer self.cdata.shrinkRetainingCapacity(self.cdata.items.len - 1);
-        const copy = try allocator.dupe(u8, data);
-        location.* = .{
-            .data = .{ .items = copy, .capacity = copy.len },
-            .interface = interface,
-        };
-        self.cdata_slices[self.cdata_current_slice].end += 1;
-    }
 };
 
 pub const DocumentType = struct {
     name: []u8,
     publicId: []u8,
     systemId: []u8,
+
+    fn init(allocator: *Allocator, doctype_name: ?[]const u8, public_identifier: ?[]const u8, system_identifier: ?[]const u8) !DocumentType {
+        const name = doctype_name orelse "";
+        const publicId = public_identifier orelse "";
+        const systemId = system_identifier orelse "";
+        const strings = try allocator.alloc(u8, name.len + publicId.len + systemId.len);
+
+        var result = @as(DocumentType, undefined);
+        var index: usize = 0;
+        result.name = strings[index .. index + name.len];
+        index += name.len;
+        result.publicId = strings[index .. index + publicId.len];
+        index += publicId.len;
+        result.systemId = strings[index .. index + systemId.len];
+
+        std.mem.copy(u8, result.name, name);
+        std.mem.copy(u8, result.publicId, publicId);
+        std.mem.copy(u8, result.systemId, systemId);
+
+        return result;
+    }
+
+    fn deinit(self: *DocumentType, allocator: *Allocator) void {
+        const memory = self.name.ptr[0 .. self.name.len + self.publicId.len + self.systemId.len];
+        allocator.free(memory);
+    }
 };
 
 pub const ElementAttributes = StringHashMapUnmanaged([]u8);
@@ -500,18 +501,18 @@ pub const ElementType = enum {
             .html_wbr => "wbr",
             .html_xmp => "xmp",
 
-            .mathml_math => "math",
-            .mathml_mi => "mi",
-            .mathml_mo => "mo",
-            .mathml_mn => "mn",
-            .mathml_ms => "ms",
-            .mathml_mtext => "mtext",
-            .mathml_annotation_xml => "annotation_xml",
+            .mathml_math => @panic("TODO: ElementType.toLocalName for mathml_math elements"),
+            .mathml_mi => @panic("TODO: ElementType.toLocalName for mathml_mi elements"),
+            .mathml_mo => @panic("TODO: ElementType.toLocalName for mathml_mo elements"),
+            .mathml_mn => @panic("TODO: ElementType.toLocalName for mathml_mn elements"),
+            .mathml_ms => @panic("TODO: ElementType.toLocalName for mathml_ms elements"),
+            .mathml_mtext => @panic("TODO: ElementType.toLocalName for mathml_mtext elements"),
+            .mathml_annotation_xml => @panic("TODO: ElementType.toLocalName for mathml_annotation_xml elements"),
 
-            .svg_svg => "svg",
-            .svg_foreign_object => "foreign_object",
-            .svg_desc => "desc",
-            .svg_title => "title",
+            .svg_svg => @panic("TODO: ElementType.toLocalName for svg_svg elements"),
+            .svg_foreign_object => @panic("TODO: ElementType.toLocalName for svg_foreign_object elements"),
+            .svg_desc => @panic("TODO: ElementType.toLocalName for svg_desc elements"),
+            .svg_title => @panic("TODO: ElementType.toLocalName for svg_title elements"),
 
             .custom_html,
             .unknown,
@@ -520,6 +521,13 @@ pub const ElementType = enum {
     }
 };
 
+/// The type for the children of an Element node.
+pub const ElementOrCharacterData = union(enum) {
+    element: *Element,
+    cdata: *CharacterData,
+};
+
+/// The type for the parent of an Element node.
 pub const ParentNode = union(enum) {
     element: *Element,
     document,
@@ -545,7 +553,7 @@ pub const Element = struct {
         return self.element_type.namespace();
     }
 
-    pub fn localName(self: *const Element, dom: Dom) []const u8 {
+    pub fn localName(self: *const Element, dom: *const Dom) []const u8 {
         return self.element_type.toLocalName() orelse dom.local_names.get(self) orelse unreachable;
     }
 
@@ -563,40 +571,12 @@ pub const Element = struct {
         }
     }
 
-    pub fn insertElement(self: *Element, allocator: *Allocator, child: Element) !*Element {
-        const child_location = try self.children.addOne(allocator);
-        errdefer self.children.shrinkRetainingCapacity(self.children.items.len - 1);
-        const element = try allocator.create(Element);
-        errdefer allocator.destroy(element);
-        element.* = child;
-        child_location.* = .{ .element = element };
-        element.parent = .{ .element = self };
-        return element;
-    }
-
-    pub fn insertCharacterData(self: *Element, allocator: *Allocator, data: []const u8, interface: CharacterDataInterface) !void {
-        const child_location = try self.children.addOne(allocator);
-        errdefer self.children.shrinkRetainingCapacity(self.children.items.len - 1);
-        const cdata = try allocator.create(CharacterData);
-        errdefer allocator.destroy(cdata);
-        const data_copy = try allocator.dupe(u8, data);
-        errdefer allocator.free(data_copy);
-        cdata.* = .{
-            // Ideally, this should be ArrayListUnmanaged(u8).fromOwnedSlice().
-            .data = std.ArrayList(u8).fromOwnedSlice(allocator, data_copy).toUnmanaged(),
-            .interface = interface,
-        };
-        child_location.* = .{ .cdata = cdata };
-    }
-};
-
-pub const CharacterData = struct {
-    // TODO Maybe just store a slice
-    data: ArrayListUnmanaged(u8),
-    interface: CharacterDataInterface,
-
-    pub fn append(self: *CharacterData, allocator: *Allocator, data: []const u8) !void {
-        try self.data.appendSlice(allocator, data);
+    pub fn lastChild(self: *Element) ?ElementOrCharacterData {
+        if (self.children.items.len != 0) {
+            return self.children.items[self.children.items.len - 1];
+        } else {
+            return null;
+        }
     }
 };
 
@@ -606,9 +586,25 @@ pub const CharacterDataInterface = enum {
     comment,
 };
 
-pub const ElementOrCharacterData = union(enum) {
-    element: *Element,
-    cdata: *CharacterData,
+pub const CharacterData = struct {
+    // TODO Maybe just store a slice
+    data: ArrayListUnmanaged(u8) = .{},
+    interface: CharacterDataInterface,
+
+    fn init(allocator: *Allocator, data: []const u8, interface: CharacterDataInterface) !CharacterData {
+        var result = CharacterData{ .interface = interface };
+        try result.data.appendSlice(allocator, data);
+        return result;
+    }
+
+    fn deinit(self: *CharacterData, allocator: *Allocator) void {
+        self.data.deinit(allocator);
+    }
+
+    // TODO: Move this function to mutation.
+    pub fn append(self: *CharacterData, allocator: *Allocator, data: []const u8) !void {
+        try self.data.appendSlice(allocator, data);
+    }
 };
 
 pub fn createAnElement(
@@ -630,70 +626,4 @@ pub fn createAnElement(
     };
     // TODO: Check for a valid custom element name.
     return result;
-}
-
-pub fn printDom(dom: Dom, writer: anytype, allocator: *Allocator) !void {
-    try std.fmt.format(writer, "Document: {s}\n", .{@tagName(dom.document.quirks_mode)});
-
-    try printDocumentCdatas(dom, writer, 0);
-
-    if (dom.document.doctype) |doctype| {
-        try std.fmt.format(writer, "  DocumentType: name={s} publicId={s} systemId={s}\n", .{ doctype.name, doctype.publicId, doctype.systemId });
-    }
-
-    try printDocumentCdatas(dom, writer, 1);
-
-    const ConstElementOrCharacterData = union(enum) {
-        element: *const Element,
-        cdata: *const CharacterData,
-    };
-    var node_stack = ArrayListUnmanaged(struct { node: ConstElementOrCharacterData, depth: usize }){};
-    defer node_stack.deinit(allocator);
-    if (dom.document.element) |*document_element| {
-        try node_stack.append(allocator, .{ .node = .{ .element = document_element }, .depth = 1 });
-    }
-    while (node_stack.items.len > 0) {
-        const item = node_stack.pop();
-        var len = item.depth;
-        while (len > 0) : (len -= 1) {
-            try std.fmt.format(writer, "  ", .{});
-        }
-        switch (item.node) {
-            .element => |element| {
-                const namespace_prefix = element.namespace_prefix orelse "";
-                const is = element.is orelse "";
-                try std.fmt.format(writer, "Element: type={s} local_name={s} namespace={s} prefix={s} is={s}", .{
-                    @tagName(element.element_type),
-                    element.local_name,
-                    @tagName(element.namespace),
-                    namespace_prefix,
-                    is,
-                });
-                var attr_it = element.attributes.iterator();
-                try std.fmt.format(writer, " [ ", .{});
-                while (attr_it.next()) |attr| {
-                    try std.fmt.format(writer, "\"{s}\"=\"{s}\" ", .{ attr.key_ptr.*, attr.value_ptr.* });
-                }
-                try std.fmt.format(writer, "]\n", .{});
-                var num_children = element.children.items.len;
-                while (num_children > 0) : (num_children -= 1) {
-                    const node = switch (element.children.items[num_children - 1]) {
-                        .element => |e| ConstElementOrCharacterData{ .element = e },
-                        .cdata => |c| ConstElementOrCharacterData{ .cdata = c },
-                    };
-                    try node_stack.append(allocator, .{ .node = node, .depth = item.depth + 1 });
-                }
-            },
-            .cdata => |cdata| try std.fmt.format(writer, "{s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items }),
-        }
-    }
-
-    try printDocumentCdatas(dom, writer, 2);
-}
-
-fn printDocumentCdatas(dom: Dom, writer: anytype, slice_index: u2) !void {
-    const slice = dom.document.cdata_slices[slice_index];
-    for (slice.sliceOf(dom.document.cdata.items)) |cdata| {
-        try std.fmt.format(writer, "  {s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items });
-    }
 }
