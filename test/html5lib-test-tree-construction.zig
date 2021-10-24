@@ -27,7 +27,7 @@ fn endsWith(str1: []const u8, str2: []const u8) bool {
 }
 
 test {
-    try runTestFile("test/html5lib-tests/tree-construction/tests1.dat");
+    try runTestFile("test/html5lib-tests/tree-construction/tests3.dat");
 }
 
 fn runTestFile(file_path: []const u8) !void {
@@ -38,13 +38,13 @@ fn runTestFile(file_path: []const u8) !void {
     const contents = try std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize));
     defer allocator.free(contents);
 
-    var tests = std.mem.split(u8, contents[0 .. contents.len - 1], "\n\n");
+    var tests = contents;
     var count: usize = 1;
-    while (tests.next()) |t| {
+    while (tests.len > 0) {
         defer count += 1;
-        const the_test = createTest(t, allocator) catch |err| switch (err) {
+        const the_test = createTest(&tests, allocator) catch |err| switch (err) {
             error.SkipTest => {
-                std.debug.print("Test {} skipped.\n\n", .{count});
+                std.debug.print("Test {} skipped.\n", .{count});
                 continue;
             },
             else => return err,
@@ -65,13 +65,13 @@ fn runTestFile(file_path: []const u8) !void {
                 try runTest(the_test, allocator, true);
             },
         }
-        std.debug.print("\n\n", .{});
+        std.debug.print("\n", .{});
     }
 }
 
-const Expected = union(enum) {
+const Expected = struct {
     dom: Dom.Dom,
-    fragment: Dom.Element,
+    fragment: ?Dom.Element,
 };
 
 const Test = struct {
@@ -84,8 +84,9 @@ const Test = struct {
     const ScriptOption = enum { on, off, both };
 };
 
-fn createTest(test_string: []const u8, allocator: *Allocator) error{ OutOfMemory, SkipTest }!Test {
-    var lines = std.mem.split(u8, test_string, "\n");
+fn createTest(test_string: *[]const u8, allocator: *Allocator) error{ OutOfMemory, SkipTest }!Test {
+    var lines = std.mem.split(u8, test_string.*, "\n");
+    defer test_string.* = lines.rest();
     var section = lines.next().?;
 
     assert(eql(section, "#data"));
@@ -141,10 +142,13 @@ fn createTest(test_string: []const u8, allocator: *Allocator) error{ OutOfMemory
     //std.debug.print("#script-{s}\n", .{@tagName(script)});
 
     assert(eql(section, "#document"));
-    var document: []const u8 = lines.rest();
+    //var document: []const u8 = lines.rest();
     //std.debug.print("#document\n{s}\n", .{document});
 
-    var expected = try parseDomTree(document, context_element_type, allocator);
+    var expected = parseDomTree(&lines, context_element_type, allocator) catch |err| switch (err) {
+        error.DomException => unreachable,
+        else => |e| return e,
+    };
     //var stderr = std.io.getStdErr().writer();
     //try Dom.printDom(dom, stderr, allocator);
 
@@ -157,24 +161,24 @@ fn createTest(test_string: []const u8, allocator: *Allocator) error{ OutOfMemory
     };
 }
 
-fn parseDomTree(string: []const u8, fragment: ?Dom.ElementType, allocator: *Allocator) !Expected {
+fn parseDomTree(lines: *std.mem.SplitIterator(u8), fragment: ?Dom.ElementType, allocator: *Allocator) !Expected {
     var stack = ArrayList(*Dom.Element).init(allocator);
     defer stack.deinit();
 
-    var result = if (fragment) |f|
-        Expected{ .fragment = Dom.Element{
+    var result = Expected{
+        .dom = Dom.Dom{ .allocator = allocator },
+        .fragment = if (fragment) |f| Dom.Element{
             .element_type = f,
             .parent = null,
             .attributes = .{},
             .children = .{},
-        } }
-    else
-        Expected{
-            .dom = Dom.Dom{ .allocator = allocator },
-        };
+        } else null,
+    };
 
-    var lines = std.mem.split(u8, string, "\n");
     while (lines.next()) |line| {
+        if (line.len == 0) {
+            break;
+        }
         assert(startsWith(line, "| "));
         var first_char: usize = 2;
         while (line[first_char] == ' ') {
@@ -193,7 +197,8 @@ fn parseDomTree(string: []const u8, fragment: ?Dom.ElementType, allocator: *Allo
             const name_start = "<!DOCTYPE ".len;
             const name_end = std.mem.indexOfAnyPos(u8, data, name_start, " >").?;
             const name = data[name_start..name_end];
-            if (data[name_end] == ' ') {
+
+            const doctype = if (data[name_end] == ' ') blk: {
                 assert(data[name_end + 1] == '"');
                 const public_id_endquote = std.mem.indexOfScalarPos(u8, data, name_end + 2, '"').?;
                 const public_id = data[name_end + 2 .. public_id_endquote];
@@ -201,28 +206,25 @@ fn parseDomTree(string: []const u8, fragment: ?Dom.ElementType, allocator: *Allo
                 assert(data[public_id_endquote + 2] == '"');
                 const system_id_endquote = std.mem.indexOfScalarPos(u8, data, public_id_endquote + 3, '"').?;
                 const system_id = data[public_id_endquote + 3 .. system_id_endquote];
-                _ = try result.dom.document.insertDocumentType(allocator, name, public_id, system_id);
-            } else {
-                _ = try result.dom.document.insertDocumentType(allocator, name, null, null);
-            }
+
+                break :blk try result.dom.makeDoctype(name, public_id, system_id);
+            } else try result.dom.makeDoctype(name, null, null);
+            errdefer result.dom.freeDoctype(doctype);
+            try Dom.mutation.documentAppendDocumentType(&result.dom, &result.dom.document, doctype, .Suppress);
         } else if (startsWith(data, "<!-- ")) {
             // comment
             assert(endsWith(data, " -->"));
             const comment = data["<!-- ".len .. data.len - " -->".len];
+            const cdata = try result.dom.makeCdata(comment, .comment);
+            errdefer result.dom.freeCdata(cdata);
             if (depth == 0) {
-                switch (result) {
-                    .dom => |*dom| try dom.document.insertCharacterData(allocator, comment, .comment),
-                    .fragment => |*e| {
-                        const cdata = try allocator.create(Dom.CharacterData);
-                        errdefer allocator.destroy(cdata);
-                        cdata.* = .{ .interface = .comment };
-                        errdefer cdata.deinit(allocator);
-                        try cdata.append(allocator, comment);
-                        try Dom.mutation.elementAppend(dom, e, .{ .cdata = cdata }, .Suppress);
-                    },
+                if (result.fragment) |*e| {
+                    try Dom.mutation.elementAppend(&result.dom, e, .{ .cdata = cdata }, .Suppress);
+                } else {
+                    try Dom.mutation.documentAppendCdata(&result.dom, &result.dom.document, cdata, .Suppress);
                 }
             } else {
-                try stack.items[depth - 1].insertCharacterData(allocator, comment, .comment);
+                try Dom.mutation.elementAppend(&result.dom, stack.items[depth - 1], .{ .cdata = cdata }, .Suppress);
             }
         } else if (startsWith(data, "<?")) {
             // processing instruction
@@ -232,55 +234,65 @@ fn parseDomTree(string: []const u8, fragment: ?Dom.ElementType, allocator: *Allo
             assert(data[data.len - 1] == '>');
             const tag_name = data[1 .. data.len - 1];
 
+            const element = try result.dom.allocator.create(Dom.Element);
+            errdefer result.dom.allocator.destroy(element);
+
             var element_type: Dom.ElementType = undefined;
             if (startsWith(tag_name, "svg ")) {
-                @panic("Element in the SVG namespace");
+                // TODO Try to find an element type from the tag name.
+                try result.dom.local_names.put(result.dom.allocator, element, tag_name[4..]);
+                element_type = .custom_svg;
             } else if (startsWith(tag_name, "math ")) {
-                @panic("Element in the MathML namespace");
+                // TODO Try to find an element type from the tag name.
+                try result.dom.local_names.put(result.dom.allocator, element, tag_name[5..]);
+                element_type = .custom_mathml;
             } else {
-                element_type = Dom.ElementType.fromStringHtml(tag_name) orelse @panic("Unknown HTML element or custom element");
+                const maybe_element_type = Dom.ElementType.fromStringHtml(tag_name);
+                if (maybe_element_type) |t| {
+                    element_type = t;
+                } else {
+                    try result.dom.local_names.put(result.dom.allocator, element, tag_name);
+                    element_type = .custom_html;
+                }
             }
 
-            const element = try allocator.create(Dom.Element);
-            errdefer allocator.destroy(element);
             element.* = Dom.Element{
                 .element_type = element_type,
                 .parent = null,
                 .attributes = .{},
                 .children = .{},
             };
-            errdefer element.deinit(allocator);
-            try stack.append(if (depth == 0)
-                switch (result) {
-                    .dom => |*dom| dom.document.insertElement(element),
-                    .fragment => |*e| try Dom.mutation.elementAppend(dom, e, .{ .element = element }, .Suppress),
+            errdefer element.deinit(result.dom.allocator);
+
+            if (depth == 0) {
+                if (result.fragment) |*e| {
+                    try Dom.mutation.elementAppend(&result.dom, e, .{ .element = element }, .Suppress);
+                } else {
+                    try Dom.mutation.documentAppendElement(&result.dom, &result.dom.document, element, .Suppress);
                 }
-            else
-                try stack.items[stack.items.len - 1].insertElement(allocator, element));
+            } else {
+                try Dom.mutation.elementAppend(&result.dom, stack.items[stack.items.len - 1], .{ .element = element }, .Suppress);
+            }
+            try stack.append(element);
         } else if (data[0] == '"') {
             // text
-            var text: []const u8 = undefined;
-            var rest = lines.rest();
-            if (startsWith(rest, "| ")) {
-                assert(data[data.len - 1] == '"');
-                text = data[1 .. data.len - 1];
-            } else {
-                text = data.ptr[1 .. 1 + data.len];
-                while (rest.len > 0 and !startsWith(rest, "| ")) {
-                    text.len += lines.next().?.len + 1;
-                    rest = lines.rest();
-                } else {
-                    assert(endsWith(text, "\"\n"));
-                    text.len -= 2;
+            var text: []const u8 = data[0..0];
+            var my_line = data;
+            while (true) {
+                text.len += my_line.len + 1;
+                if (text.len > 2 and endsWith(my_line, "\"")) {
+                    text = text[1 .. text.len - 2];
+                    break;
                 }
+                my_line = lines.next().?;
             }
+
+            const cdata = try result.dom.makeCdata(text, .text);
+            errdefer result.dom.freeCdata(cdata);
             if (depth == 0) {
-                switch (result) {
-                    .dom => unreachable,
-                    .fragment => |*e| try e.insertCharacterData(allocator, text, .text),
-                }
+                try Dom.mutation.elementAppend(&result.dom, &result.fragment.?, .{ .cdata = cdata }, .Suppress);
             } else {
-                try stack.items[stack.items.len - 1].insertCharacterData(allocator, text, .text);
+                try Dom.mutation.elementAppend(&result.dom, stack.items[stack.items.len - 1], .{ .cdata = cdata }, .Suppress);
             }
         } else if (eql(data, "content")) {
             // template contents
@@ -324,40 +336,37 @@ fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
     };
     defer allocator.free(input);
 
-    switch (t.expected) {
-        .dom => {
-            var result_dom = Dom.Dom{ .allocator = allocator };
-            var parser = Parser.init(&result_dom, input, allocator);
-            try parser.run();
-        },
-        .fragment => |e| {
-            var context_element = Dom.Element{
-                .element_type = e.element_type,
-                .parent = null,
-                .attributes = .{},
-                .children = .{},
-            };
-            // TODO Set the scripting flag.
-            var parser = try FragmentParser.init(&context_element, input, allocator, scripting, .no_quirks);
-            try parser.run();
+    if (t.expected.fragment) |e| {
+        var context_element = Dom.Element{
+            .element_type = e.element_type,
+            .parent = null,
+            .attributes = .{},
+            .children = .{},
+        };
+        // TODO Set the scripting flag.
+        var parser = try FragmentParser.init(&context_element, input, allocator, scripting, .no_quirks);
+        try parser.run();
 
-            const html = parser.inner.constructor.open_elements.items[0];
-            assert(html.element_type == .html_html);
-            try expectEqual(e.children.items.len, html.children.items.len);
-            for (e.children.items) |e_child, i| {
-                const html_child = html.children.items[i];
-                switch (e_child) {
-                    .element => {
-                        try expect(html_child == .element);
-                        try deeplyCompareElements(allocator, e_child.element, html_child.element);
-                    },
-                    .cdata => {
-                        try expect(html_child == .cdata);
-                        try expectEqualCdatas(e_child.cdata, html_child.cdata);
-                    },
-                }
+        const html = parser.inner.constructor.open_elements.items[0];
+        assert(html.element_type == .html_html);
+        try expectEqual(e.children.items.len, html.children.items.len);
+        for (e.children.items) |e_child, i| {
+            const html_child = html.children.items[i];
+            switch (e_child) {
+                .element => {
+                    try expect(html_child == .element);
+                    try deeplyCompareElements(allocator, e_child.element, html_child.element);
+                },
+                .cdata => {
+                    try expect(html_child == .cdata);
+                    try expectEqualCdatas(e_child.cdata, html_child.cdata);
+                },
             }
-        },
+        }
+    } else {
+        var result_dom = Dom.Dom{ .allocator = allocator };
+        var parser = Parser.init(&result_dom, input, allocator);
+        try parser.run();
     }
 }
 
