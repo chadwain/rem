@@ -17,8 +17,7 @@ pub const SuppressObservers = enum { Suppress, NoSuppress };
 pub fn documentAppendDocumentType(dom: *Dom.Dom, document: *Dom.Document, doctype: *Dom.DocumentType, suppress: SuppressObservers) !void {
     // Ensure pre-insertion validity. Only step 6 of this algorithm applies.
     if (document.doctype != null or document.element != null) {
-        dom.exception(.HierarchyRequest);
-        return error.DomException;
+        return dom.exception(.HierarchyRequest);
     }
 
     // The pre-insert steps are essentially a no-op.
@@ -39,8 +38,7 @@ pub fn documentAppendDocumentType(dom: *Dom.Dom, document: *Dom.Document, doctyp
 pub fn documentAppendElement(dom: *Dom.Dom, document: *Dom.Document, element: *Dom.Element, suppress: SuppressObservers) !void {
     // Ensure pre-insertion validity. Only step 6 of this algorithm applies.
     if (document.element != null) {
-        dom.exception(.HierarchyRequest);
-        return error.DomException;
+        return dom.exception(.HierarchyRequest);
     }
 
     // The pre-insert steps are essentially a no-op.
@@ -66,8 +64,7 @@ pub fn documentAppendElement(dom: *Dom.Dom, document: *Dom.Document, element: *D
 pub fn documentAppendCdata(dom: *Dom.Dom, document: *Dom.Document, cdata: *Dom.CharacterData, suppress: SuppressObservers) !void {
     // Ensure pre-insertion validity. Only step 5 of this algorithm applies.
     if (cdata.interface == .text) {
-        dom.exception(.HierarchyRequest);
-        return error.DomException;
+        return dom.exception(.HierarchyRequest);
     }
 
     // The pre-insert steps are essentially a no-op.

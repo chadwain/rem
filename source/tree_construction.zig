@@ -27,7 +27,7 @@ const CharacterData = Dom.CharacterData;
 const CharacterDataInterface = Dom.CharacterDataInterface;
 
 test "Tree constructor usage" {
-    const allocator = std.heap.page_allocator;
+    const allocator = std.testing.allocator;
 
     const string = "<!doctype><html>asdf</body hello=world>";
     var input: []const u21 = &html5.util.utf8DecodeComptime(string);
@@ -45,7 +45,10 @@ test "Tree constructor usage" {
     defer tokenizer.deinit();
 
     var dom = Dom.Dom{ .allocator = allocator };
+    defer dom.deinit();
+
     var constructor = TreeConstructor.init(&dom, allocator, .{});
+    defer constructor.deinit();
 
     while (try tokenizer.run(&input)) {
         if (tokens.items.len > 0) {
@@ -119,6 +122,17 @@ pub const TreeConstructor = struct {
             .fragment_context = args.fragment_context,
             .scripting = args.scripting,
         };
+    }
+
+    pub fn deinit(self: *TreeConstructor) void {
+        self.open_elements.deinit(self.allocator);
+        self.template_insertion_modes.deinit(self.allocator);
+        self.active_formatting_elements.deinit(self.allocator);
+        for (self.formatting_element_tag_attributes.items) |*attributes| {
+            html5.util.freeStringHashMapConst(attributes, self.allocator);
+        }
+        self.formatting_element_tag_attributes.deinit(self.allocator);
+        self.pending_table_character_tokens.deinit(self.allocator);
     }
 
     pub fn run(self: *TreeConstructor, token: Token) !RunResult {
@@ -430,11 +444,9 @@ fn beforeHtml(c: *TreeConstructor, token: Token) !void {
         .start_tag => |start_tag| {
             if (strEql(start_tag.name, "html")) {
                 const element = try createAnElementForTheToken(c, start_tag, .html_html, .{ .document = &c.dom.document });
-                const element_ptr = try c.dom.allocator.create(Element);
-                errdefer c.dom.allocator.destroy(element_ptr);
-                element_ptr.* = element;
-                try Dom.mutation.documentAppendElement(c.dom, &c.dom.document, element_ptr, .Suppress);
-                try c.open_elements.append(c.allocator, element_ptr);
+                errdefer c.dom.freeElement(element);
+                try Dom.mutation.documentAppendElement(c.dom, &c.dom.document, element, .Suppress);
+                try c.open_elements.append(c.allocator, element);
                 changeTo(c, .BeforeHead);
             } else {
                 try beforeHtmlAnythingElse(c);
@@ -454,14 +466,9 @@ fn beforeHtml(c: *TreeConstructor, token: Token) !void {
 
 fn beforeHtmlAnythingElse(c: *TreeConstructor) !void {
     // TODO: Set the element's "node document"
-    const element = try c.dom.allocator.create(Element);
-    errdefer c.dom.allocator.destroy(element);
-    element.* = Dom.Element{
-        .element_type = .html_html,
-        .parent = .document,
-        .attributes = .{},
-        .children = .{},
-    };
+    const element = try c.dom.makeElement(.html_html);
+    errdefer c.dom.freeElement(element);
+    element.parent = .document;
     try Dom.mutation.documentAppendElement(c.dom, &c.dom.document, element, .Suppress);
     try c.open_elements.append(c.allocator, element);
     reprocessIn(c, .BeforeHead);
@@ -612,10 +619,8 @@ fn inHeadStartTagScript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
     const intended_parent: ParentNode = switch (adjusted_insertion_location) {
         .element => |e| .{ .element = e },
     };
-    var element = try createAnElementForTheToken(c, start_tag, .html_script, intended_parent);
-    const element_ptr = try c.dom.allocator.create(Element);
-    errdefer c.dom.allocator.destroy(element_ptr);
-    element_ptr.* = element;
+    const element = try createAnElementForTheToken(c, start_tag, .html_script, intended_parent);
+    errdefer c.dom.freeElement(element);
     // TODO Set the script's parser document to the document.
     // TODO Unset the script's non-blocking flag.
     if (c.fragment_context != null) {
@@ -625,9 +630,9 @@ fn inHeadStartTagScript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
     //      then optionally mark the script element as "already started".
     switch (adjusted_insertion_location) {
         // TODO: Check pre-insertion validity
-        .element => |e| try Dom.mutation.elementAppend(c.dom, e, .{ .element = element_ptr }, .Suppress),
+        .element => |e| try Dom.mutation.elementAppend(c.dom, e, .{ .element = element }, .Suppress),
     }
-    try c.open_elements.append(c.allocator, element_ptr);
+    try c.open_elements.append(c.allocator, element);
     setTokenizerState(c, .ScriptData);
     changeToAndSetOriginalInsertionMode(c, .Text, c.insertion_mode);
 }
@@ -835,7 +840,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                         assert(body.element_type == .html_body);
                         var attr_it = start_tag.attributes.iterator();
                         while (attr_it.next()) |attr| {
-                            try body.addAttributeNoReplace(c.allocator, attr.key_ptr.*, attr.value_ptr.*);
+                            try body.addAttributeNoReplace(c.dom.allocator, attr.key_ptr.*, attr.value_ptr.*);
                         }
                     }
                 },
@@ -1357,8 +1362,8 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     _ = c.open_elements.pop();
                     c.frameset_ok = .not_ok;
                 },
-                else => try inBodyEndTagAnythingElse(c, end_tag.name, token_element_type),
-            } else try inBodyEndTagAnythingElse(c, end_tag.name, .custom_html);
+                else => try inBodyEndTagAnythingElse(c, end_tag.name),
+            } else try inBodyEndTagAnythingElse(c, end_tag.name);
         },
     }
 }
@@ -1407,7 +1412,7 @@ fn inBodyStartTagHtml(c: *TreeConstructor, start_tag: TokenStartTag) !void {
         const top_element = c.open_elements.items[0];
         var iterator = start_tag.attributes.iterator();
         while (iterator.next()) |attr| {
-            try top_element.addAttributeNoReplace(c.allocator, attr.key_ptr.*, attr.value_ptr.*);
+            try top_element.addAttributeNoReplace(c.dom.allocator, attr.key_ptr.*, attr.value_ptr.*);
         }
     }
 }
@@ -1425,17 +1430,17 @@ fn inBodyStartTagAnythingElse(c: *TreeConstructor, start_tag: TokenStartTag, ele
     _ = try insertHtmlElementForTheToken(c, start_tag, element_type);
 }
 
-fn inBodyEndTagAnythingElse(c: *TreeConstructor, tag_name: []const u8, element_type: ElementType) !void {
+fn inBodyEndTagAnythingElse(c: *TreeConstructor, tag_name: []const u8) !void {
     var i = c.open_elements.items.len;
     while (i > 0) : (i -= 1) {
         const node = c.open_elements.items[i - 1];
-        if (strEql(node.localName(c.dom), tag_name)) {
-            generateImpliedEndTags(c, element_type);
+        if (node.namespace() == .html and strEql(tag_name, node.localName(c.dom))) {
+            generateImpliedEndTags(c, tag_name);
             if (i != c.open_elements.items.len) parseError(.Generic);
             c.open_elements.shrinkRetainingCapacity(i - 1);
             break;
         } else {
-            if (isSpecialElement(element_type)) {
+            if (isSpecialElement(node.element_type)) {
                 parseError(.Generic);
                 // Ignore the token.
                 return;
@@ -2685,20 +2690,19 @@ fn createAnElementForTheToken(
     start_tag: TokenStartTag,
     element_type: ElementType,
     intended_parent: ParentNode,
-) !Element {
+) !*Element {
     // TODO: Speculative HTML parser.
     // TODO: Get the element's node element.
     _ = intended_parent;
-    const is = start_tag.attributes.get("is");
     // TODO: Do custom element definition lookup.
     // NOTE: Custom element definition lookup is done twice using the same arguments:
     //       once here, and again when creating an element.
-    var element = Dom.createAnElement(element_type, is, false);
-    errdefer element.deinit(c.allocator);
+    const element = try c.dom.makeElement(element_type);
+    errdefer c.dom.freeElement(element);
     // TODO This should follow https://dom.spec.whatwg.org/#concept-element-attributes-append
     var attr_it = start_tag.attributes.iterator();
     while (attr_it.next()) |attr| {
-        try element.addAttribute(c.allocator, attr.key_ptr.*, attr.value_ptr.*);
+        try element.addAttribute(c.dom.allocator, attr.key_ptr.*, attr.value_ptr.*);
         // TODO: Check for attribute namespace parse errors.
     }
     // TODO: Execute scripts.
@@ -2712,24 +2716,21 @@ fn insertForeignElementForTheToken(c: *TreeConstructor, start_tag: TokenStartTag
     const intended_parent: ParentNode = switch (adjusted_insertion_location) {
         .element => |e| .{ .element = e },
     };
-    var element = try createAnElementForTheToken(c, start_tag, element_type, intended_parent);
-    errdefer element.deinit(c.allocator);
+    const element = try createAnElementForTheToken(c, start_tag, element_type, intended_parent);
+    errdefer c.dom.freeElement(element);
     // TODO: Allow the element to be dropped.
     // TODO: Some stuff regarding custom elements
-    const element_ptr = try c.dom.allocator.create(Element);
-    errdefer c.dom.allocator.destroy(element_ptr);
-    element_ptr.* = element;
     if (element_type.toLocalName() == null) {
-        try c.dom.local_names.put(c.allocator, element_ptr, start_tag.name);
+        try c.dom.local_names.put(c.dom.allocator, element, start_tag.name);
     }
 
     switch (adjusted_insertion_location) {
         // TODO: Check pre-insertion validity
-        .element => |e| try Dom.mutation.elementAppend(c.dom, e, .{ .element = element_ptr }, .Suppress),
+        .element => |e| try Dom.mutation.elementAppend(c.dom, e, .{ .element = element }, .Suppress),
     }
     // TODO: Some stuff regarding custom elements
-    try c.open_elements.append(c.allocator, element_ptr);
-    return element_ptr;
+    try c.open_elements.append(c.allocator, element);
+    return element;
 }
 
 const insertHtmlElementForTheToken = insertForeignElementForTheToken;
@@ -2748,6 +2749,14 @@ fn stackOfOpenElementsHasElement(c: *TreeConstructor, element: *Element) bool {
         if (c.open_elements.items[index - 1] == element) return true;
     }
     return false;
+}
+
+fn findInStackOfOpenElements(c: *TreeConstructor, element: *Element) ?usize {
+    var index = c.open_elements.items.len;
+    while (index > 0) : (index -= 1) {
+        if (c.open_elements.items[index - 1] == element) return index - 1;
+    }
+    return null;
 }
 
 fn removeFromStackOfOpenElements(c: *TreeConstructor, element: *Element) void {
@@ -2879,18 +2888,25 @@ fn pushOntoListOfActiveFormattingElements(c: *TreeConstructor, element: *Element
 }
 
 fn reconstructActiveFormattingElements(c: *TreeConstructor) !void {
+    // Step 1
     if (c.active_formatting_elements.items.len == 0) return;
+
+    // Step 2
     const first_entry = c.active_formatting_elements.items[c.active_formatting_elements.items.len - 1];
     if (first_entry.element == null or stackOfOpenElementsHasElement(c, first_entry.element.?)) return;
 
-    var i = c.active_formatting_elements.items.len - 2;
+    // Steps 3-6
+    var i = c.active_formatting_elements.items.len - 1;
     while (i > 0) : (i -= 1) {
         const entry = c.active_formatting_elements.items[i];
         if (entry.element == null or stackOfOpenElementsHasElement(c, entry.element.?)) {
+            // Step 7
             i += 1;
             break;
         }
     }
+
+    // Steps 8-10
     while (i < c.active_formatting_elements.items.len) : (i += 1) {
         const entry = &c.active_formatting_elements.items[i];
         const new_element = try insertHtmlElementForTheToken(
@@ -2940,7 +2956,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
             while (i > after_last_marker) : (i -= 1) {
                 if (c.active_formatting_elements.items[i - 1].element.?.element_type == element_type) break :blk i - 1;
             } else {
-                return inBodyEndTagAnythingElse(c, tag_name, element_type);
+                return inBodyEndTagAnythingElse(c, tag_name);
             }
         };
         // formatting_element is not a marker.
@@ -2966,7 +2982,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
             parseError(.Generic);
         }
         // Step 4.7
-        const furthest_block_index = blk: {
+        var furthest_block_index = blk: {
             var i = formatting_element_in_open_elements_index + 1;
             while (i < c.open_elements.items.len) : (i += 1) {
                 const node = c.open_elements.items[i];
@@ -2991,7 +3007,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
         var last_node = furthest_block_index;
         var next_node = furthest_block_index - 1;
 
-        // Step 4.12 and 4.13
+        // Steps 4.12 and 4.13
         var inner_loop_counter: usize = 0;
         while (true) {
             inner_loop_counter += 1;
@@ -2999,43 +3015,42 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
             const node = &c.open_elements.items[node_in_open_elements_index];
             if (node.* == formatting_element.element.?) break;
 
-            // Step 4.13.4 and 4.13.5
             const node_in_formatting_elements_index = blk: {
                 var i = c.active_formatting_elements.items.len;
                 while (i > 0) : (i -= 1) {
                     if (node.* == c.active_formatting_elements.items[i - 1].element) break :blk i - 1;
                 } else break :blk null;
             };
+
+            // Step 4.13.4
             if (inner_loop_counter > 3 and node_in_formatting_elements_index != null) {
                 removeFromListOfActiveFormattingElements(c, node_in_formatting_elements_index.?);
                 if (node_in_formatting_elements_index.? < bookmark) bookmark -= 1;
+            }
+
+            // Step 4.13.5
+            if (node_in_formatting_elements_index == null) {
                 _ = c.open_elements.orderedRemove(node_in_open_elements_index);
-                next_node = node_in_open_elements_index - 1;
-                continue;
-            } else if (node_in_formatting_elements_index == null) {
-                _ = c.open_elements.orderedRemove(node_in_open_elements_index);
+                last_node -= 1;
                 next_node = node_in_open_elements_index - 1;
                 continue;
             }
+
             const node_in_formatting_elements = c.active_formatting_elements.items[node_in_formatting_elements_index.?];
 
             // Step 4.13.6
-            const new_element = blk: {
-                const location = try c.allocator.create(Element);
-                location.* = try createAnElementForTheToken(
-                    c,
-                    TokenStartTag{
-                        .name = node.*.localName(c.dom),
-                        .attributes = c.formatting_element_tag_attributes.items[node_in_formatting_elements.tag_attributes_ref - 1],
-                        .self_closing = undefined,
-                    },
-                    node.*.element_type,
-                    .{ .element = common_ancestor },
-                );
-                break :blk location;
-            };
+            const new_element = try createAnElementForTheToken(
+                c,
+                TokenStartTag{
+                    .name = undefined,
+                    .attributes = c.formatting_element_tag_attributes.items[node_in_formatting_elements.tag_attributes_ref - 1],
+                    .self_closing = undefined,
+                },
+                node.*.element_type,
+                .{ .element = common_ancestor },
+            );
             c.active_formatting_elements.items[node_in_formatting_elements_index.?].element = new_element;
-            c.open_elements.items[node_in_open_elements_index] = new_element;
+            node.* = new_element;
 
             // Step 4.13.7
             if (last_node == furthest_block_index) {
@@ -3058,7 +3073,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
 
         const new_element = blk: {
             // Step 4.15
-            var elem = try createAnElementForTheToken(
+            const elem = try createAnElementForTheToken(
                 c,
                 TokenStartTag{
                     .name = undefined,
@@ -3068,15 +3083,14 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
                 formatting_element.element.?.element_type,
                 .{ .element = furthest_block },
             );
-            const elem_ptr = try c.dom.allocator.create(Element);
-            errdefer c.dom.allocator.destroy(elem_ptr);
             // Step 4.16
             std.mem.swap(ArrayListUnmanaged(Dom.ElementOrCharacterData), &furthest_block.children, &elem.children);
             // Step 4.17
-            try Dom.mutation.elementAppend(c.dom, furthest_block, .{ .element = elem_ptr }, .Suppress);
-            break :blk elem_ptr;
+            try Dom.mutation.elementAppend(c.dom, furthest_block, .{ .element = elem }, .Suppress);
+            break :blk elem;
         };
 
+        // Step 4.18
         // Instead of calling removeFromListOfActiveFormattingElements, which might delete the tag attributes
         // for formatting_element, remove it from the list directly.
         _ = c.active_formatting_elements.orderedRemove(formatting_element_index);
@@ -3094,7 +3108,9 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
             );
         }
 
+        // Step 4.19
         removeFromStackOfOpenElements(c, formatting_element.element.?);
+        furthest_block_index = findInStackOfOpenElements(c, furthest_block).?;
         if (furthest_block_index < c.open_elements.items.len - 1) {
             try c.open_elements.insert(c.allocator, furthest_block_index + 1, new_element);
         } else {
@@ -3327,7 +3343,7 @@ fn hasElementInSelectScope(c: *TreeConstructor, target: ElementType) bool {
     return true;
 }
 
-fn generateImpliedEndTags(c: *TreeConstructor, exception: ?ElementType) void {
+fn generateImpliedEndTags(c: *TreeConstructor, exception: anytype) void {
     const list = &[_]ElementType{
         .html_dd,
         .html_dt,
@@ -3341,11 +3357,23 @@ fn generateImpliedEndTags(c: *TreeConstructor, exception: ?ElementType) void {
         .html_rtc,
     };
 
-    var element_type = currentNode(c).element_type;
-    while (std.mem.indexOfScalar(ElementType, list, element_type)) |_| {
-        if (exception == null or element_type != exception.?) {
+    var node = currentNode(c);
+    while (std.mem.indexOfScalar(ElementType, list, node.element_type)) |_| {
+        const Exception = @TypeOf(exception);
+        const should_pop: bool = switch (@typeInfo(Exception)) {
+            .Null => true,
+            .EnumLiteral => node.element_type != @as(ElementType, exception),
+            else => if (Exception == []const u8)
+                !strEql(exception, node.localName(c.dom))
+            else if (Exception == ElementType)
+                node.element_type != exception
+            else
+                @compileError("Expected null, enum literal, ElementType, or []const u8, instead found '" ++ @typeName(Exception) ++ "'."),
+        };
+
+        if (should_pop) {
             _ = c.open_elements.pop();
-            element_type = currentNode(c).element_type;
+            node = currentNode(c);
         } else {
             break;
         }
@@ -3431,6 +3459,11 @@ fn isMathMlTextIntegrationPoint(element: *Element) bool {
 }
 
 fn isHtmlIntegrationPoint(element: *Element) bool {
-    _ = element;
-    @panic("TODO: Determine if an element is an HTML integration point.");
+    return switch (element.element_type) {
+        .svg_foreign_object,
+        .svg_desc,
+        .svg_title,
+        => true,
+        else => @panic("TODO: Determine if an element is an HTML integration point."),
+    };
 }

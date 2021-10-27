@@ -25,33 +25,77 @@ pub const Dom = struct {
     /// For elements whose local name cannot be determined by looking at its element_type.
     local_names: AutoHashMapUnmanaged(*const Element, []const u8) = .{},
 
+    all_elements: ArrayListUnmanaged(*Element) = .{},
+    all_cdatas: ArrayListUnmanaged(*CharacterData) = .{},
+    all_doctypes: ArrayListUnmanaged(*DocumentType) = .{},
+
+    pub fn deinit(self: *Dom) void {
+        for (self.all_elements.items) |item| {
+            item.deinit(self.allocator);
+            self.allocator.destroy(item);
+        }
+        self.all_elements.deinit(self.allocator);
+        for (self.all_cdatas.items) |item| {
+            self.freeCdata(item);
+            self.allocator.destroy(item);
+        }
+        self.all_cdatas.deinit(self.allocator);
+        for (self.all_doctypes.items) |item| {
+            self.freeDoctype(item);
+            self.allocator.destroy(item);
+        }
+        self.all_doctypes.deinit(self.allocator);
+
+        self.document.deinit(self.allocator);
+
+        var iterator = self.local_names.valueIterator();
+        while (iterator.next()) |local_name| self.allocator.free(local_name.*);
+        self.local_names.deinit(self.allocator);
+    }
+
     pub fn makeCdata(self: *Dom, data: []const u8, interface: CharacterDataInterface) !*CharacterData {
         const cdata = try self.allocator.create(CharacterData);
         errdefer self.allocator.destroy(cdata);
+        try self.all_cdatas.append(self.allocator, cdata);
         cdata.* = try CharacterData.init(self.allocator, data, interface);
         return cdata;
     }
 
     pub fn freeCdata(self: *Dom, cdata: *CharacterData) void {
         cdata.deinit(self.allocator);
-        self.allocator.destroy(cdata);
     }
 
     pub fn makeDoctype(self: *Dom, doctype_name: ?[]const u8, public_identifier: ?[]const u8, system_identifier: ?[]const u8) !*DocumentType {
         const doctype = try self.allocator.create(DocumentType);
         errdefer self.allocator.destroy(doctype);
+        try self.all_doctypes.append(self.allocator, doctype);
         doctype.* = try DocumentType.init(self.allocator, doctype_name, public_identifier, system_identifier);
         return doctype;
     }
 
     pub fn freeDoctype(self: *Dom, doctype: *DocumentType) void {
         doctype.deinit(self.allocator);
-        self.allocator.destroy(doctype);
     }
 
-    pub fn exception(self: *Dom, ex: DomException) void {
+    pub fn makeElement(self: *Dom, element_type: ElementType) !*Element {
+        // TODO: This function should implement the "create an element" algorithm.
+        // https://dom.spec.whatwg.org/#concept-create-element
+        const element = try self.allocator.create(Element);
+        errdefer self.allocator.destroy(element);
+        try self.all_elements.append(self.allocator, element);
+        element.* = Element{ .element_type = element_type, .attributes = .{}, .parent = null, .children = .{} };
+        return element;
+    }
+
+    pub fn freeElement(self: *Dom, element: *Element) void {
+        if (self.local_names.fetchRemove(element)) |entry| self.allocator.free(entry.value);
+        element.deinit(self.allocator);
+    }
+
+    pub fn exception(self: *Dom, ex: DomException) error{DomException} {
         _ = self;
         std.debug.print("DOM Exception raised: {s}\n", .{@tagName(ex)});
+        return error.DomException;
     }
 };
 
@@ -77,6 +121,10 @@ pub const Document = struct {
         quirks,
         limited_quirks,
     };
+
+    fn deinit(self: *Document, allocator: *Allocator) void {
+        self.cdata.deinit(allocator);
+    }
 };
 
 pub const DocumentType = struct {
@@ -247,6 +295,8 @@ pub const ElementType = enum {
     svg_title,
 
     custom_html,
+    custom_mathml,
+    custom_svg,
     unknown,
 
     pub fn namespace(self: ElementType) Namespace {
@@ -263,9 +313,9 @@ pub const ElementType = enum {
         const value = @enumToInt(self);
         if ((value >= html_lowest and value <= html_highest) or self == .custom_html) {
             return .html;
-        } else if (value >= mathml_lowest and value <= mathml_highest) {
+        } else if ((value >= mathml_lowest and value <= mathml_highest) or self == .custom_mathml) {
             return .mathml;
-        } else if (value >= svg_lowest and value <= svg_highest) {
+        } else if ((value >= svg_lowest and value <= svg_highest) or self == .custom_svg) {
             return .svg;
         } else {
             return .unknown;
@@ -509,12 +559,14 @@ pub const ElementType = enum {
             .mathml_mtext => @panic("TODO: ElementType.toLocalName for mathml_mtext elements"),
             .mathml_annotation_xml => @panic("TODO: ElementType.toLocalName for mathml_annotation_xml elements"),
 
-            .svg_svg => @panic("TODO: ElementType.toLocalName for svg_svg elements"),
-            .svg_foreign_object => @panic("TODO: ElementType.toLocalName for svg_foreign_object elements"),
-            .svg_desc => @panic("TODO: ElementType.toLocalName for svg_desc elements"),
-            .svg_title => @panic("TODO: ElementType.toLocalName for svg_title elements"),
+            .svg_svg => "svg",
+            .svg_foreign_object => "foreignObject",
+            .svg_desc => "desc",
+            .svg_title => "title",
 
             .custom_html,
+            .custom_mathml,
+            .custom_svg,
             .unknown,
             => null,
         };
@@ -606,24 +658,3 @@ pub const CharacterData = struct {
         try self.data.appendSlice(allocator, data);
     }
 };
-
-pub fn createAnElement(
-    element_type: ElementType,
-    is: ?[]const u8,
-    // TODO: Figure out what synchronous_custom_elements does.
-    synchronous_custom_elements: bool,
-) Element {
-    _ = is;
-    _ = synchronous_custom_elements;
-    // TODO: Do custom element definition lookup.
-    // TODO: Handle all 3 different cases for this procedure.
-    var result = Element{
-        .element_type = element_type,
-        .parent = null,
-        .attributes = .{},
-        // TODO: Set the custom element state and custom element defintion.
-        .children = .{},
-    };
-    // TODO: Check for a valid custom element name.
-    return result;
-}

@@ -27,13 +27,11 @@ fn endsWith(str1: []const u8, str2: []const u8) bool {
 }
 
 test {
-    try runTestFile("test/html5lib-tests/tree-construction/tests3.dat");
+    try runTestFile("test/html5lib-tests/tree-construction/tests4.dat");
 }
 
 fn runTestFile(file_path: []const u8) !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    //defer assert(!gpa.deinit());
-    const allocator = &gpa.allocator;
+    const allocator = std.testing.allocator;
 
     const contents = try std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize));
     defer allocator.free(contents);
@@ -42,13 +40,15 @@ fn runTestFile(file_path: []const u8) !void {
     var count: usize = 1;
     while (tests.len > 0) {
         defer count += 1;
-        const the_test = createTest(&tests, allocator) catch |err| switch (err) {
+        var the_test = createTest(&tests, allocator) catch |err| switch (err) {
             error.SkipTest => {
                 std.debug.print("Test {} skipped.\n", .{count});
                 continue;
             },
             else => return err,
         };
+        defer the_test.expected.deinit();
+
         switch (the_test.script) {
             .on => {
                 std.debug.print("\n\nTest {} scripting: on\n", .{count});
@@ -71,7 +71,11 @@ fn runTestFile(file_path: []const u8) !void {
 
 const Expected = struct {
     dom: Dom.Dom,
-    fragment: ?Dom.Element,
+    fragment_context: ?*Dom.Element,
+
+    fn deinit(self: *@This()) void {
+        self.dom.deinit();
+    }
 };
 
 const Test = struct {
@@ -161,19 +165,13 @@ fn createTest(test_string: *[]const u8, allocator: *Allocator) error{ OutOfMemor
     };
 }
 
-fn parseDomTree(lines: *std.mem.SplitIterator(u8), fragment: ?Dom.ElementType, allocator: *Allocator) !Expected {
+fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Dom.ElementType, allocator: *Allocator) !Expected {
     var stack = ArrayList(*Dom.Element).init(allocator);
     defer stack.deinit();
 
-    var result = Expected{
-        .dom = Dom.Dom{ .allocator = allocator },
-        .fragment = if (fragment) |f| Dom.Element{
-            .element_type = f,
-            .parent = null,
-            .attributes = .{},
-            .children = .{},
-        } else null,
-    };
+    var dom = Dom.Dom{ .allocator = allocator };
+    errdefer dom.deinit();
+    const fragment_context = if (context_element_type) |ty| try dom.makeElement(ty) else null;
 
     while (lines.next()) |line| {
         if (line.len == 0) {
@@ -207,24 +205,24 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), fragment: ?Dom.ElementType, a
                 const system_id_endquote = std.mem.indexOfScalarPos(u8, data, public_id_endquote + 3, '"').?;
                 const system_id = data[public_id_endquote + 3 .. system_id_endquote];
 
-                break :blk try result.dom.makeDoctype(name, public_id, system_id);
-            } else try result.dom.makeDoctype(name, null, null);
-            errdefer result.dom.freeDoctype(doctype);
-            try Dom.mutation.documentAppendDocumentType(&result.dom, &result.dom.document, doctype, .Suppress);
+                break :blk try dom.makeDoctype(name, public_id, system_id);
+            } else try dom.makeDoctype(name, null, null);
+            errdefer dom.freeDoctype(doctype);
+            try Dom.mutation.documentAppendDocumentType(&dom, &dom.document, doctype, .Suppress);
         } else if (startsWith(data, "<!-- ")) {
             // comment
             assert(endsWith(data, " -->"));
             const comment = data["<!-- ".len .. data.len - " -->".len];
-            const cdata = try result.dom.makeCdata(comment, .comment);
-            errdefer result.dom.freeCdata(cdata);
+            const cdata = try dom.makeCdata(comment, .comment);
+            errdefer dom.freeCdata(cdata);
             if (depth == 0) {
-                if (result.fragment) |*e| {
-                    try Dom.mutation.elementAppend(&result.dom, e, .{ .cdata = cdata }, .Suppress);
+                if (fragment_context) |e| {
+                    try Dom.mutation.elementAppend(&dom, e, .{ .cdata = cdata }, .Suppress);
                 } else {
-                    try Dom.mutation.documentAppendCdata(&result.dom, &result.dom.document, cdata, .Suppress);
+                    try Dom.mutation.documentAppendCdata(&dom, &dom.document, cdata, .Suppress);
                 }
             } else {
-                try Dom.mutation.elementAppend(&result.dom, stack.items[depth - 1], .{ .cdata = cdata }, .Suppress);
+                try Dom.mutation.elementAppend(&dom, stack.items[depth - 1], .{ .cdata = cdata }, .Suppress);
             }
         } else if (startsWith(data, "<?")) {
             // processing instruction
@@ -234,44 +232,33 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), fragment: ?Dom.ElementType, a
             assert(data[data.len - 1] == '>');
             const tag_name = data[1 .. data.len - 1];
 
-            const element = try result.dom.allocator.create(Dom.Element);
-            errdefer result.dom.allocator.destroy(element);
-
-            var element_type: Dom.ElementType = undefined;
+            var element: *Dom.Element = undefined;
             if (startsWith(tag_name, "svg ")) {
+                element = try dom.makeElement(.custom_svg);
                 // TODO Try to find an element type from the tag name.
-                try result.dom.local_names.put(result.dom.allocator, element, tag_name[4..]);
-                element_type = .custom_svg;
+                try dom.local_names.put(dom.allocator, element, tag_name[4..]);
             } else if (startsWith(tag_name, "math ")) {
+                element = try dom.makeElement(.custom_mathml);
                 // TODO Try to find an element type from the tag name.
-                try result.dom.local_names.put(result.dom.allocator, element, tag_name[5..]);
-                element_type = .custom_mathml;
+                try dom.local_names.put(dom.allocator, element, tag_name[5..]);
             } else {
                 const maybe_element_type = Dom.ElementType.fromStringHtml(tag_name);
                 if (maybe_element_type) |t| {
-                    element_type = t;
+                    element = try dom.makeElement(t);
                 } else {
-                    try result.dom.local_names.put(result.dom.allocator, element, tag_name);
-                    element_type = .custom_html;
+                    element = try dom.makeElement(.custom_html);
+                    try dom.local_names.put(dom.allocator, element, tag_name);
                 }
             }
 
-            element.* = Dom.Element{
-                .element_type = element_type,
-                .parent = null,
-                .attributes = .{},
-                .children = .{},
-            };
-            errdefer element.deinit(result.dom.allocator);
-
             if (depth == 0) {
-                if (result.fragment) |*e| {
-                    try Dom.mutation.elementAppend(&result.dom, e, .{ .element = element }, .Suppress);
+                if (fragment_context) |e| {
+                    try Dom.mutation.elementAppend(&dom, e, .{ .element = element }, .Suppress);
                 } else {
-                    try Dom.mutation.documentAppendElement(&result.dom, &result.dom.document, element, .Suppress);
+                    try Dom.mutation.documentAppendElement(&dom, &dom.document, element, .Suppress);
                 }
             } else {
-                try Dom.mutation.elementAppend(&result.dom, stack.items[stack.items.len - 1], .{ .element = element }, .Suppress);
+                try Dom.mutation.elementAppend(&dom, stack.items[stack.items.len - 1], .{ .element = element }, .Suppress);
             }
             try stack.append(element);
         } else if (data[0] == '"') {
@@ -287,12 +274,12 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), fragment: ?Dom.ElementType, a
                 my_line = lines.next().?;
             }
 
-            const cdata = try result.dom.makeCdata(text, .text);
-            errdefer result.dom.freeCdata(cdata);
+            const cdata = try dom.makeCdata(text, .text);
+            errdefer dom.freeCdata(cdata);
             if (depth == 0) {
-                try Dom.mutation.elementAppend(&result.dom, &result.fragment.?, .{ .cdata = cdata }, .Suppress);
+                try Dom.mutation.elementAppend(&dom, fragment_context.?, .{ .cdata = cdata }, .Suppress);
             } else {
-                try Dom.mutation.elementAppend(&result.dom, stack.items[stack.items.len - 1], .{ .cdata = cdata }, .Suppress);
+                try Dom.mutation.elementAppend(&dom, stack.items[stack.items.len - 1], .{ .cdata = cdata }, .Suppress);
             }
         } else if (eql(data, "content")) {
             // template contents
@@ -318,7 +305,7 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), fragment: ?Dom.ElementType, a
         }
     }
 
-    return result;
+    return Expected{ .dom = dom, .fragment_context = fragment_context };
 }
 
 fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
@@ -336,7 +323,7 @@ fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
     };
     defer allocator.free(input);
 
-    if (t.expected.fragment) |e| {
+    if (t.expected.fragment_context) |e| {
         var context_element = Dom.Element{
             .element_type = e.element_type,
             .parent = null,
@@ -345,6 +332,7 @@ fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
         };
         // TODO Set the scripting flag.
         var parser = try FragmentParser.init(&context_element, input, allocator, scripting, .no_quirks);
+        defer parser.deinit();
         try parser.run();
 
         const html = parser.inner.constructor.open_elements.items[0];
@@ -365,7 +353,10 @@ fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
         }
     } else {
         var result_dom = Dom.Dom{ .allocator = allocator };
+        defer result_dom.deinit();
+
         var parser = Parser.init(&result_dom, input, allocator);
+        defer parser.deinit();
         try parser.run();
     }
 }

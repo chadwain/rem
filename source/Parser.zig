@@ -30,6 +30,11 @@ pub const Parser = struct {
         };
     }
 
+    pub fn deinit(self: *Self) void {
+        self.tokenizer.deinit();
+        self.constructor.deinit();
+    }
+
     pub fn run(self: *Self) !void {
         var tokens = std.ArrayList(Tokenizer.Token).init(self.allocator);
         defer {
@@ -64,12 +69,14 @@ pub const Parser = struct {
 };
 
 test "Parser" {
-    const allocator = std.heap.page_allocator;
+    const allocator = std.testing.allocator;
     var dom = Dom.Dom{ .allocator = allocator };
+    defer dom.deinit();
     const string = "<!doctype><html>asdf</body hello=world>";
     const input: []const u21 = &html5.util.utf8DecodeComptime(string);
 
     var parser = Parser.init(&dom, input, allocator);
+    defer parser.deinit();
     try parser.run();
 }
 
@@ -92,6 +99,7 @@ pub const FragmentParser = struct {
     ) !Self {
         // NOTE: The DOM is heap allocator to avoid keeping an internal pointer in TreeConstructor.
         // If the API of TreeConstructor is changed, maybe this won't be necessary.
+        // TODO: We only need to create a new Document node, not a new DOM tree.
         const dom = try allocator.create(Dom.Dom);
         errdefer allocator.destroy(dom);
         dom.* = .{ .allocator = allocator };
@@ -105,8 +113,6 @@ pub const FragmentParser = struct {
         };
         // Step 2
         result.dom.document.quirks_mode = quirks_mode;
-
-        result.inner.constructor.scripting = scripting;
 
         // Step 4
         const initial_state: Tokenizer.State = switch (context.element_type) {
@@ -129,9 +135,8 @@ pub const FragmentParser = struct {
         };
 
         // Steps 5-7
-        const html = try result.dom.allocator.create(Dom.Element);
-        errdefer result.dom.allocator.destroy(html);
-        html.* = Dom.Element{ .element_type = .html_html, .parent = null, .attributes = .{}, .children = .{} };
+        const html = try result.dom.makeElement(.html_html);
+        errdefer result.dom.freeElement(html);
         try Dom.mutation.documentAppendElement(result.dom, &result.dom.document, html, .Suppress);
         try result.inner.constructor.open_elements.append(result.inner.constructor.allocator, html);
 
@@ -163,13 +168,20 @@ pub const FragmentParser = struct {
         return result;
     }
 
+    pub fn deinit(self: *Self) void {
+        self.inner.deinit();
+        self.dom.deinit();
+        self.allocator.destroy(self.dom);
+    }
+
     pub fn run(self: *Self) !void {
         try self.inner.run();
     }
 };
 
 test "FragmentParser" {
-    const allocator = std.heap.page_allocator;
+    const allocator = std.testing.allocator;
+
     var context = Dom.Element{
         .element_type = .html_div,
         .attributes = .{},
@@ -180,5 +192,6 @@ test "FragmentParser" {
     const input: []const u21 = &html5.util.utf8DecodeComptime(string);
 
     var parser = try FragmentParser.init(&context, input, allocator, false, .no_quirks);
+    defer parser.deinit();
     try parser.run();
 }
