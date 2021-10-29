@@ -451,7 +451,7 @@ pub const Token = union(enum) {
                     try writer.writeAll(entry.key_ptr.*);
                     try writer.writeAll("\": \"");
                     try writer.writeAll(entry.value_ptr.*);
-                    try writer.writeAll("\"");
+                    try writer.writeAll("\", ");
                 }
                 try writer.writeAll("]");
             },

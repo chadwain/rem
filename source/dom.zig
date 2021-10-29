@@ -158,7 +158,6 @@ pub const Namespace = enum {
     html,
     svg,
     mathml,
-    unknown,
 };
 
 // TODO There are some Html elements missing from this list.
@@ -289,11 +288,11 @@ pub const ElementType = enum {
     svg_foreign_object,
     svg_desc,
     svg_title,
+    svg_script,
 
     custom_html,
     custom_mathml,
     custom_svg,
-    unknown,
 
     pub fn namespace(self: ElementType) Namespace {
         // TODO: Some metaprogramming to make this less fragile.
@@ -304,7 +303,7 @@ pub const ElementType = enum {
         const mathml_highest = std.meta.fieldInfo(ElementType, .mathml_annotation_xml).value;
 
         const svg_lowest = std.meta.fieldInfo(ElementType, .svg_svg).value;
-        const svg_highest = std.meta.fieldInfo(ElementType, .svg_title).value;
+        const svg_highest = std.meta.fieldInfo(ElementType, .svg_script).value;
 
         const value = @enumToInt(self);
         if ((value >= html_lowest and value <= html_highest) or self == .custom_html) {
@@ -314,7 +313,7 @@ pub const ElementType = enum {
         } else if ((value >= svg_lowest and value <= svg_highest) or self == .custom_svg) {
             return .svg;
         } else {
-            return .unknown;
+            return unreachable;
         }
     }
 
@@ -437,6 +436,18 @@ pub const ElementType = enum {
 
     pub fn fromStringHtml(string: []const u8) ?ElementType {
         return html_map.get(string);
+    }
+
+    pub fn fromStringMathMl(string: []const u8) ?ElementType {
+        // TODO
+        _ = string;
+        return null;
+    }
+
+    pub fn fromStringSvg(string: []const u8) ?ElementType {
+        // TODO
+        _ = string;
+        return null;
     }
 
     pub fn toLocalName(self: ElementType) ?[]const u8 {
@@ -565,11 +576,11 @@ pub const ElementType = enum {
             .svg_foreign_object => "foreignObject",
             .svg_desc => "desc",
             .svg_title => "title",
+            .svg_script => "script",
 
             .custom_html,
             .custom_mathml,
             .custom_svg,
-            .unknown,
             => null,
         };
     }

@@ -7,6 +7,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const ComptimeStringMap = std.ComptimeStringMap;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
 const html5 = @import("../html5.zig");
@@ -441,7 +442,7 @@ fn beforeHtml(c: *TreeConstructor, token: Token) !void {
         },
         .start_tag => |start_tag| {
             if (strEql(start_tag.name, "html")) {
-                const element = try createAnElementForTheToken(c, start_tag, .html_html, .{ .document = &c.dom.document });
+                const element = try createAnElementForTheToken(c, start_tag, .html_html, .{ .document = &c.dom.document }, .dont_adjust);
                 try Dom.mutation.documentAppendElement(c.dom, &c.dom.document, element, .Suppress);
                 try c.open_elements.append(c.allocator, element);
                 changeTo(c, .BeforeHead);
@@ -616,7 +617,7 @@ fn inHeadStartTagScript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
         .element_last_child => |e| .{ .element = e },
         .parent_before_child => |s| .{ .element = s.parent },
     };
-    const element = try createAnElementForTheToken(c, start_tag, .html_script, intended_parent);
+    const element = try createAnElementForTheToken(c, start_tag, .html_script, intended_parent, .dont_adjust);
     // TODO Set the script's parser document to the document.
     // TODO Unset the script's non-blocking flag.
     if (c.fragment_context != null) {
@@ -1172,18 +1173,14 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     c.frameset_ok = .not_ok;
                 } else if (strEql(start_tag.name, "math")) {
                     try reconstructActiveFormattingElements(c);
-                    // TODO adjustMathMlAttributes
-                    // TODO adjustForeignAttributes
-                    _ = try insertForeignElementForTheToken(c, start_tag, .mathml_math);
+                    _ = try insertForeignElementForTheToken(c, start_tag, .mathml_math, .adjust_mathml_attributes);
                     if (start_tag.self_closing) {
                         _ = c.open_elements.pop();
                         acknowledgeSelfClosingFlag(c);
                     }
                 } else if (strEql(start_tag.name, "svg")) {
                     try reconstructActiveFormattingElements(c);
-                    // TODO adjustSvgAttributes
-                    // TODO adjustForeignAttributes
-                    _ = try insertForeignElementForTheToken(c, start_tag, .svg_svg);
+                    _ = try insertForeignElementForTheToken(c, start_tag, .svg_svg, .adjust_svg_attributes);
                     if (start_tag.self_closing) {
                         _ = c.open_elements.pop();
                         acknowledgeSelfClosingFlag(c);
@@ -2090,7 +2087,7 @@ fn inSelectEndTagSelect(c: *TreeConstructor) bool {
         // Ignore the token.
         return false;
     } else {
-        while (c.open_elements.pop().element_type == .html_select) {}
+        while (c.open_elements.pop().element_type != .html_select) {}
         resetInsertionModeAppropriately(c);
         return true;
     }
@@ -2459,26 +2456,144 @@ fn processTokenForeignContent(c: *TreeConstructor, token: Token) !void {
                     {
                         try foreignContentLotsOfStartTags(c, token);
                     } else {
-                        foreignContentStartTagAnythingElse();
+                        try foreignContentStartTagAnythingElse(c, start_tag, .html_font);
                     }
                 },
-                else => foreignContentStartTagAnythingElse(),
+                else => try foreignContentStartTagAnythingElse(c, start_tag, token_element_type),
             } else {
-                foreignContentStartTagAnythingElse();
+                try foreignContentStartTagAnythingElse(c, start_tag, .custom_html);
             }
         },
-        .end_tag => @panic("TODO"),
+        .end_tag => |end_tag| {
+            if (ElementType.fromStringHtml(end_tag.name)) |token_element_type| switch (token_element_type) {
+                .html_br, .html_p => try foreignContentLotsOfStartTags(c, token),
+                .html_script => {
+                    if (currentNode(c).element_type == .svg_script) {
+                        return foreignContentEndTagAnythingElse(c, end_tag);
+                    }
+                    @panic("TODO: Foreign content end tag script, current node is SVG script");
+                },
+                else => try foreignContentEndTagAnythingElse(c, end_tag),
+            } else {
+                try foreignContentEndTagAnythingElse(c, end_tag);
+            }
+        },
     }
 }
 
 fn foreignContentLotsOfStartTags(c: *TreeConstructor, token: Token) !void {
-    _ = c;
-    _ = token;
-    @panic("TODO");
+    parseError(.Generic);
+    var current_node = currentNode(c);
+    while (current_node.namespace() != .html and !isMathMlTextIntegrationPoint(current_node) and !isHtmlIntegrationPoint(current_node)) {
+        _ = c.open_elements.pop();
+        current_node = currentNode(c);
+    }
+    return processToken(c, token);
 }
 
-fn foreignContentStartTagAnythingElse() void {
-    @panic("TODO");
+fn foreignContentStartTagAnythingElse(c: *TreeConstructor, start_tag: TokenStartTag, token_element_type: ElementType) !void {
+    const foreign_content_change_svg_tag_name_map = ComptimeStringMap([]const u8, .{
+        .{ "altglyph", "altGlyph" },
+        .{ "altglyphdef", "altGlyphDef" },
+        .{ "altglyphitem", "altGlyphItem" },
+        .{ "animatecolor", "animateColor" },
+        .{ "animatemotion", "animateMotion" },
+        .{ "animatetransform", "animateTransform" },
+        .{ "clippath", "clipPath" },
+        .{ "feblend", "feBlend" },
+        .{ "fecolormatrix", "feColorMatrix" },
+        .{ "fecomponenttransfer", "feComponentTransfer" },
+        .{ "fecomposite", "feComposite" },
+        .{ "feconvolvematrix", "feConvolveMatrix" },
+        .{ "fediffuselighting", "feDiffuseLighting" },
+        .{ "fedisplacementmap", "feDisplacementMap" },
+        .{ "fedistantlight", "feDistantLight" },
+        .{ "fedropshadow", "feDropShadow" },
+        .{ "feflood", "feFlood" },
+        .{ "fefunca", "feFuncA" },
+        .{ "fefuncb", "feFuncB" },
+        .{ "fefuncg", "feFuncG" },
+        .{ "fefuncr", "feFuncR" },
+        .{ "fegaussianblur", "feGaussianBlur" },
+        .{ "feimage", "feImage" },
+        .{ "femerge", "feMerge" },
+        .{ "femergenode", "feMergeNode" },
+        .{ "femorphology", "feMorphology" },
+        .{ "feoffset", "feOffset" },
+        .{ "fepointlight", "fePointLight" },
+        .{ "fespecularlighting", "feSpecularLighting" },
+        .{ "fespotlight", "feSpotLight" },
+        .{ "fetile", "feTile" },
+        .{ "feturbulence", "feTurbulence" },
+        .{ "foreignobject", "foreignObject" },
+        .{ "glyphref", "glyphRef" },
+        .{ "lineargradient", "linearGradient" },
+        .{ "radialgradient", "radialGradient" },
+        .{ "textpath", "textPath" },
+    });
+
+    const adjusted_current_node = adjustedCurrentNode(c);
+    const namespace = adjusted_current_node.namespace();
+    var element_type: ElementType = undefined;
+    var new_token: TokenStartTag = undefined;
+    var adjust_attributes: AdjustAttributes = undefined;
+    switch (namespace) {
+        .html => {
+            new_token = start_tag;
+            adjust_attributes = .dont_adjust;
+            element_type = token_element_type;
+        },
+        .mathml => {
+            new_token = start_tag;
+            adjust_attributes = .adjust_mathml_attributes;
+            element_type = ElementType.fromStringMathMl(start_tag.name) orelse .custom_mathml;
+        },
+        .svg => {
+            const new_tag_name = foreign_content_change_svg_tag_name_map.get(start_tag.name) orelse start_tag.name;
+            new_token = TokenStartTag{
+                .name = new_tag_name,
+                .attributes = start_tag.attributes,
+                .self_closing = start_tag.self_closing,
+            };
+            adjust_attributes = .adjust_svg_attributes;
+            element_type = ElementType.fromStringSvg(new_tag_name) orelse .custom_svg;
+        },
+    }
+
+    _ = try insertForeignElementForTheToken(c, new_token, element_type, adjust_attributes);
+    if (start_tag.self_closing) {
+        acknowledgeSelfClosingFlag(c);
+        if (currentNode(c).namespace() == .svg and strEql(start_tag.name, "script")) {
+            foreignContentEndTagScriptWithinSvgScript(c);
+        } else {
+            _ = c.open_elements.pop();
+        }
+    }
+}
+
+fn foreignContentEndTagScriptWithinSvgScript(c: *TreeConstructor) void {
+    _ = c.open_elements.pop();
+    @panic("TODO Foreign content end tag script, current node is SVG script");
+}
+
+fn foreignContentEndTagAnythingElse(c: *TreeConstructor, end_tag: TokenEndTag) !void {
+    var index = c.open_elements.items.len;
+    var node = c.open_elements.items[index - 1];
+    if (!std.ascii.eqlIgnoreCase(end_tag.name, node.localName(c.dom))) {
+        parseError(.Generic);
+    }
+    while (index > 1) {
+        if (std.ascii.eqlIgnoreCase(end_tag.name, node.localName(c.dom))) {
+            c.open_elements.shrinkRetainingCapacity(index);
+            return;
+        }
+        index -= 1;
+        node = c.open_elements.items[index - 1];
+        if (node.namespace() == .html) {
+            return processToken(c, Token{ .end_tag = end_tag });
+        }
+    }
+    assert(c.fragment_context != null);
 }
 
 fn acknowledgeSelfClosingFlag(c: *TreeConstructor) void {
@@ -2822,7 +2937,10 @@ fn createAnElementForTheToken(
     start_tag: TokenStartTag,
     element_type: ElementType,
     intended_parent: ParentNode,
+    adjust_attributes: AdjustAttributes,
 ) !*Element {
+    // TODO: Most of the steps of this algorithm have been skipped.
+
     // TODO: Speculative HTML parser.
     // TODO: Get the element's node element.
     _ = intended_parent;
@@ -2832,6 +2950,11 @@ fn createAnElementForTheToken(
     const element = try c.dom.makeElement(element_type);
     // TODO This should follow https://dom.spec.whatwg.org/#concept-element-attributes-append
     var attr_it = start_tag.attributes.iterator();
+    switch (adjust_attributes) {
+        .dont_adjust => try elementAddAttributes(c.dom, element, &attr_it),
+        .adjust_mathml_attributes => try appendAttributesAdjustMathMlForeign(c.dom, element, &attr_it),
+        .adjust_svg_attributes => try appendAttributesAdjustSvgForeign(c.dom, element, &attr_it),
+    }
     while (attr_it.next()) |attr| {
         try element.addAttribute(c.dom.allocator, attr.key_ptr.*, attr.value_ptr.*);
         // TODO: Check for attribute namespace parse errors.
@@ -2842,13 +2965,131 @@ fn createAnElementForTheToken(
     return element;
 }
 
-fn insertForeignElementForTheToken(c: *TreeConstructor, start_tag: TokenStartTag, element_type: ElementType) !*Element {
+const AdjustAttributes = enum { dont_adjust, adjust_mathml_attributes, adjust_svg_attributes };
+
+const adjust_foreign_attributes_map = ComptimeStringMap(void, .{
+    .{ "xlink:actuate", {} },
+    .{ "xlink:arcrole", {} },
+    .{ "xlink:href", {} },
+    .{ "xlink:role", {} },
+    .{ "xlink:show", {} },
+    .{ "xlink:title", {} },
+    .{ "xlink:type", {} },
+    .{ "xml:lang", {} },
+    .{ "xml:space", {} },
+    .{ "xmlns", {} },
+    .{ "xmlns:xlink", {} },
+});
+
+/// Appends the attributes from the token to the Element.
+fn elementAddAttributes(dom: *Dom.Dom, element: *Element, attributes: *Tokenizer.AttributeSet.Iterator) !void {
+    while (attributes.next()) |attr| {
+        try element.addAttributeNoReplace(dom.allocator, attr.key_ptr.*, attr.value_ptr.*);
+    }
+}
+
+/// Appends the attributes from the token to the Element, while also doing the
+/// "adjust MathML attributes" and "adjust foreign attributes" algorithms.
+fn appendAttributesAdjustMathMlForeign(dom: *Dom.Dom, element: *Element, attributes: *Tokenizer.AttributeSet.Iterator) !void {
+    while (attributes.next()) |attr| {
+        const key = attr.key_ptr.*;
+        const value = attr.value_ptr.*;
+        if (strEql(key, "definitionurl")) {
+            try element.addAttributeNoReplace(dom.allocator, "definitionURL", value);
+        } else if (adjust_foreign_attributes_map.get(key)) |_| {
+            // I haven't implemented namespaced attributes.
+            @panic("TODO Adjust foreign attributes for the token");
+        } else {
+            try element.addAttribute(dom.allocator, key, value);
+        }
+    }
+}
+
+/// Appends the attributes from the token to the Element, while also doing the
+/// "adjust SVG attributes" and "adjust foreign attributes" algorithms.
+fn appendAttributesAdjustSvgForeign(dom: *Dom.Dom, element: *Element, attributes: *Tokenizer.AttributeSet.Iterator) !void {
+    const adjust_svg_attributes_map = ComptimeStringMap([]const u8, .{
+        .{ "attributename", "attributeName" },
+        .{ "attributetype", "attributeType" },
+        .{ "basefrequency", "baseFrequency" },
+        .{ "baseprofile", "baseProfile" },
+        .{ "calcmode", "calcMode" },
+        .{ "clippathunits", "clipPathUnits" },
+        .{ "diffuseconstant", "diffuseConstant" },
+        .{ "edgemode", "edgeMode" },
+        .{ "filterunits", "filterUnits" },
+        .{ "glyphref", "glyphRef" },
+        .{ "gradienttransform", "gradientTransform" },
+        .{ "gradientunits", "gradientUnits" },
+        .{ "kernelmatrix", "kernelMatrix" },
+        .{ "kernelunitlength", "kernelUnitLength" },
+        .{ "keypoints", "keyPoints" },
+        .{ "keysplines", "keySplines" },
+        .{ "keytimes", "keyTimes" },
+        .{ "lengthadjust", "lengthAdjust" },
+        .{ "limitingconeangle", "limitingConeAngle" },
+        .{ "markerheight", "markerHeight" },
+        .{ "markerunits", "markerUnits" },
+        .{ "markerwidth", "markerWidth" },
+        .{ "maskcontentunits", "maskContentUnits" },
+        .{ "maskunits", "maskUnits" },
+        .{ "numoctaves", "numOctaves" },
+        .{ "pathlength", "pathLength" },
+        .{ "patterncontentunits", "patternContentUnits" },
+        .{ "patterntransform", "patternTransform" },
+        .{ "patternunits", "patternUnits" },
+        .{ "pointsatx", "pointsAtX" },
+        .{ "pointsaty", "pointsAtY" },
+        .{ "pointsatz", "pointsAtZ" },
+        .{ "preservealpha", "preserveAlpha" },
+        .{ "preserveaspectratio", "preserveAspectRatio" },
+        .{ "primitiveunits", "primitiveUnits" },
+        .{ "refx", "refX" },
+        .{ "refy", "refY" },
+        .{ "repeatcount", "repeatCount" },
+        .{ "repeatdur", "repeatDur" },
+        .{ "requiredextensions", "requiredExtensions" },
+        .{ "requiredfeatures", "requiredFeatures" },
+        .{ "specularconstant", "specularConstant" },
+        .{ "specularexponent", "specularExponent" },
+        .{ "spreadmethod", "spreadMethod" },
+        .{ "startoffset", "startOffset" },
+        .{ "stddeviation", "stdDeviation" },
+        .{ "stitchtiles", "stitchTiles" },
+        .{ "surfacescale", "surfaceScale" },
+        .{ "systemlanguage", "systemLanguage" },
+        .{ "tablevalues", "tableValues" },
+        .{ "targetx", "targetX" },
+        .{ "targety", "targetY" },
+        .{ "textlength", "textLength" },
+        .{ "viewbox", "viewBox" },
+        .{ "viewtarget", "viewTarget" },
+        .{ "xchannelselector", "xChannelSelector" },
+        .{ "ychannelselector", "yChannelSelector" },
+        .{ "zoomandpan", "zoomAndPan" },
+    });
+
+    while (attributes.next()) |attr| {
+        const key = attr.key_ptr.*;
+        const value = attr.value_ptr.*;
+        if (adjust_svg_attributes_map.get(key)) |new_key| {
+            try element.addAttributeNoReplace(dom.allocator, new_key, value);
+        } else if (adjust_foreign_attributes_map.get(key)) |_| {
+            // I haven't implemented namespaced attributes.
+            @panic("TODO Adjust foreign attributes for the token");
+        } else {
+            try element.addAttribute(dom.allocator, key, value);
+        }
+    }
+}
+
+fn insertForeignElementForTheToken(c: *TreeConstructor, start_tag: TokenStartTag, element_type: ElementType, adjust_attributes: AdjustAttributes) !*Element {
     const adjusted_insertion_location = appropriateNodeInsertionLocation(c);
     const intended_parent: ParentNode = switch (adjusted_insertion_location) {
         .element_last_child => |e| .{ .element = e },
         .parent_before_child => |s| .{ .element = s.parent },
     };
-    const element = try createAnElementForTheToken(c, start_tag, element_type, intended_parent);
+    const element = try createAnElementForTheToken(c, start_tag, element_type, intended_parent, adjust_attributes);
     // TODO: Allow the element to be dropped.
     // TODO: Some stuff regarding custom elements
     if (element_type.toLocalName() == null) {
@@ -2865,7 +3106,9 @@ fn insertForeignElementForTheToken(c: *TreeConstructor, start_tag: TokenStartTag
     return element;
 }
 
-const insertHtmlElementForTheToken = insertForeignElementForTheToken;
+fn insertHtmlElementForTheToken(c: *TreeConstructor, start_tag: TokenStartTag, element_type: ElementType) !*Element {
+    return insertForeignElementForTheToken(c, start_tag, element_type, .dont_adjust);
+}
 
 fn stackOfOpenElementsHas(c: *TreeConstructor, element_type: ElementType) bool {
     var index = c.open_elements.items.len;
@@ -2905,6 +3148,7 @@ const FormattingElement = struct {
     /// If element is null, then this FormattingElement is considered to be a marker.
     element: ?*Element,
     /// If this FormattingElement is marker, this is 0.
+    /// Otherwise, this is 1 more than an index into formatting_element_tag_attributes.
     tag_attributes_ref: usize,
 
     fn eql(self: FormattingElement, c: *TreeConstructor, element: *Element) bool {
@@ -3028,12 +3272,12 @@ fn reconstructActiveFormattingElements(c: *TreeConstructor) !void {
     if (first_entry.element == null or stackOfOpenElementsHasElement(c, first_entry.element.?)) return;
 
     // Steps 3-6
-    var i = c.active_formatting_elements.items.len - 1;
+    var i = c.active_formatting_elements.items.len;
     while (i > 0) : (i -= 1) {
-        const entry = c.active_formatting_elements.items[i];
+        const entry = c.active_formatting_elements.items[i - 1];
         if (entry.element == null or stackOfOpenElementsHasElement(c, entry.element.?)) {
             // Step 7
-            i += 1;
+            // By breaking, we don't decrement i, which is just like incrementing it.
             break;
         }
     }
@@ -3180,6 +3424,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
                 },
                 node.*.element_type,
                 .{ .element = common_ancestor },
+                .dont_adjust,
             );
             c.active_formatting_elements.items[node_in_formatting_elements_index.?].element = new_element;
             node.* = new_element;
@@ -3215,6 +3460,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
                 },
                 formatting_element.element.?.element_type,
                 .{ .element = furthest_block },
+                .dont_adjust,
             );
             // Step 4.16
             std.mem.swap(ArrayListUnmanaged(Dom.ElementOrCharacterData), &furthest_block.children, &elem.children);

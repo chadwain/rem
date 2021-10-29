@@ -54,9 +54,9 @@ test {
     try runTestFile("test/html5lib-tests/tree-construction/tests7.dat");
 }
 
-//test {
-//    try runTestFile("test/html5lib-tests/tree-construction/tests8.dat");
-//}
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests8.dat");
+}
 
 //test {
 //    try runTestFile("test/html5lib-tests/tree-construction/tests9.dat");
@@ -66,17 +66,17 @@ test {
 //    try runTestFile("test/html5lib-tests/tree-construction/tests10.dat");
 //}
 
-//test {
-//    try runTestFile("test/html5lib-tests/tree-construction/tests11.dat");
-//}
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests11.dat");
+}
 
-//test {
-//    try runTestFile("test/html5lib-tests/tree-construction/tests12.dat");
-//}
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests12.dat");
+}
 
-//test {
-//    try runTestFile("test/html5lib-tests/tree-construction/tests14.dat");
-//}
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests14.dat");
+}
 
 test {
     try runTestFile("test/html5lib-tests/tree-construction/tests15.dat");
@@ -94,17 +94,17 @@ test {
 //    try runTestFile("test/html5lib-tests/tree-construction/tests18.dat");
 //}
 
-//test {
-//    try runTestFile("test/html5lib-tests/tree-construction/tests19.dat");
-//}
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests19.dat");
+}
 
-//test {
-//    try runTestFile("test/html5lib-tests/tree-construction/tests20.dat");
-//}
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests20.dat");
+}
 
-//test {
-//    try runTestFile("test/html5lib-tests/tree-construction/tests21.dat");
-//}
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests21.dat");
+}
 
 test {
     try runTestFile("test/html5lib-tests/tree-construction/tests22.dat");
@@ -122,9 +122,9 @@ test {
     try runTestFile("test/html5lib-tests/tree-construction/tests25.dat");
 }
 
-//test {
-//    try runTestFile("test/html5lib-tests/tree-construction/tests26.dat");
-//}
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests26.dat");
+}
 
 fn runTestFile(file_path: []const u8) !void {
     const allocator = std.testing.allocator;
