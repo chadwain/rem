@@ -429,8 +429,14 @@ pub const Token = union(enum) {
             .doctype => |d| {
                 try writer.writeAll("DOCTYPE (");
                 if (d.name) |name| try writer.writeAll(name);
-                if (d.public_identifier) |pi| try writer.writeAll(pi);
-                if (d.system_identifier) |si| try writer.writeAll(si);
+                if (d.public_identifier) |pi| {
+                    try writer.writeAll(" PUBLIC:");
+                    try writer.writeAll(pi);
+                }
+                if (d.system_identifier) |si| {
+                    try writer.writeAll(" SYSTEM:");
+                    try writer.writeAll(si);
+                }
                 try writer.writeAll(")");
             },
             .start_tag => |t| {

@@ -76,6 +76,26 @@ pub fn documentAppendCdata(dom: *Dom.Dom, document: *Dom.Document, cdata: *Dom.C
     document.cdata_slices[document.cdata_current_slice].end += 1;
 }
 
+/// This is the DOM's insert mutation algorithm, specialized for an Element node parent.
+pub fn elementInsert(
+    dom: *Dom.Dom,
+    parent: *Dom.Element,
+    child: Dom.ElementOrCharacterData,
+    node: Dom.ElementOrCharacterData,
+    suppress: SuppressObservers,
+) !void {
+    // Insert node into parent before child.
+    // TODO: Most of the steps in this algorithm have been skipped.
+    _ = suppress;
+    const index = parent.indexOfChild(child) orelse unreachable;
+    try parent.children.insert(dom.allocator, index, node);
+    switch (node) {
+        .element => |e| e.parent = .{ .element = parent },
+        // TODO: Set the parent element of a cdata node.
+        .cdata => {},
+    }
+}
+
 /// This is the DOM's append mutation algorithm, specialized for an Element node parent.
 pub fn elementAppend(dom: *Dom.Dom, parent: *Dom.Element, node: Dom.ElementOrCharacterData, suppress: SuppressObservers) !void {
     // TODO: Ensure pre-insertion validity. Only step 2 of that algorithm applies.
@@ -92,4 +112,19 @@ pub fn elementAppend(dom: *Dom.Dom, parent: *Dom.Element, node: Dom.ElementOrCha
         // TODO: Set the parent element of a cdata node.
         .cdata => {},
     }
+}
+
+pub fn elementRemove(dom: *Dom.Dom, node: *Dom.Element, suppress: SuppressObservers) void {
+    // Remove node.
+    // TODO: Most of the steps in this algorithm have been skipped.
+    _ = dom;
+    _ = suppress;
+    switch (node.parent.?) {
+        .element => |e| {
+            const index = e.indexOfChild(.{ .element = node }).?;
+            _ = e.children.orderedRemove(index);
+        },
+        .document => @panic("TODO elementRemove: parent is a document"),
+    }
+    node.parent = null;
 }

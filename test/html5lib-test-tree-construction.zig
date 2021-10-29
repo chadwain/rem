@@ -27,8 +27,104 @@ fn endsWith(str1: []const u8, str2: []const u8) bool {
 }
 
 test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests1.dat");
+}
+
+//test {
+//    try runTestFile("test/html5lib-tests/tree-construction/tests2.dat");
+//}
+
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests3.dat");
+}
+
+test {
     try runTestFile("test/html5lib-tests/tree-construction/tests4.dat");
 }
+
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests5.dat");
+}
+
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests6.dat");
+}
+
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests7.dat");
+}
+
+//test {
+//    try runTestFile("test/html5lib-tests/tree-construction/tests8.dat");
+//}
+
+//test {
+//    try runTestFile("test/html5lib-tests/tree-construction/tests9.dat");
+//}
+
+//test {
+//    try runTestFile("test/html5lib-tests/tree-construction/tests10.dat");
+//}
+
+//test {
+//    try runTestFile("test/html5lib-tests/tree-construction/tests11.dat");
+//}
+
+//test {
+//    try runTestFile("test/html5lib-tests/tree-construction/tests12.dat");
+//}
+
+//test {
+//    try runTestFile("test/html5lib-tests/tree-construction/tests14.dat");
+//}
+
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests15.dat");
+}
+
+//test {
+//    try runTestFile("test/html5lib-tests/tree-construction/tests16.dat");
+//}
+
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests17.dat");
+}
+
+//test {
+//    try runTestFile("test/html5lib-tests/tree-construction/tests18.dat");
+//}
+
+//test {
+//    try runTestFile("test/html5lib-tests/tree-construction/tests19.dat");
+//}
+
+//test {
+//    try runTestFile("test/html5lib-tests/tree-construction/tests20.dat");
+//}
+
+//test {
+//    try runTestFile("test/html5lib-tests/tree-construction/tests21.dat");
+//}
+
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests22.dat");
+}
+
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests23.dat");
+}
+
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests24.dat");
+}
+
+test {
+    try runTestFile("test/html5lib-tests/tree-construction/tests25.dat");
+}
+
+//test {
+//    try runTestFile("test/html5lib-tests/tree-construction/tests26.dat");
+//}
 
 fn runTestFile(file_path: []const u8) !void {
     const allocator = std.testing.allocator;
@@ -207,14 +303,12 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Dom.El
 
                 break :blk try dom.makeDoctype(name, public_id, system_id);
             } else try dom.makeDoctype(name, null, null);
-            errdefer dom.freeDoctype(doctype);
             try Dom.mutation.documentAppendDocumentType(&dom, &dom.document, doctype, .Suppress);
         } else if (startsWith(data, "<!-- ")) {
             // comment
             assert(endsWith(data, " -->"));
             const comment = data["<!-- ".len .. data.len - " -->".len];
             const cdata = try dom.makeCdata(comment, .comment);
-            errdefer dom.freeCdata(cdata);
             if (depth == 0) {
                 if (fragment_context) |e| {
                     try Dom.mutation.elementAppend(&dom, e, .{ .cdata = cdata }, .Suppress);
@@ -236,18 +330,18 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Dom.El
             if (startsWith(tag_name, "svg ")) {
                 element = try dom.makeElement(.custom_svg);
                 // TODO Try to find an element type from the tag name.
-                try dom.local_names.put(dom.allocator, element, tag_name[4..]);
+                try dom.registerLocalName(element, tag_name[4..]);
             } else if (startsWith(tag_name, "math ")) {
                 element = try dom.makeElement(.custom_mathml);
                 // TODO Try to find an element type from the tag name.
-                try dom.local_names.put(dom.allocator, element, tag_name[5..]);
+                try dom.registerLocalName(element, tag_name[5..]);
             } else {
                 const maybe_element_type = Dom.ElementType.fromStringHtml(tag_name);
                 if (maybe_element_type) |t| {
                     element = try dom.makeElement(t);
                 } else {
                     element = try dom.makeElement(.custom_html);
-                    try dom.local_names.put(dom.allocator, element, tag_name);
+                    try dom.registerLocalName(element, tag_name);
                 }
             }
 
@@ -275,7 +369,6 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Dom.El
             }
 
             const cdata = try dom.makeCdata(text, .text);
-            errdefer dom.freeCdata(cdata);
             if (depth == 0) {
                 try Dom.mutation.elementAppend(&dom, fragment_context.?, .{ .cdata = cdata }, .Suppress);
             } else {

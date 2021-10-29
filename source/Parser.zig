@@ -136,7 +136,6 @@ pub const FragmentParser = struct {
 
         // Steps 5-7
         const html = try result.dom.makeElement(.html_html);
-        errdefer result.dom.freeElement(html);
         try Dom.mutation.documentAppendElement(result.dom, &result.dom.document, html, .Suppress);
         try result.inner.constructor.open_elements.append(result.inner.constructor.allocator, html);
 

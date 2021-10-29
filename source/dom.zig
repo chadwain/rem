@@ -36,12 +36,12 @@ pub const Dom = struct {
         }
         self.all_elements.deinit(self.allocator);
         for (self.all_cdatas.items) |item| {
-            self.freeCdata(item);
+            item.deinit(self.allocator);
             self.allocator.destroy(item);
         }
         self.all_cdatas.deinit(self.allocator);
         for (self.all_doctypes.items) |item| {
-            self.freeDoctype(item);
+            item.deinit(self.allocator);
             self.allocator.destroy(item);
         }
         self.all_doctypes.deinit(self.allocator);
@@ -53,6 +53,12 @@ pub const Dom = struct {
         self.local_names.deinit(self.allocator);
     }
 
+    pub fn exception(self: *Dom, ex: DomException) error{DomException} {
+        _ = self;
+        std.debug.print("DOM Exception raised: {s}\n", .{@tagName(ex)});
+        return error.DomException;
+    }
+
     pub fn makeCdata(self: *Dom, data: []const u8, interface: CharacterDataInterface) !*CharacterData {
         const cdata = try self.allocator.create(CharacterData);
         errdefer self.allocator.destroy(cdata);
@@ -61,20 +67,12 @@ pub const Dom = struct {
         return cdata;
     }
 
-    pub fn freeCdata(self: *Dom, cdata: *CharacterData) void {
-        cdata.deinit(self.allocator);
-    }
-
     pub fn makeDoctype(self: *Dom, doctype_name: ?[]const u8, public_identifier: ?[]const u8, system_identifier: ?[]const u8) !*DocumentType {
         const doctype = try self.allocator.create(DocumentType);
         errdefer self.allocator.destroy(doctype);
         try self.all_doctypes.append(self.allocator, doctype);
         doctype.* = try DocumentType.init(self.allocator, doctype_name, public_identifier, system_identifier);
         return doctype;
-    }
-
-    pub fn freeDoctype(self: *Dom, doctype: *DocumentType) void {
-        doctype.deinit(self.allocator);
     }
 
     pub fn makeElement(self: *Dom, element_type: ElementType) !*Element {
@@ -87,15 +85,10 @@ pub const Dom = struct {
         return element;
     }
 
-    pub fn freeElement(self: *Dom, element: *Element) void {
-        if (self.local_names.fetchRemove(element)) |entry| self.allocator.free(entry.value);
-        element.deinit(self.allocator);
-    }
-
-    pub fn exception(self: *Dom, ex: DomException) error{DomException} {
-        _ = self;
-        std.debug.print("DOM Exception raised: {s}\n", .{@tagName(ex)});
-        return error.DomException;
+    pub fn registerLocalName(self: *Dom, element: *const Element, name: []const u8) !void {
+        const copy = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(copy);
+        try self.local_names.putNoClobber(self.allocator, element, copy);
     }
 };
 
@@ -262,7 +255,9 @@ pub const ElementType = enum {
     html_strike,
     html_strong,
     html_style,
+    html_sub,
     html_summary,
+    html_sup,
     html_table,
     html_tbody,
     html_td,
@@ -278,6 +273,7 @@ pub const ElementType = enum {
     html_tt,
     html_u,
     html_ul,
+    html_var,
     html_wbr,
     html_xmp,
 
@@ -415,7 +411,9 @@ pub const ElementType = enum {
             .{ "strike", .html_strike },
             .{ "strong", .html_strong },
             .{ "style", .html_style },
+            .{ "sub", .html_sub },
             .{ "summary", .html_summary },
+            .{ "sup", .html_sup },
             .{ "table", .html_table },
             .{ "tbody", .html_tbody },
             .{ "td", .html_td },
@@ -431,6 +429,7 @@ pub const ElementType = enum {
             .{ "tt", .html_tt },
             .{ "u", .html_u },
             .{ "ul", .html_ul },
+            .{ "var", .html_var },
             .{ "wbr", .html_wbr },
             .{ "xmp", .html_xmp },
         });
@@ -532,7 +531,9 @@ pub const ElementType = enum {
             .html_strike => "strike",
             .html_strong => "strong",
             .html_style => "style",
+            .html_sub => "sub",
             .html_summary => "summary",
+            .html_sup => "sup",
             .html_table => "table",
             .html_tbody => "tbody",
             .html_td => "td",
@@ -548,10 +549,11 @@ pub const ElementType = enum {
             .html_tt => "tt",
             .html_u => "u",
             .html_ul => "ul",
+            .html_var => "var",
             .html_wbr => "wbr",
             .html_xmp => "xmp",
 
-            .mathml_math => @panic("TODO: ElementType.toLocalName for mathml_math elements"),
+            .mathml_math => "math",
             .mathml_mi => @panic("TODO: ElementType.toLocalName for mathml_mi elements"),
             .mathml_mo => @panic("TODO: ElementType.toLocalName for mathml_mo elements"),
             .mathml_mn => @panic("TODO: ElementType.toLocalName for mathml_mn elements"),
@@ -629,6 +631,19 @@ pub const Element = struct {
         } else {
             return null;
         }
+    }
+
+    pub fn indexOfChild(self: *Element, child: ElementOrCharacterData) ?usize {
+        for (self.children.items) |c, i| {
+            if (std.meta.eql(child, c)) return i;
+        } else return null;
+    }
+
+    pub fn childBefore(self: *Element, child: ElementOrCharacterData) ?ElementOrCharacterData {
+        if (self.children.items.len == 0) return null;
+        if (std.meta.eql(self.children.items[0], child)) return null;
+        const index = self.indexOfChild(child).?;
+        return self.children.items[index - 1];
     }
 };
 
