@@ -48,7 +48,9 @@ test "Tree constructor usage" {
     var dom = Dom.Dom{ .allocator = allocator };
     defer dom.deinit();
 
-    var constructor = TreeConstructor.init(&dom, allocator, .{});
+    const document = try dom.makeDocument();
+
+    var constructor = TreeConstructor.init(&dom, document, allocator, .{});
     defer constructor.deinit();
 
     while (try tokenizer.run(&input)) {
@@ -75,6 +77,7 @@ pub const RunResult = struct {
 
 pub const TreeConstructor = struct {
     dom: *Dom.Dom,
+    document: *Dom.Document,
     allocator: *Allocator,
 
     fragment_context: ?*Dom.Element,
@@ -116,9 +119,10 @@ pub const TreeConstructor = struct {
         scripting: bool = false,
     };
 
-    pub fn init(dom: *Dom.Dom, allocator: *Allocator, args: Arguments) TreeConstructor {
+    pub fn init(dom: *Dom.Dom, document: *Document, allocator: *Allocator, args: Arguments) TreeConstructor {
         return TreeConstructor{
             .dom = dom,
+            .document = document,
             .allocator = allocator,
             .fragment_context = args.fragment_context,
             .scripting = args.scripting,
@@ -388,7 +392,7 @@ fn processToken(c: *TreeConstructor, token: Token) !void {
 fn initial(c: *TreeConstructor, token: Token) !void {
     switch (token) {
         .character => |character| {
-            if (isWhitespaceCharacter(character.data)) {
+            if (isWhitespace(character)) {
                 // Ignore the token.
             } else {
                 initialAnythingElse(c);
@@ -402,14 +406,14 @@ fn initial(c: *TreeConstructor, token: Token) !void {
 
             if (!c.is_iframe_srcdoc_document and !c.parser_cannot_change_the_mode) {
                 if (doctypeEnablesQuirks(d)) {
-                    c.dom.document.quirks_mode = .quirks;
+                    c.document.quirks_mode = .quirks;
                 } else if (doctypeEnablesLimitedQuirks(d)) {
-                    c.dom.document.quirks_mode = .limited_quirks;
+                    c.document.quirks_mode = .limited_quirks;
                 }
             }
 
             const doctype = try c.dom.makeDoctype(d.name, d.public_identifier, d.system_identifier);
-            try Dom.mutation.documentAppendDocumentType(c.dom, &c.dom.document, doctype, .Suppress);
+            try Dom.mutation.documentAppendDocumentType(c.dom, c.document, doctype, .Suppress);
             changeTo(c, .BeforeHtml);
         },
         else => initialAnythingElse(c),
@@ -421,7 +425,7 @@ fn initialAnythingElse(c: *TreeConstructor) void {
         parseError(.Generic);
     }
     if (!c.parser_cannot_change_the_mode) {
-        c.dom.document.quirks_mode = .quirks;
+        c.document.quirks_mode = .quirks;
     }
     reprocessIn(c, .BeforeHtml);
 }
@@ -434,7 +438,7 @@ fn beforeHtml(c: *TreeConstructor, token: Token) !void {
         },
         .comment => |comment| try insertCommentToDocument(c, comment),
         .character => |character| {
-            if (isWhitespaceCharacter(character.data)) {
+            if (isWhitespace(character)) {
                 // Ignore the token.
             } else {
                 try beforeHtmlAnythingElse(c);
@@ -442,8 +446,8 @@ fn beforeHtml(c: *TreeConstructor, token: Token) !void {
         },
         .start_tag => |start_tag| {
             if (strEql(start_tag.name, "html")) {
-                const element = try createAnElementForTheToken(c, start_tag, .html_html, .{ .document = &c.dom.document }, .dont_adjust);
-                try Dom.mutation.documentAppendElement(c.dom, &c.dom.document, element, .Suppress);
+                const element = try createAnElementForTheToken(c, start_tag, .html_html, .{ .document = c.document }, .dont_adjust);
+                try Dom.mutation.documentAppendElement(c.dom, c.document, element, .Suppress);
                 try c.open_elements.append(c.allocator, element);
                 changeTo(c, .BeforeHead);
             } else {
@@ -466,14 +470,14 @@ fn beforeHtmlAnythingElse(c: *TreeConstructor) !void {
     // TODO: Set the element's "node document"
     const element = try c.dom.makeElement(.html_html);
     element.parent = .document;
-    try Dom.mutation.documentAppendElement(c.dom, &c.dom.document, element, .Suppress);
+    try Dom.mutation.documentAppendElement(c.dom, c.document, element, .Suppress);
     try c.open_elements.append(c.allocator, element);
     reprocessIn(c, .BeforeHead);
 }
 
 fn beforeHead(c: *TreeConstructor, token: Token) !void {
     switch (token) {
-        .character => |character| if (isWhitespaceCharacter(character.data)) {
+        .character => |character| if (isWhitespace(character)) {
             // Ignore the token.
         } else {
             try beforeHeadAnythingElse(c);
@@ -518,7 +522,7 @@ fn beforeHeadAnythingElse(c: *TreeConstructor) !void {
 
 fn inHead(c: *TreeConstructor, token: Token) !void {
     switch (token) {
-        .character => |character| if (isWhitespaceCharacter(character.data)) {
+        .character => |character| if (isWhitespace(character)) {
             try inHeadWhitespace(c, character);
         } else {
             inHeadAnythingElse(c);
@@ -712,7 +716,7 @@ fn inHeadNoscript(c: *TreeConstructor, token: Token) !void {
         },
         .comment => |comment| try inHeadComment(c, comment),
         .character => |character| {
-            if (isWhitespaceCharacter(character.data)) {
+            if (isWhitespace(character)) {
                 try inHeadWhitespace(c, character);
             } else {
                 inHeadNoscriptAnythingElse(c);
@@ -730,7 +734,7 @@ fn inHeadNoscriptAnythingElse(c: *TreeConstructor) void {
 
 fn afterHead(c: *TreeConstructor, token: Token) !void {
     switch (token) {
-        .character => |character| if (isWhitespaceCharacter(character.data)) {
+        .character => |character| if (isWhitespace(character)) {
             try insertCharacter(c, character);
         } else {
             try afterHeadAnythingElse(c);
@@ -982,7 +986,9 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                         closePElement(c);
                     }
                     _ = try insertHtmlElementForTheToken(c, start_tag, token_element_type);
-                    // TODO: Special case this?
+                    // TODO: Once a start tag with the tag name "plaintext" has been seen, that will be
+                    // the last token ever seen other than character tokens (and the end-of-file token),
+                    // because there is no way to switch out of the PLAINTEXT state.
                     setTokenizerState(c, .PLAINTEXT);
                 },
                 .html_button => {
@@ -1048,7 +1054,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     c.frameset_ok = .not_ok;
                 },
                 .html_table => {
-                    if (c.dom.document.quirks_mode != .quirks and hasElementInButtonScope(c, .html_p)) {
+                    if (c.document.quirks_mode != .quirks and hasElementInButtonScope(c, .html_p)) {
                         closePElement(c);
                     }
                     _ = try insertHtmlElementForTheToken(c, start_tag, token_element_type);
@@ -1380,13 +1386,13 @@ fn inBodyEof(c: *TreeConstructor) void {
 }
 
 fn inBodyCharacter(c: *TreeConstructor, character: TokenCharacter) !void {
-    if (isNullCharacter(character.data)) {
+    if (isNull(character)) {
         parseError(.Generic);
         // Ignore the token.
     } else {
         try reconstructActiveFormattingElements(c);
         try insertCharacter(c, character);
-        if (!isWhitespaceCharacter(character.data)) {
+        if (!isWhitespace(character)) {
             c.frameset_ok = .not_ok;
         }
     }
@@ -1621,7 +1627,7 @@ fn inTableText(c: *TreeConstructor, token: Token) !void {
                 parseError(.Generic);
                 // Ignore the token.
             } else {
-                if (isWhitespaceCharacter(character.data)) c.pending_table_chars_contains_whitespace = true;
+                if (isWhitespace(character)) c.pending_table_chars_contains_whitespace = true;
                 try c.pending_table_character_tokens.append(c.allocator, character);
             }
         },
@@ -1720,7 +1726,7 @@ fn inCaptionAnythingElse(c: *TreeConstructor, token: Token) !void {
 fn inColumnGroup(c: *TreeConstructor, token: Token) !void {
     switch (token) {
         .character => |character| {
-            if (isWhitespaceCharacter(character.data)) {
+            if (isWhitespace(character)) {
                 try insertCharacter(c, character);
             } else {
                 inColumnGroupAnythingElse(c);
@@ -2002,7 +2008,7 @@ fn closeTheCell(c: *TreeConstructor) void {
 fn inSelect(c: *TreeConstructor, token: Token) !void {
     switch (token) {
         .character => |character| {
-            if (isNullCharacter(character.data)) {
+            if (isNull(character)) {
                 parseError(.Generic);
                 // Ignore the token.
             } else {
@@ -2205,7 +2211,7 @@ fn inTemplateAnyOtherEndTag() void {
 
 fn afterBody(c: *TreeConstructor, token: Token) !void {
     switch (token) {
-        .character => |character| if (isWhitespaceCharacter(character.data))
+        .character => |character| if (isWhitespace(character))
             try inBodyWhitespaceCharacter(c, character)
         else
             afterBodyAnythingElse(c),
@@ -2237,7 +2243,7 @@ fn afterBodyAnythingElse(c: *TreeConstructor) void {
 
 fn inFrameset(c: *TreeConstructor, token: Token) !void {
     switch (token) {
-        .character => |character| if (isWhitespaceCharacter(character.data)) {
+        .character => |character| if (isWhitespace(character)) {
             try insertCharacter(c, character);
         } else {
             inFramesetAnythingElse();
@@ -2293,7 +2299,7 @@ fn inFramesetAnythingElse() void {
 
 fn afterFrameset(c: *TreeConstructor, token: Token) !void {
     switch (token) {
-        .character => |character| if (isWhitespaceCharacter(character.data)) {
+        .character => |character| if (isWhitespace(character)) {
             try insertCharacter(c, character);
         } else {
             afterFramesetAnythingElse();
@@ -2332,7 +2338,7 @@ fn afterAfterBody(c: *TreeConstructor, token: Token) !void {
             inBodyDoctype();
         },
         .character => |character| {
-            if (isWhitespaceCharacter(character.data)) {
+            if (isWhitespace(character)) {
                 try inBodyWhitespaceCharacter(c, character);
             } else {
                 afterAfterBodyAnythingElse(c);
@@ -2357,7 +2363,7 @@ fn afterAfterBodyAnythingElse(c: *TreeConstructor) void {
 
 fn afterAfterFrameset(c: *TreeConstructor, token: Token) !void {
     switch (token) {
-        .character => |character| if (isWhitespaceCharacter(character.data)) {
+        .character => |character| if (isWhitespace(character)) {
             try inBodyWhitespaceCharacter(c, character);
         } else {
             afterAfterFramesetAnythingElse();
@@ -2386,12 +2392,12 @@ fn afterAfterFramesetAnythingElse() void {
 fn processTokenForeignContent(c: *TreeConstructor, token: Token) !void {
     switch (token) {
         .character => |character| {
-            if (isNullCharacter(character.data)) {
+            if (isNull(character)) {
                 parseError(.Generic);
                 try insertCharacter(c, TokenCharacter{ .data = '\u{FFFD}' });
             } else {
                 try insertCharacter(c, character);
-                if (!isWhitespaceCharacter(character.data)) {
+                if (!isWhitespace(character)) {
                     c.frameset_ok = .not_ok;
                 }
             }
@@ -2616,12 +2622,12 @@ fn textParsingAlgorithm(variant: enum { RAWTEXT, RCDATA }, c: *TreeConstructor, 
     changeToAndSetOriginalInsertionMode(c, .Text, c.insertion_mode);
 }
 
-fn isNullCharacter(character: u21) bool {
-    return character == 0x00;
+fn isNull(character: TokenCharacter) bool {
+    return character.data == 0x00;
 }
 
-fn isWhitespaceCharacter(character: u21) bool {
-    return switch (character) {
+fn isWhitespace(character: TokenCharacter) bool {
+    return switch (character.data) {
         0x09, 0x0A, 0x0C, 0x0D, 0x20 => true,
         else => false,
     };
@@ -2915,7 +2921,7 @@ fn insertComment(c: *TreeConstructor, comment: TokenComment) !void {
 fn insertCommentToDocument(c: *TreeConstructor, comment: TokenComment) !void {
     const cdata = try c.dom.makeCdata(comment.data, .comment);
     // TODO: Catch a possible DomException.
-    return Dom.mutation.documentAppendCdata(c.dom, &c.dom.document, cdata, .Suppress);
+    return Dom.mutation.documentAppendCdata(c.dom, c.document, cdata, .Suppress);
 }
 
 fn insertCommentToElement(c: *TreeConstructor, comment: TokenComment, element: *Element) !void {

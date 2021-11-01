@@ -12,7 +12,6 @@ const Dom = html5.dom;
 const Tokenizer = html5.Tokenizer;
 const TreeConstructor = html5.tree_construction.TreeConstructor;
 const Parser = html5.Parser;
-const FragmentParser = html5.FragmentParser;
 
 fn eql(str1: []const u8, str2: []const u8) bool {
     return std.mem.eql(u8, str1, str2);
@@ -167,6 +166,7 @@ fn runTestFile(file_path: []const u8) !void {
 
 const Expected = struct {
     dom: Dom.Dom,
+    document: *Dom.Document,
     fragment_context: ?*Dom.Element,
 
     fn deinit(self: *@This()) void {
@@ -267,6 +267,7 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Dom.El
 
     var dom = Dom.Dom{ .allocator = allocator };
     errdefer dom.deinit();
+    const document = try dom.makeDocument();
     const fragment_context = if (context_element_type) |ty| try dom.makeElement(ty) else null;
 
     while (lines.next()) |line| {
@@ -303,7 +304,7 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Dom.El
 
                 break :blk try dom.makeDoctype(name, public_id, system_id);
             } else try dom.makeDoctype(name, null, null);
-            try Dom.mutation.documentAppendDocumentType(&dom, &dom.document, doctype, .Suppress);
+            try Dom.mutation.documentAppendDocumentType(&dom, document, doctype, .Suppress);
         } else if (startsWith(data, "<!-- ")) {
             // comment
             assert(endsWith(data, " -->"));
@@ -313,7 +314,7 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Dom.El
                 if (fragment_context) |e| {
                     try Dom.mutation.elementAppend(&dom, e, .{ .cdata = cdata }, .Suppress);
                 } else {
-                    try Dom.mutation.documentAppendCdata(&dom, &dom.document, cdata, .Suppress);
+                    try Dom.mutation.documentAppendCdata(&dom, document, cdata, .Suppress);
                 }
             } else {
                 try Dom.mutation.elementAppend(&dom, stack.items[depth - 1], .{ .cdata = cdata }, .Suppress);
@@ -349,7 +350,7 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Dom.El
                 if (fragment_context) |e| {
                     try Dom.mutation.elementAppend(&dom, e, .{ .element = element }, .Suppress);
                 } else {
-                    try Dom.mutation.documentAppendElement(&dom, &dom.document, element, .Suppress);
+                    try Dom.mutation.documentAppendElement(&dom, document, element, .Suppress);
                 }
             } else {
                 try Dom.mutation.elementAppend(&dom, stack.items[stack.items.len - 1], .{ .element = element }, .Suppress);
@@ -398,7 +399,7 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Dom.El
         }
     }
 
-    return Expected{ .dom = dom, .fragment_context = fragment_context };
+    return Expected{ .dom = dom, .document = document, .fragment_context = fragment_context };
 }
 
 fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
@@ -416,6 +417,9 @@ fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
     };
     defer allocator.free(input);
 
+    var result_dom = Dom.Dom{ .allocator = allocator };
+    defer result_dom.deinit();
+
     if (t.expected.fragment_context) |e| {
         var context_element = Dom.Element{
             .element_type = e.element_type,
@@ -423,34 +427,38 @@ fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
             .attributes = .{},
             .children = .{},
         };
-        // TODO Set the scripting flag.
-        var parser = try FragmentParser.init(&context_element, input, allocator, scripting, .no_quirks);
+        var parser = try Parser.initFragment(&result_dom, &context_element, input, allocator, scripting, .no_quirks);
         defer parser.deinit();
         try parser.run();
 
-        const html = parser.inner.constructor.open_elements.items[0];
-        assert(html.element_type == .html_html);
-        try expectEqual(e.children.items.len, html.children.items.len);
-        for (e.children.items) |e_child, i| {
-            const html_child = html.children.items[i];
-            switch (e_child) {
-                .element => {
-                    try expect(html_child == .element);
-                    try deeplyCompareElements(allocator, e_child.element, html_child.element);
-                },
-                .cdata => {
-                    try expect(html_child == .cdata);
-                    try expectEqualCdatas(e_child.cdata, html_child.cdata);
-                },
-            }
-        }
+        try deeplyCompareDocuments(allocator, t.expected.document, parser.getDocument());
     } else {
-        var result_dom = Dom.Dom{ .allocator = allocator };
-        defer result_dom.deinit();
-
-        var parser = Parser.init(&result_dom, input, allocator);
+        var parser = try Parser.init(&result_dom, input, allocator);
         defer parser.deinit();
         try parser.run();
+
+        try deeplyCompareDocuments(allocator, t.expected.document, parser.getDocument());
+    }
+}
+
+fn deeplyCompareDocuments(allocator: *Allocator, doc1: *const Dom.Document, doc2: *const Dom.Document) !void {
+    //try expectEqual(doc1.quirks_mode, doc2.quirks_mode);
+    comptime var i = 0;
+    inline while (i < doc1.cdata_slices.len) : (i += 1) {
+        try expectEqual(doc1.cdata_slices[i], doc2.cdata_slices[i]);
+    }
+    for (doc1.cdata.items) |c1, j| {
+        try expectEqualCdatas(c1, doc2.cdata.items[j]);
+    }
+
+    if (doc1.doctype) |d1| {
+        try expect(doc2.doctype != null);
+        try expectEqualDoctypes(d1, doc2.doctype.?);
+    }
+
+    if (doc2.element) |e1| {
+        try expect(doc2.element != null);
+        try deeplyCompareElements(allocator, e1, doc2.element.?);
     }
 }
 
@@ -485,6 +493,12 @@ fn deeplyCompareElements(allocator: *Allocator, element1: *const Dom.Element, el
             }
         }
     }
+}
+
+fn expectEqualDoctypes(d1: *const Dom.DocumentType, d2: *const Dom.DocumentType) !void {
+    try expectEqualStrings(d1.name, d2.name);
+    try expectEqualStrings(d1.publicId, d2.publicId);
+    try expectEqualStrings(d1.systemId, d2.systemId);
 }
 
 fn expectEqualElements(e1: *const Dom.Element, e2: *const Dom.Element) !void {

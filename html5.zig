@@ -6,9 +6,7 @@
 pub const Tokenizer = @import("source/Tokenizer.zig");
 pub const dom = @import("source/dom.zig");
 pub const tree_construction = @import("source/tree_construction.zig");
-pub const parser = @import("source/Parser.zig");
-pub const Parser = parser.Parser;
-pub const FragmentParser = parser.FragmentParser;
+pub const Parser = @import("source/Parser.zig").Parser;
 pub const util = @import("source/util.zig");
 
 comptime {

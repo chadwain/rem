@@ -19,12 +19,12 @@ pub const DomException = enum {
 };
 
 pub const Dom = struct {
-    document: Document = .{},
     allocator: *Allocator,
 
     /// For elements whose local name cannot be determined by looking at its element_type.
     local_names: AutoHashMapUnmanaged(*const Element, []const u8) = .{},
 
+    all_documents: ArrayListUnmanaged(*Document) = .{},
     all_elements: ArrayListUnmanaged(*Element) = .{},
     all_cdatas: ArrayListUnmanaged(*CharacterData) = .{},
     all_doctypes: ArrayListUnmanaged(*DocumentType) = .{},
@@ -45,8 +45,11 @@ pub const Dom = struct {
             self.allocator.destroy(item);
         }
         self.all_doctypes.deinit(self.allocator);
-
-        self.document.deinit(self.allocator);
+        for (self.all_documents.items) |item| {
+            item.deinit(self.allocator);
+            self.allocator.destroy(item);
+        }
+        self.all_documents.deinit(self.allocator);
 
         var iterator = self.local_names.valueIterator();
         while (iterator.next()) |local_name| self.allocator.free(local_name.*);
@@ -57,6 +60,14 @@ pub const Dom = struct {
         _ = self;
         std.debug.print("DOM Exception raised: {s}\n", .{@tagName(ex)});
         return error.DomException;
+    }
+
+    pub fn makeDocument(self: *Dom) !*Document {
+        const document = try self.allocator.create(Document);
+        errdefer self.allocator.destroy(document);
+        try self.all_documents.append(self.allocator, document);
+        document.* = Document{};
+        return document;
     }
 
     pub fn makeCdata(self: *Dom, data: []const u8, interface: CharacterDataInterface) !*CharacterData {
