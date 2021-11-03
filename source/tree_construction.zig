@@ -149,7 +149,7 @@ pub const TreeConstructor = struct {
             if (token == .character and token.character.data == '\n') return result;
         }
 
-        std.debug.print("{any}\n", .{token});
+        // std.debug.print("{any}\n", .{token});
         var should_process = true;
         while (should_process) {
             self.reprocess = false;
@@ -197,7 +197,7 @@ const ParseError = enum {
 
 fn changeTo(c: *TreeConstructor, insertion_mode: InsertionMode) void {
     c.insertion_mode = insertion_mode;
-    std.debug.print("Change to: {s}\n", .{@tagName(insertion_mode)});
+    // std.debug.print("Change to: {s}\n", .{@tagName(insertion_mode)});
 }
 
 fn changeToOriginalInsertionMode(c: *TreeConstructor) void {
@@ -212,13 +212,13 @@ fn changeToAndSetOriginalInsertionMode(c: *TreeConstructor, insertion_mode: Inse
 
 fn reprocess(c: *TreeConstructor) void {
     c.reprocess = true;
-    std.debug.print("Reprocess in: {s}\n", .{@tagName(c.insertion_mode)});
+    // std.debug.print("Reprocess in: {s}\n", .{@tagName(c.insertion_mode)});
 }
 
 fn reprocessIn(c: *TreeConstructor, insertion_mode: InsertionMode) void {
     c.reprocess = true;
     c.insertion_mode = insertion_mode;
-    std.debug.print("Reprocess in: {s}\n", .{@tagName(insertion_mode)});
+    // std.debug.print("Reprocess in: {s}\n", .{@tagName(insertion_mode)});
 }
 
 fn reprocessInOriginalInsertionMode(c: *TreeConstructor) void {
@@ -325,8 +325,9 @@ pub fn resetInsertionModeAppropriately(c: *TreeConstructor) void {
 
 fn stop(c: *TreeConstructor) void {
     // TODO: Stopping parsing has more steps.
+    c.open_elements.clearAndFree(c.allocator);
     c.stopped = true;
-    std.debug.print("Stopped parsing.", .{});
+    // std.debug.print("Stopped parsing.", .{});
 }
 
 fn setTokenizerState(c: *TreeConstructor, state: Tokenizer.State) void {
@@ -1456,20 +1457,19 @@ fn text(c: *TreeConstructor, token: Token) !void {
         .eof => {
             parseError(.Generic);
             const current_node = c.open_elements.pop();
-            if (current_node.element_type == .html_script) {
-                // Mark the script element as "already started".
-                @panic("TODO Text eof, current node is a script");
+            if (current_node.element_type == .html_script and c.scripting) {
+                @panic("TODO Text eof, current node is a script, scripting is enabled");
             }
             reprocessInOriginalInsertionMode(c);
         },
         .end_tag => |end_tag| {
             if (strEql(end_tag.name, "script")) {
-                // TODO Do something if the speculative parser is null and
-                //      the JavaScript execution context stack is empty.
                 const script = c.open_elements.pop();
                 _ = script;
                 changeToOriginalInsertionMode(c);
-                // TODO The rest of this handler.
+                if (c.scripting) {
+                    @panic("TODO Text end tag script, scripting is enabled");
+                }
             } else {
                 _ = c.open_elements.pop();
                 changeToOriginalInsertionMode(c);
@@ -2474,10 +2474,12 @@ fn processTokenForeignContent(c: *TreeConstructor, token: Token) !void {
             if (ElementType.fromStringHtml(end_tag.name)) |token_element_type| switch (token_element_type) {
                 .html_br, .html_p => try foreignContentLotsOfStartTags(c, token),
                 .html_script => {
-                    if (currentNode(c).element_type == .svg_script) {
+                    if (currentNode(c).element_type != .svg_script) {
                         return foreignContentEndTagAnythingElse(c, end_tag);
                     }
-                    @panic("TODO: Foreign content end tag script, current node is SVG script");
+                    if (c.scripting) {
+                        @panic("TODO: Foreign content end tag script, current node is SVG script");
+                    }
                 },
                 else => try foreignContentEndTagAnythingElse(c, end_tag),
             } else {
@@ -2770,8 +2772,9 @@ fn elemTypeEqlAny(element_type: ElementType, compare_to: []const ElementType) bo
 }
 
 fn parseError(err: ParseError) void {
+    _ = err;
     // TODO: Handle parse errors.
-    std.debug.print("Tree construction parse error: {s}\n", .{@tagName(err)});
+    // std.debug.print("Tree construction parse error: {s}\n", .{@tagName(err)});
 }
 
 const ParentNode = union(enum) {
@@ -3397,7 +3400,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
             const node = &c.open_elements.items[node_in_open_elements_index];
             if (node.* == formatting_element.element.?) break;
 
-            const node_in_formatting_elements_index = blk: {
+            var node_in_formatting_elements_index = blk: {
                 var i = c.active_formatting_elements.items.len;
                 while (i > 0) : (i -= 1) {
                     if (node.* == c.active_formatting_elements.items[i - 1].element) break :blk i - 1;
@@ -3408,6 +3411,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
             if (inner_loop_counter > 3 and node_in_formatting_elements_index != null) {
                 removeFromListOfActiveFormattingElements(c, node_in_formatting_elements_index.?);
                 if (node_in_formatting_elements_index.? < bookmark) bookmark -= 1;
+                node_in_formatting_elements_index = null;
             }
 
             // Step 4.13.5

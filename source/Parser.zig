@@ -21,11 +21,11 @@ pub const Parser = struct {
 
     const Self = @This();
 
-    pub fn init(dom: *Dom.Dom, input: []const u21, allocator: *Allocator) !Self {
+    pub fn init(dom: *Dom.Dom, input: []const u21, allocator: *Allocator, scripting: bool) !Self {
         const document = try dom.makeDocument();
         return Self{
             .tokenizer = Tokenizer.init(allocator, undefined, undefined),
-            .constructor = TreeConstructor.init(dom, document, allocator, .{}),
+            .constructor = TreeConstructor.init(dom, document, allocator, .{ .scripting = scripting }),
             .input = input,
             .allocator = allocator,
         };
@@ -143,19 +143,19 @@ pub const Parser = struct {
     }
 };
 
-test "Parser" {
+test "Parser usage" {
     const allocator = std.testing.allocator;
     var dom = Dom.Dom{ .allocator = allocator };
     defer dom.deinit();
     const string = "<!doctype><html>asdf</body hello=world>";
     const input: []const u21 = &html5.util.utf8DecodeComptime(string);
 
-    var parser = try Parser.init(&dom, input, allocator);
+    var parser = try Parser.init(&dom, input, allocator, false);
     defer parser.deinit();
     try parser.run();
 }
 
-test "Fragment parser" {
+test "Parser usage, fragment case" {
     const allocator = std.testing.allocator;
 
     var dom = Dom.Dom{ .allocator = allocator };
