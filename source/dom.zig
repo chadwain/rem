@@ -23,6 +23,8 @@ pub const Dom = struct {
 
     /// For elements whose local name cannot be determined by looking at its element_type.
     local_names: AutoHashMapUnmanaged(*const Element, []const u8) = .{},
+    /// Specifically holds MathML annotation-xml elements that are HTML integration points.
+    html_integration_points: AutoHashMapUnmanaged(*const Element, void) = .{},
 
     all_documents: ArrayListUnmanaged(*Document) = .{},
     all_elements: ArrayListUnmanaged(*Element) = .{},
@@ -54,6 +56,8 @@ pub const Dom = struct {
         var iterator = self.local_names.valueIterator();
         while (iterator.next()) |local_name| self.allocator.free(local_name.*);
         self.local_names.deinit(self.allocator);
+
+        self.html_integration_points.deinit(self.allocator);
     }
 
     pub fn exception(self: *Dom, ex: DomException) error{DomException} {
@@ -100,6 +104,10 @@ pub const Dom = struct {
         const copy = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(copy);
         try self.local_names.putNoClobber(self.allocator, element, copy);
+    }
+
+    pub fn registerHtmlIntegrationPoint(self: *Dom, element: *const Element) !void {
+        try self.html_integration_points.putNoClobber(self.allocator, element, {});
     }
 };
 
@@ -163,43 +171,43 @@ pub const DocumentType = struct {
     }
 };
 
-pub const ElementAttributes = StringHashMapUnmanaged([]u8);
-
 pub const Namespace = enum {
     html,
     svg,
     mathml,
 };
 
-// TODO There are some Html elements missing from this list.
-// Also, keep note of which elements are obsolete.
-// (https://html.spec.whatwg.org/multipage/obsolete.html#non-conforming-features)
 pub const ElementType = enum {
+    // This is the complete list of conforming HTML elements.
+    // (https://html.spec.whatwg.org/multipage/indices.html#elements-3)
     html_a,
+    html_abbr,
     html_address,
-    html_applet,
     html_area,
     html_article,
     html_aside,
+    html_audio,
     html_b,
     html_base,
-    html_basefont,
-    html_bgsound,
-    html_big,
+    html_bdi,
+    html_bdo,
     html_blockquote,
     html_body,
     html_br,
     html_button,
+    html_canvas,
     html_caption,
-    html_center,
     html_cite,
     html_code,
     html_col,
     html_colgroup,
+    html_data,
+    html_datalist,
     html_dd,
+    html_del,
     html_details,
+    html_dfn,
     html_dialog,
-    html_dir,
     html_div,
     html_dl,
     html_dt,
@@ -208,11 +216,8 @@ pub const ElementType = enum {
     html_fieldset,
     html_figcaption,
     html_figure,
-    html_font,
     html_footer,
     html_form,
-    html_frame,
-    html_frameset,
     html_h1,
     html_h2,
     html_h3,
@@ -228,41 +233,43 @@ pub const ElementType = enum {
     html_iframe,
     html_img,
     html_input,
-    html_keygen,
+    html_ins,
+    html_kbd,
+    html_label,
+    html_legend,
     html_li,
     html_link,
-    html_listing,
     html_main,
-    html_marquee,
+    html_map,
+    html_mark,
     html_menu,
     html_meta,
+    html_meter,
     html_nav,
-    html_nobr,
-    html_noembed,
-    html_noframes,
     html_noscript,
     html_object,
     html_ol,
     html_optgroup,
     html_option,
+    html_output,
     html_p,
     html_param,
-    html_plaintext,
+    html_picture,
     html_pre,
-    html_rb,
+    html_progress,
+    html_q,
     html_rp,
     html_rt,
-    html_rtc,
     html_ruby,
     html_s,
+    html_samp,
     html_script,
     html_section,
     html_select,
+    html_slot,
     html_small,
     html_source,
-    html_spacer,
     html_span,
-    html_strike,
     html_strong,
     html_style,
     html_sub,
@@ -272,19 +279,49 @@ pub const ElementType = enum {
     html_tbody,
     html_td,
     html_template,
-    html_test,
     html_textarea,
     html_tfoot,
     html_th,
     html_thead,
+    html_time,
     html_title,
     html_tr,
     html_track,
-    html_tt,
     html_u,
     html_ul,
     html_var,
+    html_video,
     html_wbr,
+
+    // This is the complete list of obsolete and non-conforming elements.
+    // (https://html.spec.whatwg.org/multipage/obsolete.html#non-conforming-features)
+    html_acronym,
+    html_applet,
+    html_basefont,
+    html_bgsound,
+    html_big,
+    html_blink,
+    html_center,
+    html_dir,
+    html_font,
+    html_frame,
+    html_frameset,
+    html_isindex,
+    html_keygen,
+    html_listing,
+    html_marquee,
+    html_menuitem,
+    html_multicol,
+    html_nextid,
+    html_nobr,
+    html_noembed,
+    html_noframes,
+    html_plaintext,
+    html_rb,
+    html_rtc,
+    html_spacer,
+    html_strike,
+    html_tt,
     html_xmp,
 
     mathml_math,
@@ -301,9 +338,12 @@ pub const ElementType = enum {
     svg_title,
     svg_script,
 
+    /// The type of a custom HTML element.
     custom_html,
-    custom_mathml,
-    custom_svg,
+    /// The type of a MathML element that this DOM implementation doesn't know about.
+    some_other_mathml,
+    /// The type of an SVG element that this DOM implementation doesn't know about.
+    some_other_svg,
 
     pub fn namespace(self: ElementType) Namespace {
         // TODO: Some metaprogramming to make this less fragile.
@@ -319,12 +359,12 @@ pub const ElementType = enum {
         const value = @enumToInt(self);
         if ((value >= html_lowest and value <= html_highest) or self == .custom_html) {
             return .html;
-        } else if ((value >= mathml_lowest and value <= mathml_highest) or self == .custom_mathml) {
+        } else if ((value >= mathml_lowest and value <= mathml_highest) or self == .some_other_mathml) {
             return .mathml;
-        } else if ((value >= svg_lowest and value <= svg_highest) or self == .custom_svg) {
+        } else if ((value >= svg_lowest and value <= svg_highest) or self == .some_other_svg) {
             return .svg;
         } else {
-            return unreachable;
+            unreachable;
         }
     }
 
@@ -332,30 +372,33 @@ pub const ElementType = enum {
         @setEvalBranchQuota(5000);
         break :html_map ComptimeStringMap(ElementType, .{
             .{ "a", .html_a },
+            .{ "abbr", .html_abbr },
             .{ "address", .html_address },
-            .{ "applet", .html_applet },
             .{ "area", .html_area },
             .{ "article", .html_article },
             .{ "aside", .html_aside },
+            .{ "audio", .html_audio },
             .{ "b", .html_b },
             .{ "base", .html_base },
-            .{ "basefont", .html_basefont },
-            .{ "bgsound", .html_bgsound },
-            .{ "big", .html_big },
+            .{ "bdi", .html_bdi },
+            .{ "bdo", .html_bdo },
             .{ "blockquote", .html_blockquote },
             .{ "body", .html_body },
             .{ "br", .html_br },
             .{ "button", .html_button },
+            .{ "canvas", .html_canvas },
             .{ "caption", .html_caption },
-            .{ "center", .html_center },
             .{ "cite", .html_cite },
             .{ "code", .html_code },
             .{ "col", .html_col },
             .{ "colgroup", .html_colgroup },
+            .{ "data", .html_data },
+            .{ "datalist", .html_datalist },
             .{ "dd", .html_dd },
+            .{ "del", .html_del },
             .{ "details", .html_details },
+            .{ "dfn", .html_dfn },
             .{ "dialog", .html_dialog },
-            .{ "dir", .html_dir },
             .{ "div", .html_div },
             .{ "dl", .html_dl },
             .{ "dt", .html_dt },
@@ -364,11 +407,8 @@ pub const ElementType = enum {
             .{ "fieldset", .html_fieldset },
             .{ "figcaption", .html_figcaption },
             .{ "figure", .html_figure },
-            .{ "font", .html_font },
             .{ "footer", .html_footer },
             .{ "form", .html_form },
-            .{ "frame", .html_frame },
-            .{ "frameset", .html_frameset },
             .{ "h1", .html_h1 },
             .{ "h2", .html_h2 },
             .{ "h3", .html_h3 },
@@ -384,41 +424,43 @@ pub const ElementType = enum {
             .{ "iframe", .html_iframe },
             .{ "img", .html_img },
             .{ "input", .html_input },
-            .{ "keygen", .html_keygen },
+            .{ "ins", .html_ins },
+            .{ "kbd", .html_kbd },
+            .{ "label", .html_label },
+            .{ "legend", .html_legend },
             .{ "li", .html_li },
             .{ "link", .html_link },
-            .{ "listing", .html_listing },
             .{ "main", .html_main },
-            .{ "marquee", .html_marquee },
+            .{ "map", .html_map },
+            .{ "mark", .html_mark },
             .{ "menu", .html_menu },
             .{ "meta", .html_meta },
+            .{ "meter", .html_meter },
             .{ "nav", .html_nav },
-            .{ "nobr", .html_nobr },
-            .{ "noembed", .html_noembed },
-            .{ "noframes", .html_noframes },
             .{ "noscript", .html_noscript },
             .{ "object", .html_object },
             .{ "ol", .html_ol },
             .{ "optgroup", .html_optgroup },
             .{ "option", .html_option },
+            .{ "output", .html_output },
             .{ "p", .html_p },
             .{ "param", .html_param },
-            .{ "plaintext", .html_plaintext },
+            .{ "picture", .html_picture },
             .{ "pre", .html_pre },
-            .{ "rb", .html_rb },
+            .{ "progress", .html_progress },
+            .{ "q", .html_q },
             .{ "rp", .html_rp },
             .{ "rt", .html_rt },
-            .{ "rtc", .html_rtc },
             .{ "ruby", .html_ruby },
             .{ "s", .html_s },
+            .{ "samp", .html_samp },
             .{ "script", .html_script },
             .{ "section", .html_section },
             .{ "select", .html_select },
+            .{ "slot", .html_slot },
             .{ "small", .html_small },
             .{ "source", .html_source },
-            .{ "spacer", .html_spacer },
             .{ "span", .html_span },
-            .{ "strike", .html_strike },
             .{ "strong", .html_strong },
             .{ "style", .html_style },
             .{ "sub", .html_sub },
@@ -428,66 +470,115 @@ pub const ElementType = enum {
             .{ "tbody", .html_tbody },
             .{ "td", .html_td },
             .{ "template", .html_template },
-            .{ "test", .html_test },
             .{ "textarea", .html_textarea },
             .{ "tfoot", .html_tfoot },
             .{ "th", .html_th },
             .{ "thead", .html_thead },
+            .{ "time", .html_time },
             .{ "title", .html_title },
             .{ "tr", .html_tr },
             .{ "track", .html_track },
-            .{ "tt", .html_tt },
             .{ "u", .html_u },
             .{ "ul", .html_ul },
             .{ "var", .html_var },
+            .{ "video", .html_video },
             .{ "wbr", .html_wbr },
+
+            .{ "acronym", .html_acronym },
+            .{ "applet", .html_applet },
+            .{ "basefont", .html_basefont },
+            .{ "bgsound", .html_bgsound },
+            .{ "big", .html_big },
+            .{ "blink", .html_blink },
+            .{ "center", .html_center },
+            .{ "dir", .html_dir },
+            .{ "font", .html_font },
+            .{ "frame", .html_frame },
+            .{ "frameset", .html_frameset },
+            .{ "isindex", .html_isindex },
+            .{ "keygen", .html_keygen },
+            .{ "listing", .html_listing },
+            .{ "marquee", .html_marquee },
+            .{ "menuitem", .html_menuitem },
+            .{ "multicol", .html_multicol },
+            .{ "nextid", .html_nextid },
+            .{ "nobr", .html_nobr },
+            .{ "noembed", .html_noembed },
+            .{ "noframes", .html_noframes },
+            .{ "plaintext", .html_plaintext },
+            .{ "rb", .html_rb },
+            .{ "rtc", .html_rtc },
+            .{ "spacer", .html_spacer },
+            .{ "strike", .html_strike },
+            .{ "tt", .html_tt },
             .{ "xmp", .html_xmp },
         });
     };
 
-    pub fn fromStringHtml(string: []const u8) ?ElementType {
-        return html_map.get(string);
+    const mathml_map = ComptimeStringMap(ElementType, .{
+        .{ "math", .mathml_math },
+        .{ "mi", .mathml_mi },
+        .{ "mo", .mathml_mo },
+        .{ "mn", .mathml_mn },
+        .{ "ms", .mathml_ms },
+        .{ "mtext", .mathml_mtext },
+        .{ "annotation-xml", .mathml_annotation_xml },
+    });
+
+    const svg_map = ComptimeStringMap(ElementType, .{
+        .{ "svg", .svg_svg },
+        .{ "foreignObject", .svg_foreign_object },
+        .{ "desc", .svg_desc },
+        .{ "title", .svg_title },
+        .{ "script", .svg_script },
+    });
+
+    /// Get an HTML element's ElementType from its tag name.
+    pub fn fromStringHtml(tag_name: []const u8) ?ElementType {
+        return html_map.get(tag_name);
     }
 
-    pub fn fromStringMathMl(string: []const u8) ?ElementType {
-        // TODO
-        _ = string;
-        return null;
+    /// Get a MathML element's ElementType from its tag name.
+    pub fn fromStringMathMl(tag_name: []const u8) ?ElementType {
+        return mathml_map.get(tag_name);
     }
 
-    pub fn fromStringSvg(string: []const u8) ?ElementType {
-        // TODO
-        _ = string;
-        return null;
+    /// Get an SVG element's ElementType from its tag name.
+    pub fn fromStringSvg(tag_name: []const u8) ?ElementType {
+        return svg_map.get(tag_name);
     }
 
+    /// Returns the local name of an element based solely on its ElementType, or null if it cannot be determined.
     pub fn toLocalName(self: ElementType) ?[]const u8 {
         return switch (self) {
             .html_a => "a",
+            .html_abbr => "abbr",
             .html_address => "address",
-            .html_applet => "applet",
             .html_area => "area",
             .html_article => "article",
             .html_aside => "aside",
+            .html_audio => "audio",
             .html_b => "b",
             .html_base => "base",
-            .html_basefont => "basefont",
-            .html_bgsound => "bgsound",
-            .html_big => "big",
+            .html_bdi => "bdi",
+            .html_bdo => "bdo",
             .html_blockquote => "blockquote",
             .html_body => "body",
             .html_br => "br",
             .html_button => "button",
+            .html_canvas => "canvas",
             .html_caption => "caption",
-            .html_center => "center",
             .html_cite => "cite",
             .html_code => "code",
             .html_col => "col",
             .html_colgroup => "colgroup",
+            .html_data => "data",
+            .html_datalist => "datalist",
             .html_dd => "dd",
+            .html_del => "del",
             .html_details => "details",
+            .html_dfn => "dfn",
             .html_dialog => "dialog",
-            .html_dir => "dir",
             .html_div => "div",
             .html_dl => "dl",
             .html_dt => "dt",
@@ -496,11 +587,8 @@ pub const ElementType = enum {
             .html_fieldset => "fieldset",
             .html_figcaption => "figcaption",
             .html_figure => "figure",
-            .html_font => "font",
             .html_footer => "footer",
             .html_form => "form",
-            .html_frame => "frame",
-            .html_frameset => "frameset",
             .html_h1 => "h1",
             .html_h2 => "h2",
             .html_h3 => "h3",
@@ -516,41 +604,43 @@ pub const ElementType = enum {
             .html_iframe => "iframe",
             .html_img => "img",
             .html_input => "input",
-            .html_keygen => "keygen",
+            .html_ins => "ins",
+            .html_kbd => "kbd",
+            .html_label => "label",
+            .html_legend => "legend",
             .html_li => "li",
             .html_link => "link",
-            .html_listing => "listing",
             .html_main => "main",
-            .html_marquee => "marquee",
+            .html_map => "map",
+            .html_mark => "mark",
             .html_menu => "menu",
             .html_meta => "meta",
+            .html_meter => "meter",
             .html_nav => "nav",
-            .html_nobr => "nobr",
-            .html_noembed => "noembed",
-            .html_noframes => "noframes",
             .html_noscript => "noscript",
             .html_object => "object",
             .html_ol => "ol",
             .html_optgroup => "optgroup",
             .html_option => "option",
+            .html_output => "output",
             .html_p => "p",
             .html_param => "param",
-            .html_plaintext => "plaintext",
+            .html_picture => "picture",
             .html_pre => "pre",
-            .html_rb => "rb",
+            .html_progress => "progress",
+            .html_q => "q",
             .html_rp => "rp",
             .html_rt => "rt",
-            .html_rtc => "rtc",
             .html_ruby => "ruby",
             .html_s => "s",
+            .html_samp => "samp",
             .html_script => "script",
             .html_section => "section",
             .html_select => "select",
+            .html_slot => "slot",
             .html_small => "small",
             .html_source => "source",
-            .html_spacer => "spacer",
             .html_span => "span",
-            .html_strike => "strike",
             .html_strong => "strong",
             .html_style => "style",
             .html_sub => "sub",
@@ -560,28 +650,56 @@ pub const ElementType = enum {
             .html_tbody => "tbody",
             .html_td => "td",
             .html_template => "template",
-            .html_test => "test",
             .html_textarea => "textarea",
             .html_tfoot => "tfoot",
             .html_th => "th",
             .html_thead => "thead",
+            .html_time => "time",
             .html_title => "title",
             .html_tr => "tr",
             .html_track => "track",
-            .html_tt => "tt",
             .html_u => "u",
             .html_ul => "ul",
             .html_var => "var",
+            .html_video => "video",
             .html_wbr => "wbr",
+
+            .html_acronym => "acronym",
+            .html_applet => "applet",
+            .html_basefont => "basefont",
+            .html_bgsound => "bgsound",
+            .html_big => "big",
+            .html_blink => "blink",
+            .html_center => "center",
+            .html_dir => "dir",
+            .html_font => "font",
+            .html_frame => "frame",
+            .html_frameset => "frameset",
+            .html_isindex => "isindex",
+            .html_keygen => "keygen",
+            .html_listing => "listing",
+            .html_marquee => "marquee",
+            .html_menuitem => "menuitem",
+            .html_multicol => "multicol",
+            .html_nextid => "nextid",
+            .html_nobr => "nobr",
+            .html_noembed => "noembed",
+            .html_noframes => "noframes",
+            .html_plaintext => "plaintext",
+            .html_rb => "rb",
+            .html_rtc => "rtc",
+            .html_spacer => "spacer",
+            .html_strike => "strike",
+            .html_tt => "tt",
             .html_xmp => "xmp",
 
             .mathml_math => "math",
-            .mathml_mi => @panic("TODO: ElementType.toLocalName for mathml_mi elements"),
-            .mathml_mo => @panic("TODO: ElementType.toLocalName for mathml_mo elements"),
-            .mathml_mn => @panic("TODO: ElementType.toLocalName for mathml_mn elements"),
-            .mathml_ms => @panic("TODO: ElementType.toLocalName for mathml_ms elements"),
-            .mathml_mtext => @panic("TODO: ElementType.toLocalName for mathml_mtext elements"),
-            .mathml_annotation_xml => @panic("TODO: ElementType.toLocalName for mathml_annotation_xml elements"),
+            .mathml_mi => "mi",
+            .mathml_mo => "mo",
+            .mathml_mn => "mn",
+            .mathml_ms => "ms",
+            .mathml_mtext => "mtext",
+            .mathml_annotation_xml => "annotation-xml",
 
             .svg_svg => "svg",
             .svg_foreign_object => "foreignObject",
@@ -590,8 +708,8 @@ pub const ElementType = enum {
             .svg_script => "script",
 
             .custom_html,
-            .custom_mathml,
-            .custom_svg,
+            .some_other_mathml,
+            .some_other_svg,
             => null,
         };
     }
@@ -608,6 +726,8 @@ pub const ParentNode = union(enum) {
     element: *Element,
     document,
 };
+
+pub const ElementAttributes = StringHashMapUnmanaged([]u8);
 
 pub const Element = struct {
     element_type: ElementType,

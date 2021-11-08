@@ -78,7 +78,16 @@ pub const Parser = struct {
         }
 
         // Step 9
-        // TODO: Determine if this is an HTML integration point.
+        const is_html_integration_point = switch (context.element_type) {
+            .svg_foreign_object, .svg_desc, .svg_title => true,
+            .mathml_annotation_xml => blk: {
+                const eql = std.ascii.eqlIgnoreCase;
+                const encoding = context.attributes.get("encoding") orelse break :blk false;
+                break :blk eql(encoding, "text/html") or eql(encoding, "application/xhtml+xml");
+            },
+            else => false,
+        };
+        if (is_html_integration_point) try dom.registerHtmlIntegrationPoint(context);
 
         // Step 10
         tree_construction.resetInsertionModeAppropriately(&result.constructor);

@@ -68,8 +68,6 @@ test "Tree constructor usage" {
     }
 }
 
-const report_parse_errors = true;
-
 pub const RunResult = struct {
     new_tokenizer_state: ?Tokenizer.State = null,
     adjusted_current_node_is_not_in_html_namespace: bool = undefined,
@@ -346,8 +344,8 @@ fn dispatcher(c: *TreeConstructor, token: Token) !void {
     if ((is_mathml_integration and (token == .character or (token == .start_tag and !strEqlAny(token.start_tag.name, &.{ "mglyph", "malignmark" })))))
         return processToken(c, token);
 
-    const is_html_integration = isHtmlIntegrationPoint(adjusted_current_node);
-    if (is_html_integration and (token == .start_tag or token == .character))
+    const is_html_integration_point = isHtmlIntegrationPoint(c.dom, adjusted_current_node);
+    if (is_html_integration_point and (token == .start_tag or token == .character))
         return processToken(c, token);
 
     return processTokenForeignContent(c, token);
@@ -623,13 +621,9 @@ fn inHeadStartTagScript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
         .parent_before_child => |s| .{ .element = s.parent },
     };
     const element = try createAnElementForTheToken(c, start_tag, .html_script, intended_parent, .dont_adjust);
-    // TODO Set the script's parser document to the document.
-    // TODO Unset the script's non-blocking flag.
-    if (c.fragment_context != null) {
-        // TODO Mark the script as already started.
+    if (c.scripting) {
+        @panic("TODO InHead start tag script, scripting is enabled");
     }
-    // If the parser was invoked via the document.write() or document.writeln() methods,
-    //      then optionally mark the script element as "already started".
     switch (adjusted_insertion_location) {
         // TODO: Check pre-insertion validity
         .element_last_child => |e| try Dom.mutation.elementAppend(c.dom, e, .{ .element = element }, .Suppress),
@@ -1199,16 +1193,13 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
         },
         .end_tag => |end_tag| {
             if (ElementType.fromStringHtml(end_tag.name)) |token_element_type| switch (token_element_type) {
-                .html_template => {
-                    // TODO: Jump straight to the appropriate handler.
-                    try inHead(c, token);
-                },
+                .html_template => _ = inHeadEndTagTemplate(c),
                 .html_body => {
                     if (!hasElementInScope(c, ElementType.html_body)) {
                         parseError(.Generic);
                         // Ignore the token.
                     } else {
-                        checkValidInBodyEndTag(c);
+                        inBodyEofCheckForParseErrors(c);
                         changeTo(c, .AfterBody);
                     }
                 },
@@ -1217,7 +1208,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                         parseError(.Generic);
                         // Ignore the token.
                     } else {
-                        checkValidInBodyEndTag(c);
+                        inBodyEofCheckForParseErrors(c);
                         reprocessIn(c, .AfterBody);
                     }
                 },
@@ -1381,8 +1372,36 @@ fn inBodyEof(c: *TreeConstructor) void {
     if (c.template_insertion_modes.items.len > 0) {
         inTemplateEof(c);
     } else {
-        checkValidInBodyEndTag(c);
+        inBodyEofCheckForParseErrors(c);
         stop(c);
+    }
+}
+
+fn inBodyEofCheckForParseErrors(c: *TreeConstructor) void {
+    const valid_types = &[_]ElementType{
+        .html_dd,
+        .html_dt,
+        .html_li,
+        .html_optgroup,
+        .html_option,
+        .html_p,
+        .html_rb,
+        .html_rp,
+        .html_rt,
+        .html_rtc,
+        .html_tbody,
+        .html_td,
+        .html_tfoot,
+        .html_th,
+        .html_thead,
+        .html_tr,
+        .html_body,
+        .html_html,
+    };
+    for (c.open_elements.items) |e| {
+        if (!elemTypeEqlAny(e.element_type, valid_types)) {
+            parseError(.Generic);
+        }
     }
 }
 
@@ -2492,7 +2511,7 @@ fn processTokenForeignContent(c: *TreeConstructor, token: Token) !void {
 fn foreignContentLotsOfStartTags(c: *TreeConstructor, token: Token) !void {
     parseError(.Generic);
     var current_node = currentNode(c);
-    while (current_node.namespace() != .html and !isMathMlTextIntegrationPoint(current_node) and !isHtmlIntegrationPoint(current_node)) {
+    while (current_node.namespace() != .html and !isMathMlTextIntegrationPoint(current_node) and !isHtmlIntegrationPoint(c.dom, current_node)) {
         _ = c.open_elements.pop();
         current_node = currentNode(c);
     }
@@ -2554,7 +2573,7 @@ fn foreignContentStartTagAnythingElse(c: *TreeConstructor, start_tag: TokenStart
         .mathml => {
             new_token = start_tag;
             adjust_attributes = .adjust_mathml_attributes;
-            element_type = ElementType.fromStringMathMl(start_tag.name) orelse .custom_mathml;
+            element_type = ElementType.fromStringMathMl(start_tag.name) orelse .some_other_mathml;
         },
         .svg => {
             const new_tag_name = foreign_content_change_svg_tag_name_map.get(start_tag.name) orelse start_tag.name;
@@ -2564,11 +2583,19 @@ fn foreignContentStartTagAnythingElse(c: *TreeConstructor, start_tag: TokenStart
                 .self_closing = start_tag.self_closing,
             };
             adjust_attributes = .adjust_svg_attributes;
-            element_type = ElementType.fromStringSvg(new_tag_name) orelse .custom_svg;
+            element_type = ElementType.fromStringSvg(new_tag_name) orelse .some_other_svg;
         },
     }
 
-    _ = try insertForeignElementForTheToken(c, new_token, element_type, adjust_attributes);
+    const element = try insertForeignElementForTheToken(c, new_token, element_type, adjust_attributes);
+    if (element_type == .mathml_annotation_xml) {
+        if (start_tag.attributes.get("encoding")) |encoding| {
+            if (std.ascii.eqlIgnoreCase(encoding, "text/html") or std.ascii.eqlIgnoreCase(encoding, "application/xhtml+xml")) {
+                try c.dom.registerHtmlIntegrationPoint(element);
+            }
+        }
+    }
+
     if (start_tag.self_closing) {
         acknowledgeSelfClosingFlag(c);
         if (currentNode(c).namespace() == .svg and strEql(start_tag.name, "script")) {
@@ -2800,7 +2827,7 @@ fn currentTemplateInsertionMode(c: *TreeConstructor) InsertionMode {
 
 /// Represents the appropriate place for inserting a node.
 const NodeInsertionLocation = union(enum) {
-    // TODO: The appropriate place for inserting a node may not be inside an Element.
+    // NOTE: The appropriate place for inserting a node may not be inside an Element.
     // See https://html.spec.whatwg.org/multipage/parsing.html#appropriate-place-for-inserting-a-node
 
     /// The location is after the last child of the element.
@@ -3806,36 +3833,6 @@ fn closePElement(c: *TreeConstructor) void {
     while (c.open_elements.pop().element_type != .html_p) {}
 }
 
-fn checkValidInBodyEndTag(c: *TreeConstructor) void {
-    if (comptime report_parse_errors) {
-        const valid_types = &[_]ElementType{
-            .html_dd,
-            .html_dt,
-            .html_li,
-            .html_optgroup,
-            .html_option,
-            .html_p,
-            .html_rb,
-            .html_rp,
-            .html_rt,
-            .html_rtc,
-            .html_tbody,
-            .html_td,
-            .html_tfoot,
-            .html_th,
-            .html_thead,
-            .html_tr,
-            .html_body,
-            .html_html,
-        };
-        for (c.open_elements.items) |e| {
-            if (!elemTypeEqlAny(e.element_type, valid_types)) {
-                parseError(.Generic);
-            }
-        }
-    }
-}
-
 fn isMathMlTextIntegrationPoint(element: *Element) bool {
     return switch (element.element_type) {
         .mathml_mi,
@@ -3848,13 +3845,13 @@ fn isMathMlTextIntegrationPoint(element: *Element) bool {
     };
 }
 
-fn isHtmlIntegrationPoint(element: *Element) bool {
+fn isHtmlIntegrationPoint(dom: *Dom.Dom, element: *const Element) bool {
     return switch (element.element_type) {
         .svg_foreign_object,
         .svg_desc,
         .svg_title,
         => true,
-        .mathml_annotation_xml => @panic("TODO: Determine if an element is an HTML integration point."),
+        .mathml_annotation_xml => dom.html_integration_points.get(element) != null,
         else => false,
     };
 }
