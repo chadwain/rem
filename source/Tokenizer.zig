@@ -726,8 +726,10 @@ fn emitCurrentTag(self: *Self) !void {
 
 fn finishAttributeName(self: *Self) !void {
     const name = self.current_attribute_name.toOwnedSlice(self.allocator);
-    errdefer self.allocator.free(name);
-    const get_result = try self.current_tag_attributes.getOrPut(self.allocator, name);
+    const get_result = self.current_tag_attributes.getOrPut(self.allocator, name) catch |err| {
+        self.allocator.free(name);
+        return err;
+    };
     if (get_result.found_existing) {
         self.allocator.free(name);
         self.current_attribute_value_result_loc = null;
