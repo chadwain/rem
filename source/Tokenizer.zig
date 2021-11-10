@@ -4,10 +4,10 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 test "Tokenizer usage" {
-    const allocator = std.heap.page_allocator;
+    const allocator = std.testing.allocator;
 
     const string = "<!doctype><HTML>asdf</body hello=world>";
-    var input: []const u21 = &html5.util.utf8DecodeComptime(string);
+    var input: []const u21 = &html5.util.utf8DecodeStringComptime(string);
 
     var all_tokens = std.ArrayList(Token).init(allocator);
     defer {
@@ -49,6 +49,9 @@ test "Tokenizer usage" {
 const Self = @This();
 const html5 = @import("../html5.zig");
 const named_characters = @import("named-character-references");
+const Token = html5.token.Token;
+const AttributeSet = html5.token.AttributeSet;
+const ParseError = html5.Parser.ParseError;
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -70,7 +73,7 @@ current_tag_type: enum { Start, End } = undefined,
 last_start_tag_name: []u8 = &[_]u8{},
 current_attribute_name: ArrayListUnmanaged(u8) = .{},
 current_attribute_value: ArrayListUnmanaged(u8) = .{},
-current_attribute_value_result_loc: ?*[]const u8 = null,
+current_attribute_value_result_location: ?*[]const u8 = null,
 current_doctype_name: ArrayListUnmanaged(u8) = .{},
 current_doctype_public_identifier: ArrayListUnmanaged(u8) = .{},
 current_doctype_system_identifier: ArrayListUnmanaged(u8) = .{},
@@ -90,6 +93,7 @@ allocator: *Allocator,
 tokens: *ArrayList(Token),
 parse_errors: *ArrayList(ParseError),
 
+/// Create a new HTML5 tokenizer.
 pub fn init(
     allocator: *Allocator,
     token_sink: *ArrayList(Token),
@@ -98,6 +102,7 @@ pub fn init(
     return initState(allocator, .Data, token_sink, parse_error_sink);
 }
 
+/// Create a new HTML5 tokenizer, and change to a particular state.
 pub fn initState(
     allocator: *Allocator,
     state: State,
@@ -112,6 +117,7 @@ pub fn initState(
     };
 }
 
+/// Free the memory owned by the tokenizer.
 pub fn deinit(self: *Self) void {
     self.current_tag_name.deinit(self.allocator);
     var attr_it = self.current_tag_attributes.iterator();
@@ -129,7 +135,16 @@ pub fn deinit(self: *Self) void {
     self.current_comment_data.deinit(self.allocator);
     self.temp_buffer.deinit(self.allocator);
 }
-
+/// Runs the tokenizer on the given input.
+/// The tokenizer will consume 1 or more characters from input.
+/// It will shrink input by the amount of characters consumed.
+/// It will output 0 or more tokens to the token sink and 0 or more parse errors to the parse error sink.
+/// The memory taken up by these tokens and parse errors are owned by the user.
+/// 
+/// Between every call to this function, the user must:
+///     1. Change the tokenizer's state via setState, if appropriate.
+///     2. Call setAdjustedCurrentNodeIsNotInHtmlNamespace with an appropriate value.
+///     3. Change the input stream, if appropriate.
 pub fn run(self: *Self, input: *[]const u21) !bool {
     if (self.reached_eof) return false;
     try processInput(self, input);
@@ -227,264 +242,6 @@ pub const State = enum {
     NumericCharacterReferenceEnd,
 };
 
-pub const ParseError = enum {
-    SurrogateInInputStream,
-    NoncharacterInInputStream,
-    ControlCharacterInInputStream,
-    UnexpectedNullCharacter,
-    UnexpectedQuestionMarkInsteadOfTagName,
-    EOFBeforeTagName,
-    InvalidFirstCharacterOfTagName,
-    MissingEndTagName,
-    EOFInTag,
-    EOFInScriptHtmlCommentLikeText,
-    UnexpectedEqualsSignBeforeAttributeName,
-    UnexpectedCharacterInAttributeName,
-    MissingAttributeValue,
-    UnexpectedCharacterInUnquotedAttributeValue,
-    MissingWhitespaceBetweenAttributes,
-    UnexpectedSolidusInTag,
-    EndTagWithAttributes,
-    EndTagWithTrailingSolidus,
-    CDATAInHtmlContent,
-    IncorrectlyOpenedComment,
-    AbruptClosingOfEmptyComment,
-    EOFInComment,
-    NestedComment,
-    IncorrectlyClosedComment,
-    EOFInDOCTYPE,
-    MissingWhitespaceBeforeDOCTYPEName,
-    MissingDOCTYPEName,
-    InvalidCharacterSequenceAfterDOCTYPEName,
-    MissingWhitespaceAfterDOCTYPEPublicKeyword,
-    MissingDOCTYPEPublicIdentifier,
-    MissingQuoteBeforeDOCTYPEPublicIdentifier,
-    AbruptDOCTYPEPublicIdentifier,
-    MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers,
-    MissingQuoteBeforeDOCTYPESystemIdentifier,
-    MissingWhitespaceAfterDOCTYPESystemKeyword,
-    MissingDOCTYPESystemIdentifier,
-    AbruptDOCTYPESystemIdentifier,
-    UnexpectedCharacterAfterDOCTYPESystemIdentifier,
-    EOFInCDATA,
-    MissingSemicolonAfterCharacterReference,
-    UnknownNamedCharacterReference,
-    AbsenceOfDigitsInNumericCharacterReference,
-    NullCharacterReference,
-    CharacterReferenceOutsideUnicodeRange,
-    SurrogateCharacterReference,
-    NoncharacterCharacterReference,
-    ControlCharacterReference,
-    DuplicateAttribute,
-};
-
-pub const TokenDOCTYPE = struct {
-    name: ?[]const u8,
-    public_identifier: ?[]const u8,
-    system_identifier: ?[]const u8,
-    force_quirks: bool,
-};
-
-pub const AttributeSet = StringHashMapUnmanaged([]const u8);
-
-pub const TokenStartTag = struct {
-    name: []const u8,
-    attributes: AttributeSet,
-    self_closing: bool,
-};
-
-pub const TokenEndTag = struct {
-    name: []const u8,
-};
-
-pub const TokenComment = struct {
-    data: []const u8,
-};
-
-pub const TokenCharacter = struct {
-    data: u21,
-};
-
-pub const TokenEOF = void;
-
-pub const Token = union(enum) {
-    doctype: TokenDOCTYPE,
-    start_tag: TokenStartTag,
-    end_tag: TokenEndTag,
-    comment: TokenComment,
-    character: TokenCharacter,
-    eof: TokenEOF,
-
-    pub fn deinit(self: *Token, allocator: *Allocator) void {
-        switch (self.*) {
-            .doctype => |d| {
-                if (d.name) |name| allocator.free(name);
-                if (d.public_identifier) |public_identifier| allocator.free(public_identifier);
-                if (d.system_identifier) |system_identifier| allocator.free(system_identifier);
-            },
-            .start_tag => |*t| {
-                allocator.free(t.name);
-                var attr_it = t.attributes.iterator();
-                while (attr_it.next()) |entry| {
-                    allocator.free(entry.key_ptr.*);
-                    allocator.free(entry.value_ptr.*);
-                }
-                t.attributes.deinit(allocator);
-            },
-            .end_tag => |t| {
-                allocator.free(t.name);
-            },
-            .comment => |c| {
-                allocator.free(c.data);
-            },
-            .character => {},
-            .eof => {},
-        }
-    }
-
-    pub fn copy(self: Token, allocator: *Allocator) !Token {
-        switch (self) {
-            .doctype => |d| {
-                const name = if (d.name) |s| try allocator.dupe(u8, s) else null;
-                errdefer if (name) |s| allocator.free(s);
-                const public_identifier = if (d.public_identifier) |s| try allocator.dupe(u8, s) else null;
-                errdefer if (public_identifier) |s| allocator.free(s);
-                const system_identifier = if (d.system_identifier) |s| try allocator.dupe(u8, s) else null;
-                errdefer if (system_identifier) |s| allocator.free(s);
-                return Token{ .doctype = .{
-                    .name = name,
-                    .public_identifier = public_identifier,
-                    .system_identifier = system_identifier,
-                    .force_quirks = d.force_quirks,
-                } };
-            },
-            .start_tag => |st| {
-                const name = try allocator.dupe(u8, st.name);
-                errdefer allocator.free(name);
-
-                var attributes = AttributeSet{};
-                errdefer {
-                    var iterator = attributes.iterator();
-                    while (iterator.next()) |attr| {
-                        allocator.free(attr.key_ptr.*);
-                        allocator.free(attr.value_ptr.*);
-                    }
-                    attributes.deinit(allocator);
-                }
-
-                var iterator = st.attributes.iterator();
-                while (iterator.next()) |attr| {
-                    const key = try allocator.dupe(u8, attr.key_ptr.*);
-                    errdefer allocator.free(key);
-                    const value = try allocator.dupe(u8, attr.value_ptr.*);
-                    errdefer allocator.free(value);
-                    try attributes.putNoClobber(allocator, key, value);
-                }
-
-                return Token{ .start_tag = .{ .name = name, .attributes = attributes, .self_closing = st.self_closing } };
-            },
-            .end_tag => |et| {
-                const name = try allocator.dupe(u8, et.name);
-                return Token{ .end_tag = .{ .name = name } };
-            },
-            .comment => |c| {
-                const data = try allocator.dupe(u8, c.data);
-                return Token{ .comment = .{ .data = data } };
-            },
-            .character, .eof => return self,
-        }
-    }
-
-    pub fn eql(lhs: Token, rhs: Token) bool {
-        const eqlNullSlices = html5.util.eqlNullSlices;
-        if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
-        switch (lhs) {
-            .doctype => return lhs.doctype.force_quirks == rhs.doctype.force_quirks and
-                eqlNullSlices(u8, lhs.doctype.name, rhs.doctype.name) and
-                eqlNullSlices(u8, lhs.doctype.public_identifier, rhs.doctype.public_identifier) and
-                eqlNullSlices(u8, lhs.doctype.system_identifier, rhs.doctype.system_identifier),
-            .start_tag => {
-                if (!(lhs.start_tag.self_closing == rhs.start_tag.self_closing and
-                    eqlNullSlices(u8, lhs.start_tag.name, rhs.start_tag.name) and
-                    lhs.start_tag.attributes.count() == rhs.start_tag.attributes.count())) return false;
-                var iterator = lhs.start_tag.attributes.iterator();
-                while (iterator.next()) |attr| {
-                    const rhs_value = rhs.start_tag.attributes.get(attr.key_ptr.*) orelse return false;
-                    if (!std.mem.eql(u8, attr.value_ptr.*, rhs_value)) return false;
-                }
-                return true;
-            },
-            .end_tag => return eqlNullSlices(u8, lhs.end_tag.name, rhs.end_tag.name),
-            .comment => return eqlNullSlices(u8, lhs.comment.data, rhs.comment.data),
-            .character => return lhs.character.data == rhs.character.data,
-            .eof => return true,
-        }
-    }
-
-    pub fn format(value: Token, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt;
-        _ = options;
-
-        switch (value) {
-            .doctype => |d| {
-                try writer.writeAll("DOCTYPE (");
-                if (d.name) |name| try writer.writeAll(name);
-                if (d.public_identifier) |pi| {
-                    try writer.writeAll(" PUBLIC:");
-                    try writer.writeAll(pi);
-                }
-                if (d.system_identifier) |si| {
-                    try writer.writeAll(" SYSTEM:");
-                    try writer.writeAll(si);
-                }
-                try writer.writeAll(")");
-            },
-            .start_tag => |t| {
-                try writer.writeAll("Start tag ");
-                if (t.self_closing) try writer.writeAll("(self closing) ");
-                try writer.writeAll("\"");
-                try writer.writeAll(t.name);
-                try writer.writeAll("\" [");
-                var it = t.attributes.iterator();
-                while (it.next()) |entry| {
-                    try writer.writeAll("\"");
-                    try writer.writeAll(entry.key_ptr.*);
-                    try writer.writeAll("\": \"");
-                    try writer.writeAll(entry.value_ptr.*);
-                    try writer.writeAll("\", ");
-                }
-                try writer.writeAll("]");
-            },
-            .end_tag => |t| {
-                try writer.writeAll("End tag \"");
-                try writer.writeAll(t.name);
-                try writer.writeAll("\"");
-            },
-            .comment => |c| {
-                try writer.writeAll("Comment (");
-                try writer.writeAll(c.data);
-                try writer.writeAll(")");
-            },
-            .character => |c| {
-                try writer.writeAll("Character (");
-                switch (c.data) {
-                    '\n' => try writer.writeAll("<newline>"),
-                    '\t' => try writer.writeAll("<tab>"),
-                    else => {
-                        var code_units: [4]u8 = undefined;
-                        const len = std.unicode.utf8Encode(c.data, &code_units) catch unreachable;
-                        try writer.writeAll(code_units[0..len]);
-                    },
-                }
-                try writer.writeAll(")");
-            },
-            .eof => {
-                try writer.writeAll("End of file");
-            },
-        }
-    }
-};
-
 /// Gets the next character from the input stream, without modifying it.
 /// It implements the "Preprocessing the input stream" step.
 fn advancePosition(input: []const u21) struct { character: ?u21, num_consumed: u2 } {
@@ -500,7 +257,7 @@ fn advancePosition(input: []const u21) struct { character: ?u21, num_consumed: u
     return .{ .character = character, .num_consumed = num_consumed };
 }
 
-// Returns the next input character and removes it from the input stream.
+/// Returns the next input character and removes it from the input stream.
 fn nextInputChar(self: *Self, input: *[]const u21) !?u21 {
     if (self.should_reconsume) {
         self.should_reconsume = false;
@@ -516,7 +273,7 @@ fn nextInputChar(self: *Self, input: *[]const u21) !?u21 {
     }
 }
 
-// Returns the next input character without modifying the input stream itself.
+/// Returns the next input character without modifying the input stream itself.
 fn peekInputChar(self: *Self, input: []const u21) ?u21 {
     if (self.should_reconsume) {
         return self.reconsumed_input_char;
@@ -538,7 +295,7 @@ fn consumeN(self: *Self, input: *[]const u21, count: usize) !void {
 
 fn nextFewCharsEql(input: []const u21, comptime string: []const u8) bool {
     var num_consumed: usize = 0;
-    for (html5.util.utf8DecodeComptime(string)) |character| {
+    for (html5.util.utf8DecodeStringComptime(string)) |character| {
         const next_char_info = advancePosition(input[num_consumed..]);
         if (next_char_info.character == null or next_char_info.character.? != character) return false;
         num_consumed += next_char_info.num_consumed;
@@ -548,7 +305,7 @@ fn nextFewCharsEql(input: []const u21, comptime string: []const u8) bool {
 
 fn nextFewCharsCaseInsensitiveEql(input: []const u21, comptime string: []const u8) bool {
     var num_consumed: usize = 0;
-    for (html5.util.utf8DecodeComptime(string)) |character| {
+    for (html5.util.utf8DecodeStringComptime(string)) |character| {
         const next_char_info = advancePosition(input[num_consumed..]);
         if (next_char_info.character == null or !caseInsensitiveEql(next_char_info.character.?, character)) return false;
         num_consumed += next_char_info.num_consumed;
@@ -600,21 +357,6 @@ fn checkInputCharacterForErrors(self: *Self, character: u21) !void {
     }
 }
 
-fn toCharacterReferenceState(self: *Self, return_state: State) void {
-    self.state = .CharacterReference;
-    self.return_state = return_state;
-}
-
-fn isPartOfAnAttribute(self: *Self) bool {
-    return switch (self.return_state) {
-        .AttributeValueDoubleQuoted,
-        .AttributeValueSingleQuoted,
-        .AttributeValueUnquoted,
-        => true,
-        else => false,
-    };
-}
-
 fn reconsume(self: *Self, new_state: State) void {
     self.should_reconsume = true;
     self.state = new_state;
@@ -629,24 +371,150 @@ fn reconsumeInReturnState(self: *Self) void {
     self.reconsume(self.return_state);
 }
 
-fn parseError(self: *Self, err: ParseError) !void {
-    try self.parse_errors.append(err);
+fn toCharacterReferenceState(self: *Self, return_state: State) void {
+    self.state = .CharacterReference;
+    self.return_state = return_state;
 }
 
-fn emitCharacter(self: *Self, character: u21) !void {
-    try self.tokens.append(Token{ .character = .{ .data = character } });
+fn createDOCTYPEToken(self: *Self) void {
+    assert(self.current_doctype_name.items.len == 0);
+    assert(self.current_doctype_public_identifier.items.len == 0);
+    assert(self.current_doctype_system_identifier.items.len == 0);
 }
 
-fn emitString(self: *Self, comptime string: []const u8) !void {
-    for (html5.util.utf8DecodeComptime(string)) |character| {
-        try emitCharacter(self, character);
+fn createStartTagToken(self: *Self) void {
+    assert(self.current_tag_name.items.len == 0);
+    assert(self.current_tag_attributes.count() == 0);
+    self.current_tag_type = .Start;
+}
+
+fn createEndTagToken(self: *Self) void {
+    assert(self.current_tag_name.items.len == 0);
+    assert(self.current_tag_attributes.count() == 0);
+    self.current_tag_type = .End;
+}
+
+fn createAttribute(self: *Self) void {
+    assert(self.current_attribute_name.items.len == 0);
+    assert(self.current_attribute_value.items.len == 0);
+}
+
+fn createCommentToken(self: *Self) void {
+    assert(self.current_comment_data.items.len == 0);
+}
+
+fn isAppropriateEndTag(self: *Self) bool {
+    // Looking at the tokenizer logic, it seems that is no way to reach this function without current_tag_name
+    // having at least 1 ASCII character in it. So we don't have to worry about making sure it has non-zero length.
+    //
+    // Notice that this gets called from the states that end in "TagName", and that those states
+    // can only be reached by reconsuming an ASCII character from an associated "TagOpen" state.
+    return std.mem.eql(u8, self.last_start_tag_name, self.current_tag_name.items);
+}
+
+fn makeCurrentTagSelfClosing(self: *Self) void {
+    self.current_tag_self_closing = true;
+}
+
+fn currentDOCTYPETokenForceQuirks(self: *Self) void {
+    self.current_doctype_force_quirks = true;
+}
+
+fn markCurrentDOCTYPENameNotMissing(self: *Self) void {
+    self.current_doctype_name_is_missing = false;
+}
+
+fn markCurrentDOCTYPEPublicIdentifierNotMissing(self: *Self) void {
+    self.current_doctype_public_identifier_is_missing = false;
+}
+
+fn markCurrentDOCTYPESystemIdentifierNotMissing(self: *Self) void {
+    self.current_doctype_system_identifier_is_missing = false;
+}
+
+fn appendCurrentTagName(self: *Self, character: u21) !void {
+    var code_units: [4]u8 = undefined;
+    const len = try std.unicode.utf8Encode(character, &code_units);
+    try self.current_tag_name.appendSlice(self.allocator, code_units[0..len]);
+}
+
+fn resetCurrentTagName(self: *Self) void {
+    self.current_tag_name.clearRetainingCapacity();
+}
+
+fn appendCurrentAttributeName(self: *Self, character: u21) !void {
+    var code_units: [4]u8 = undefined;
+    const len = try std.unicode.utf8Encode(character, &code_units);
+    try self.current_attribute_name.appendSlice(self.allocator, code_units[0..len]);
+}
+
+fn appendCurrentAttributeValue(self: *Self, character: u21) !void {
+    var code_units: [4]u8 = undefined;
+    const len = try std.unicode.utf8Encode(character, &code_units);
+    try self.current_attribute_value.appendSlice(self.allocator, code_units[0..len]);
+}
+
+fn finishAttributeName(self: *Self) !void {
+    const name = self.current_attribute_name.toOwnedSlice(self.allocator);
+    const get_result = self.current_tag_attributes.getOrPut(self.allocator, name) catch |err| {
+        self.allocator.free(name);
+        return err;
+    };
+    if (get_result.found_existing) {
+        self.allocator.free(name);
+        self.current_attribute_value_result_location = null;
+        try self.parseError(.DuplicateAttribute);
+    } else {
+        get_result.value_ptr.* = "";
+        self.current_attribute_value_result_location = get_result.value_ptr;
     }
 }
 
-fn emitTempBufferCharacters(self: *Self) !void {
-    for (self.temp_buffer.items) |character| {
-        try self.emitCharacter(character);
+fn finishAttributeValue(self: *Self) void {
+    const value = self.current_attribute_value.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(value);
+    if (self.current_attribute_value_result_location) |ptr| {
+        ptr.* = value;
+        self.current_attribute_value_result_location = null;
+    } else {
+        self.allocator.free(value);
     }
+}
+
+fn appendDOCTYPEName(self: *Self, character: u21) !void {
+    var code_units: [4]u8 = undefined;
+    const len = try std.unicode.utf8Encode(character, &code_units);
+    try self.current_doctype_name.appendSlice(self.allocator, code_units[0..len]);
+}
+
+fn appendDOCTYPEPublicIdentifier(self: *Self, character: u21) !void {
+    var code_units: [4]u8 = undefined;
+    const len = try std.unicode.utf8Encode(character, &code_units);
+    try self.current_doctype_public_identifier.appendSlice(self.allocator, code_units[0..len]);
+}
+
+fn appendDOCTYPESystemIdentifier(self: *Self, character: u21) !void {
+    var code_units: [4]u8 = undefined;
+    const len = try std.unicode.utf8Encode(character, &code_units);
+    try self.current_doctype_system_identifier.appendSlice(self.allocator, code_units[0..len]);
+}
+
+fn appendComment(self: *Self, character: u21) !void {
+    var code_units: [4]u8 = undefined;
+    const len = try std.unicode.utf8Encode(character, &code_units);
+    try self.current_comment_data.appendSlice(self.allocator, code_units[0..len]);
+}
+
+fn appendCommentString(self: *Self, comptime string: []const u8) !void {
+    try self.current_comment_data.appendSlice(self.allocator, string);
+}
+
+fn appendTempBuffer(self: *Self, character: u21) !void {
+    try self.temp_buffer.append(self.allocator, character);
+}
+
+fn clearTempBuffer(self: *Self) void {
+    self.temp_buffer.clearRetainingCapacity();
 }
 
 fn emitDOCTYPE(self: *Self) !void {
@@ -674,6 +542,22 @@ fn emitDOCTYPE(self: *Self) !void {
     self.current_doctype_public_identifier_is_missing = true;
     self.current_doctype_system_identifier_is_missing = true;
     self.current_doctype_force_quirks = false;
+}
+
+fn emitCharacter(self: *Self, character: u21) !void {
+    try self.tokens.append(Token{ .character = .{ .data = character } });
+}
+
+fn emitString(self: *Self, comptime string: []const u8) !void {
+    for (html5.util.utf8DecodeStringComptime(string)) |character| {
+        try emitCharacter(self, character);
+    }
+}
+
+fn emitTempBufferCharacters(self: *Self) !void {
+    for (self.temp_buffer.items) |character| {
+        try self.emitCharacter(character);
+    }
 }
 
 fn emitComment(self: *Self) !void {
@@ -722,151 +606,6 @@ fn emitCurrentTag(self: *Self) !void {
     self.current_tag_self_closing = false;
     self.current_tag_attributes = .{};
     self.current_tag_type = undefined;
-}
-
-fn finishAttributeName(self: *Self) !void {
-    const name = self.current_attribute_name.toOwnedSlice(self.allocator);
-    const get_result = self.current_tag_attributes.getOrPut(self.allocator, name) catch |err| {
-        self.allocator.free(name);
-        return err;
-    };
-    if (get_result.found_existing) {
-        self.allocator.free(name);
-        self.current_attribute_value_result_loc = null;
-        try self.parseError(.DuplicateAttribute);
-    } else {
-        get_result.value_ptr.* = "";
-        self.current_attribute_value_result_loc = get_result.value_ptr;
-    }
-}
-
-fn finishAttributeValue(self: *Self) void {
-    const value = self.current_attribute_value.toOwnedSlice(self.allocator);
-    errdefer self.allocator.free(value);
-    if (self.current_attribute_value_result_loc) |ptr| {
-        ptr.* = value;
-        self.current_attribute_value_result_loc = null;
-    } else {
-        self.allocator.free(value);
-    }
-}
-
-fn isAppropriateEndTag(self: *Self) bool {
-    // Looking at the tokenizer logic, it seems that is no way to reach this function without current_tag_name
-    // having at least 1 ASCII character in it. So we don't have to worry about making sure it has non-zero length.
-    //
-    // Notice that this gets called from the states that end in "TagName", and that those states
-    // can only be reached by reconsuming an ASCII character from an associated "TagOpen" state.
-    return std.mem.eql(u8, self.last_start_tag_name, self.current_tag_name.items);
-}
-
-fn createStartTagToken(self: *Self) void {
-    self.current_tag_type = .Start;
-}
-
-fn createEndTagToken(self: *Self) void {
-    self.current_tag_type = .End;
-}
-
-fn makeCurrentTagSelfClosing(self: *Self) void {
-    self.current_tag_self_closing = true;
-}
-
-fn createAttribute(self: *Self) void {
-    _ = self;
-    // Nothing to do.
-}
-
-fn createDOCTYPEToken(self: *Self) void {
-    _ = self;
-    // Nothing to do.
-}
-
-fn currentDOCTYPETokenForceQuirks(self: *Self) void {
-    self.current_doctype_force_quirks = true;
-}
-
-fn markCurrentDOCTYPENameNotMissing(self: *Self) void {
-    self.current_doctype_name_is_missing = false;
-}
-
-fn markCurrentDOCTYPEPublicIdentifierNotMissing(self: *Self) void {
-    self.current_doctype_public_identifier_is_missing = false;
-}
-
-fn markCurrentDOCTYPESystemIdentifierNotMissing(self: *Self) void {
-    self.current_doctype_system_identifier_is_missing = false;
-}
-
-fn createCommentToken(self: *Self) void {
-    _ = self;
-    // Nothing to do.
-}
-
-fn appendCurrentTagName(self: *Self, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.current_tag_name.appendSlice(self.allocator, code_units[0..len]);
-}
-
-fn resetCurrentTagName(self: *Self) void {
-    self.current_tag_name.clearRetainingCapacity();
-}
-
-fn appendCurrentAttributeName(self: *Self, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.current_attribute_name.appendSlice(self.allocator, code_units[0..len]);
-}
-
-fn appendCurrentAttributeValue(self: *Self, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.current_attribute_value.appendSlice(self.allocator, code_units[0..len]);
-}
-
-fn appendDOCTYPEName(self: *Self, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.current_doctype_name.appendSlice(self.allocator, code_units[0..len]);
-}
-
-fn appendDOCTYPEPublicIdentifier(self: *Self, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.current_doctype_public_identifier.appendSlice(self.allocator, code_units[0..len]);
-}
-
-fn appendDOCTYPESystemIdentifier(self: *Self, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.current_doctype_system_identifier.appendSlice(self.allocator, code_units[0..len]);
-}
-
-fn appendComment(self: *Self, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.current_comment_data.appendSlice(self.allocator, code_units[0..len]);
-}
-
-fn appendCommentString(self: *Self, comptime string: []const u8) !void {
-    try self.current_comment_data.appendSlice(self.allocator, string);
-}
-
-fn appendTempBuffer(self: *Self, character: u21) !void {
-    try self.temp_buffer.append(self.allocator, character);
-}
-
-fn clearTempBuffer(self: *Self) void {
-    self.temp_buffer.clearRetainingCapacity();
-}
-
-fn tempBufferEql(self: *Self, comptime string: []const u8) bool {
-    return std.mem.eql(u21, self.temp_buffer.items, &html5.util.utf8DecodeComptime(string));
-}
-
-fn tempBufferLast(self: *Self) u21 {
-    return self.temp_buffer.items[self.temp_buffer.items.len - 1];
 }
 
 fn flushCharacterReference(self: *Self) !void {
@@ -926,6 +665,28 @@ fn characterReferenceCodeAddDigit(self: *Self, base: u32, digit: u32) void {
 
 fn codepointFromCharacterReferenceCode(self: *Self) u21 {
     return @intCast(u21, self.character_reference_code);
+}
+
+fn parseError(self: *Self, err: ParseError) !void {
+    try self.parse_errors.append(err);
+}
+
+fn tempBufferEql(self: *Self, comptime string: []const u8) bool {
+    return std.mem.eql(u21, self.temp_buffer.items, &html5.util.utf8DecodeStringComptime(string));
+}
+
+fn tempBufferLast(self: *Self) u21 {
+    return self.temp_buffer.items[self.temp_buffer.items.len - 1];
+}
+
+fn isPartOfAnAttribute(self: *Self) bool {
+    return switch (self.return_state) {
+        .AttributeValueDoubleQuoted,
+        .AttributeValueSingleQuoted,
+        .AttributeValueUnquoted,
+        => true,
+        else => false,
+    };
 }
 
 fn adjustedCurrentNodeIsNotInHtmlNamespace(self: *Self) bool {

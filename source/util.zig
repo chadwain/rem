@@ -9,7 +9,10 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
 const html5 = @import("../html5.zig");
-const Dom = html5.dom;
+const DomTree = html5.dom.DomTree;
+const Document = html5.dom.Document;
+const Element = html5.dom.Element;
+const CharacterData = html5.dom.CharacterData;
 
 pub fn freeStringHashMap(map: *StringHashMapUnmanaged([]u8), allocator: *Allocator) void {
     var iterator = map.iterator();
@@ -48,7 +51,7 @@ pub fn eqlNullSlices(comptime T: type, slice1: ?[]const T, slice2: ?[]const T) b
     }
 }
 
-pub fn utf8DecodeComptimeLen(comptime string: []const u8) usize {
+pub fn utf8DecodeStringComptimeLen(comptime string: []const u8) usize {
     var i: usize = 0;
     var decoded_len: usize = 0;
     while (i < string.len) {
@@ -58,8 +61,8 @@ pub fn utf8DecodeComptimeLen(comptime string: []const u8) usize {
     return decoded_len;
 }
 
-pub fn utf8DecodeComptime(comptime string: []const u8) [utf8DecodeComptimeLen(string)]u21 {
-    var result: [utf8DecodeComptimeLen(string)]u21 = undefined;
+pub fn utf8DecodeStringComptime(comptime string: []const u8) [utf8DecodeStringComptimeLen(string)]u21 {
+    var result: [utf8DecodeStringComptimeLen(string)]u21 = undefined;
     if (result.len == 0) return result;
     var decoded_it = std.unicode.Utf8View.initComptime(string).iterator();
     var i: usize = 0;
@@ -70,24 +73,24 @@ pub fn utf8DecodeComptime(comptime string: []const u8) [utf8DecodeComptimeLen(st
     return result;
 }
 
-pub fn printDom(dom: Dom.Dom, writer: anytype, allocator: *Allocator) !void {
-    try std.fmt.format(writer, "Document: {s}\n", .{@tagName(dom.document.quirks_mode)});
+pub fn printDocument(dom: *const DomTree, document: *const Document, writer: anytype, allocator: *Allocator) !void {
+    try std.fmt.format(writer, "Document: {s}\n", .{@tagName(document.quirks_mode)});
 
-    try printDocumentCdatas(dom, writer, 0);
+    try printDocumentCdatas(document, writer, 0);
 
-    if (dom.document.doctype) |doctype| {
+    if (document.doctype) |doctype| {
         try std.fmt.format(writer, "  DocumentType: name={s} publicId={s} systemId={s}\n", .{ doctype.name, doctype.publicId, doctype.systemId });
     }
 
-    try printDocumentCdatas(dom, writer, 1);
+    try printDocumentCdatas(document, writer, 1);
 
     const ConstElementOrCharacterData = union(enum) {
-        element: *const Dom.Element,
-        cdata: *const Dom.CharacterData,
+        element: *const Element,
+        cdata: *const CharacterData,
     };
     var node_stack = ArrayListUnmanaged(struct { node: ConstElementOrCharacterData, depth: usize }){};
     defer node_stack.deinit(allocator);
-    if (dom.document.element) |*document_element| {
+    if (document.element) |document_element| {
         try node_stack.append(allocator, .{ .node = .{ .element = document_element }, .depth = 1 });
     }
     while (node_stack.items.len > 0) {
@@ -98,14 +101,10 @@ pub fn printDom(dom: Dom.Dom, writer: anytype, allocator: *Allocator) !void {
         }
         switch (item.node) {
             .element => |element| {
-                const namespace_prefix = element.namespace_prefix orelse "";
-                const is = element.is orelse "";
-                try std.fmt.format(writer, "Element: type={s} local_name={s} namespace={s} prefix={s} is={s}", .{
+                try std.fmt.format(writer, "Element: type={s} local_name={s} namespace={s}", .{
                     @tagName(element.element_type),
-                    element.local_name,
-                    @tagName(element.namespace),
-                    namespace_prefix,
-                    is,
+                    element.localName(dom),
+                    @tagName(element.namespace()),
                 });
                 var attr_it = element.attributes.iterator();
                 try std.fmt.format(writer, " [ ", .{});
@@ -122,16 +121,24 @@ pub fn printDom(dom: Dom.Dom, writer: anytype, allocator: *Allocator) !void {
                     try node_stack.append(allocator, .{ .node = node, .depth = item.depth + 1 });
                 }
             },
-            .cdata => |cdata| try std.fmt.format(writer, "{s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items }),
+            .cdata => |cdata| try printCdata(cdata, writer),
         }
     }
 
-    try printDocumentCdatas(dom, writer, 2);
+    try printDocumentCdatas(document, writer, 2);
 }
 
-fn printDocumentCdatas(dom: Dom.Dom, writer: anytype, slice_index: u2) !void {
-    const slice = dom.document.cdata_slices[slice_index];
-    for (slice.sliceOf(dom.document.cdata.items)) |cdata| {
-        try std.fmt.format(writer, "  {s}: {s}\n", .{ @tagName(cdata.interface), cdata.data.items });
+fn printDocumentCdatas(document: *const Document, writer: anytype, slice_index: u2) !void {
+    const slice = document.cdata_slices[slice_index];
+    for (slice.sliceOf(document.cdata.items)) |cdata| {
+        try printCdata(cdata, writer);
     }
+}
+
+fn printCdata(cdata: *const CharacterData, writer: anytype) !void {
+    const interface = switch (cdata.interface) {
+        .text => "Text",
+        .comment => "Comment",
+    };
+    try std.fmt.format(writer, "  {s}: {s}\n", .{ interface, cdata.data.items });
 }

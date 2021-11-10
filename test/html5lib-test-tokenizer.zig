@@ -26,11 +26,12 @@ const testing = std.testing;
 const ArrayList = std.ArrayList;
 const Progress = std.Progress;
 
-const Tokenizer = @import("html5").Tokenizer;
-const Token = Tokenizer.Token;
+const html5 = @import("html5");
+const Token = html5.token.Token;
+const AttributeSet = html5.token.AttributeSet;
+const Tokenizer = html5.Tokenizer;
 const TokenizerState = Tokenizer.State;
-const AttributeSet = Tokenizer.AttributeSet;
-const ParseError = Tokenizer.ParseError;
+const ParseError = html5.Parser.ParseError;
 
 test "content model flags" {
     try runTestFile("test/html5lib-tests/tokenizer/contentModelFlags.test");
@@ -361,6 +362,8 @@ const ErrorInfo = struct {
             ParseError.UnexpectedQuestionMarkInsteadOfTagName => "unexpected-question-mark-instead-of-tag-name",
             ParseError.UnexpectedSolidusInTag => "unexpected-solidus-in-tag",
             ParseError.UnknownNamedCharacterReference => "unknown-named-character-reference",
+            ParseError.NonVoidHtmlElementStartTagWithTrailingSolidus => "non-void-html-element-start-tag-with-trailing-solidus",
+            ParseError.TreeConstructionError => unreachable,
         };
     }
 

@@ -8,7 +8,15 @@ const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
 const html5 = @import("html5");
+
 const Dom = html5.dom;
+const DomTree = Dom.DomTree;
+const Document = Dom.Document;
+const DocumentType = Dom.DocumentType;
+const Element = Dom.Element;
+const ElementType = Dom.ElementType;
+const CharacterData = Dom.CharacterData;
+
 const Tokenizer = html5.Tokenizer;
 const TreeConstructor = html5.tree_construction.TreeConstructor;
 const Parser = html5.Parser;
@@ -206,9 +214,9 @@ fn runTestFile(file_path: []const u8, scripting: bool) !void {
 }
 
 const Expected = struct {
-    dom: Dom.Dom,
-    document: *Dom.Document,
-    fragment_context: ?*Dom.Element,
+    dom: DomTree,
+    document: *Document,
+    fragment_context: ?*Element,
 
     fn deinit(self: *@This()) void {
         self.dom.deinit();
@@ -257,15 +265,15 @@ fn createTest(test_string: *[]const u8, allocator: *Allocator) !Test {
     }
 
     var document_fragment: []const u8 = lines.rest()[0..0];
-    var context_element_type: ?Dom.ElementType = null;
+    var context_element_type: ?ElementType = null;
     if (startsWith(section, "#document-fragment")) {
         document_fragment = lines.next().?;
         if (startsWith(document_fragment, "svg ")) {
-            context_element_type = Dom.ElementType.fromStringSvg(document_fragment[4..]) orelse .some_other_svg;
+            context_element_type = ElementType.fromStringSvg(document_fragment[4..]) orelse .some_other_svg;
         } else if (startsWith(document_fragment, "math ")) {
-            context_element_type = Dom.ElementType.fromStringMathMl(document_fragment[5..]) orelse .some_other_mathml;
+            context_element_type = ElementType.fromStringMathMl(document_fragment[5..]) orelse .some_other_mathml;
         } else {
-            context_element_type = Dom.ElementType.fromStringHtml(document_fragment) orelse .custom_html;
+            context_element_type = ElementType.fromStringHtml(document_fragment) orelse .custom_html;
         }
         section = lines.next().?;
         //std.debug.print("#document-fragment\n{s}\n", .{document_fragment});
@@ -293,7 +301,7 @@ fn createTest(test_string: *[]const u8, allocator: *Allocator) !Test {
         else => |e| return e,
     };
     //var stderr = std.io.getStdErr().writer();
-    //try Dom.printDom(dom, stderr, allocator);
+    //try printDom(dom, stderr, allocator);
 
     return Test{
         .input = data,
@@ -304,11 +312,11 @@ fn createTest(test_string: *[]const u8, allocator: *Allocator) !Test {
     };
 }
 
-fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Dom.ElementType, allocator: *Allocator) !Expected {
-    var stack = ArrayList(*Dom.Element).init(allocator);
+fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?ElementType, allocator: *Allocator) !Expected {
+    var stack = ArrayList(*Element).init(allocator);
     defer stack.deinit();
 
-    var dom = Dom.Dom{ .allocator = allocator };
+    var dom = DomTree{ .allocator = allocator };
     errdefer dom.deinit();
     const document = try dom.makeDocument();
     const fragment_context = if (context_element_type) |ty| try dom.makeElement(ty) else null;
@@ -389,7 +397,7 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Dom.El
             }
             const tag_name = data[1 .. data.len - 1];
 
-            var element: *Dom.Element = undefined;
+            var element: *Element = undefined;
             if (startsWith(tag_name, "svg ")) {
                 element = try dom.makeElement(.some_other_svg);
                 // TODO Try to find an element type from the tag name.
@@ -399,7 +407,7 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Dom.El
                 // TODO Try to find an element type from the tag name.
                 try dom.registerLocalName(element, tag_name[5..]);
             } else {
-                const maybe_element_type = Dom.ElementType.fromStringHtml(tag_name);
+                const maybe_element_type = ElementType.fromStringHtml(tag_name);
                 if (maybe_element_type) |t| {
                     element = try dom.makeElement(t);
                 } else {
@@ -461,7 +469,7 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Dom.El
     return Expected{ .dom = dom, .document = document, .fragment_context = fragment_context };
 }
 
-fn parseAttribute(dom: *Dom.Dom, stack: *ArrayList(*Dom.Element), data: []const u8, depth: usize) !void {
+fn parseAttribute(dom: *DomTree, stack: *ArrayList(*Element), data: []const u8, depth: usize) !void {
     assert(depth == stack.items.len);
     const eql_sign = std.mem.indexOfScalar(u8, data, '=').?;
     assert(data[eql_sign + 1] == '"');
@@ -495,11 +503,11 @@ fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
     };
     defer allocator.free(input);
 
-    var result_dom = Dom.Dom{ .allocator = allocator };
+    var result_dom = DomTree{ .allocator = allocator };
     defer result_dom.deinit();
 
     if (t.expected.fragment_context) |e| {
-        var context_element = Dom.Element{
+        var context_element = Element{
             .element_type = e.element_type,
             .parent = null,
             .attributes = .{},
@@ -519,7 +527,7 @@ fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
     }
 }
 
-fn deeplyCompareDocuments(allocator: *Allocator, doc1: *const Dom.Document, doc2: *const Dom.Document) !void {
+fn deeplyCompareDocuments(allocator: *Allocator, doc1: *const Document, doc2: *const Document) !void {
     //try expectEqual(doc1.quirks_mode, doc2.quirks_mode);
     comptime var i = 0;
     inline while (i < doc1.cdata_slices.len) : (i += 1) {
@@ -540,10 +548,10 @@ fn deeplyCompareDocuments(allocator: *Allocator, doc1: *const Dom.Document, doc2
     }
 }
 
-fn deeplyCompareElements(allocator: *Allocator, element1: *const Dom.Element, element2: *const Dom.Element) !void {
+fn deeplyCompareElements(allocator: *Allocator, element1: *const Element, element2: *const Element) !void {
     const ElementPair = struct {
-        e1: *const Dom.Element,
-        e2: *const Dom.Element,
+        e1: *const Element,
+        e2: *const Element,
     };
 
     var stack = ArrayList(ElementPair).init(allocator);
@@ -573,19 +581,19 @@ fn deeplyCompareElements(allocator: *Allocator, element1: *const Dom.Element, el
     }
 }
 
-fn expectEqualDoctypes(d1: *const Dom.DocumentType, d2: *const Dom.DocumentType) !void {
+fn expectEqualDoctypes(d1: *const DocumentType, d2: *const DocumentType) !void {
     try expectEqualStrings(d1.name, d2.name);
     try expectEqualStrings(d1.publicId, d2.publicId);
     try expectEqualStrings(d1.systemId, d2.systemId);
 }
 
-fn expectEqualElements(e1: *const Dom.Element, e2: *const Dom.Element) !void {
+fn expectEqualElements(e1: *const Element, e2: *const Element) !void {
     // TODO: If the element type has an interface associated with it, check that for equality too.
     try expectEqual(e1.element_type, e2.element_type);
     try expect(html5.util.eqlStringHashMaps(e1.attributes, e2.attributes));
 }
 
-fn expectEqualCdatas(c1: *const Dom.CharacterData, c2: *const Dom.CharacterData) !void {
+fn expectEqualCdatas(c1: *const CharacterData, c2: *const CharacterData) !void {
     try expectEqual(c1.interface, c2.interface);
     try expectEqualStrings(c1.data.items, c2.data.items);
 }

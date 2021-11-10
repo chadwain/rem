@@ -18,7 +18,7 @@ pub const DomException = enum {
     HierarchyRequest,
 };
 
-pub const Dom = struct {
+pub const DomTree = struct {
     allocator: *Allocator,
 
     /// For elements whose local name cannot be determined by looking at its element_type.
@@ -31,7 +31,7 @@ pub const Dom = struct {
     all_cdatas: ArrayListUnmanaged(*CharacterData) = .{},
     all_doctypes: ArrayListUnmanaged(*DocumentType) = .{},
 
-    pub fn deinit(self: *Dom) void {
+    pub fn deinit(self: *DomTree) void {
         for (self.all_elements.items) |item| {
             item.deinit(self.allocator);
             self.allocator.destroy(item);
@@ -60,13 +60,14 @@ pub const Dom = struct {
         self.html_integration_points.deinit(self.allocator);
     }
 
-    pub fn exception(self: *Dom, ex: DomException) error{DomException} {
+    pub fn exception(self: *DomTree, ex: DomException) error{DomException} {
         _ = self;
         std.debug.print("DOM Exception raised: {s}\n", .{@tagName(ex)});
         return error.DomException;
     }
 
-    pub fn makeDocument(self: *Dom) !*Document {
+    /// Creates a new Document node. The returned node is owned by the DomTree.
+    pub fn makeDocument(self: *DomTree) !*Document {
         const document = try self.allocator.create(Document);
         errdefer self.allocator.destroy(document);
         try self.all_documents.append(self.allocator, document);
@@ -74,7 +75,8 @@ pub const Dom = struct {
         return document;
     }
 
-    pub fn makeCdata(self: *Dom, data: []const u8, interface: CharacterDataInterface) !*CharacterData {
+    /// Creates a new CharacterData node. The returned node is owned by the DomTree.
+    pub fn makeCdata(self: *DomTree, data: []const u8, interface: CharacterDataInterface) !*CharacterData {
         const cdata = try self.allocator.create(CharacterData);
         errdefer self.allocator.destroy(cdata);
         try self.all_cdatas.append(self.allocator, cdata);
@@ -82,7 +84,8 @@ pub const Dom = struct {
         return cdata;
     }
 
-    pub fn makeDoctype(self: *Dom, doctype_name: ?[]const u8, public_identifier: ?[]const u8, system_identifier: ?[]const u8) !*DocumentType {
+    /// Creates a new DocumentType node. The returned node is owned by the DomTree.
+    pub fn makeDoctype(self: *DomTree, doctype_name: ?[]const u8, public_identifier: ?[]const u8, system_identifier: ?[]const u8) !*DocumentType {
         const doctype = try self.allocator.create(DocumentType);
         errdefer self.allocator.destroy(doctype);
         try self.all_doctypes.append(self.allocator, doctype);
@@ -90,7 +93,8 @@ pub const Dom = struct {
         return doctype;
     }
 
-    pub fn makeElement(self: *Dom, element_type: ElementType) !*Element {
+    /// Creates a new Element node. The returned node is owned by the DomTree.
+    pub fn makeElement(self: *DomTree, element_type: ElementType) !*Element {
         // TODO: This function should implement the "create an element" algorithm.
         // https://dom.spec.whatwg.org/#concept-create-element
         const element = try self.allocator.create(Element);
@@ -100,13 +104,13 @@ pub const Dom = struct {
         return element;
     }
 
-    pub fn registerLocalName(self: *Dom, element: *const Element, name: []const u8) !void {
+    pub fn registerLocalName(self: *DomTree, element: *const Element, name: []const u8) !void {
         const copy = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(copy);
         try self.local_names.putNoClobber(self.allocator, element, copy);
     }
 
-    pub fn registerHtmlIntegrationPoint(self: *Dom, element: *const Element) !void {
+    pub fn registerHtmlIntegrationPoint(self: *DomTree, element: *const Element) !void {
         try self.html_integration_points.putNoClobber(self.allocator, element, {});
     }
 };
@@ -749,7 +753,7 @@ pub const Element = struct {
         return self.element_type.namespace();
     }
 
-    pub fn localName(self: *const Element, dom: *const Dom) []const u8 {
+    pub fn localName(self: *const Element, dom: *const DomTree) []const u8 {
         return self.element_type.toLocalName() orelse dom.local_names.get(self) orelse unreachable;
     }
 

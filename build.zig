@@ -46,6 +46,6 @@ pub fn build(b: *std.build.Builder) void {
     const html5lib_tree_construction_tests = b.addTest("test/html5lib-test-tree-construction.zig");
     html5lib_tree_construction_tests.setBuildMode(mode);
     html5lib_tree_construction_tests.addPackage(html5_pkg);
-    const html5lib_tree_construction_tests_step = b.step("test-tree-construction", "Run tree construction tests from html5lib-tests");
+    const html5lib_tree_construction_tests_step = b.step("test-tree-constructor", "Run tree construction tests from html5lib-tests");
     html5lib_tree_construction_tests_step.dependOn(&html5lib_tree_construction_tests.step);
 }

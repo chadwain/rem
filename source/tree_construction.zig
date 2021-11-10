@@ -11,16 +11,17 @@ const ComptimeStringMap = std.ComptimeStringMap;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
 const html5 = @import("../html5.zig");
-
+const Token = html5.token.Token;
+const TokenStartTag = html5.token.TokenStartTag;
+const TokenEndTag = html5.token.TokenEndTag;
+const TokenComment = html5.token.TokenComment;
+const TokenCharacter = html5.token.TokenCharacter;
+const TokenDOCTYPE = html5.token.TokenDOCTYPE;
 const Tokenizer = html5.Tokenizer;
-const Token = Tokenizer.Token;
-const TokenStartTag = Tokenizer.TokenStartTag;
-const TokenEndTag = Tokenizer.TokenEndTag;
-const TokenComment = Tokenizer.TokenComment;
-const TokenCharacter = Tokenizer.TokenCharacter;
-const TokenDOCTYPE = Tokenizer.TokenDOCTYPE;
+const ParseError = html5.Parser.ParseError;
 
 const Dom = html5.dom;
+const DomTree = Dom.DomTree;
 const Document = Dom.Document;
 const Element = Dom.Element;
 const ElementType = Dom.ElementType;
@@ -31,7 +32,7 @@ test "Tree constructor usage" {
     const allocator = std.testing.allocator;
 
     const string = "<!doctype><html>asdf</body hello=world>";
-    var input: []const u21 = &html5.util.utf8DecodeComptime(string);
+    var input: []const u21 = &html5.util.utf8DecodeStringComptime(string);
 
     var tokens = std.ArrayList(Token).init(allocator);
     defer {
@@ -39,13 +40,13 @@ test "Tree constructor usage" {
         tokens.deinit();
     }
 
-    var parse_errors = std.ArrayList(Tokenizer.ParseError).init(allocator);
+    var parse_errors = std.ArrayList(ParseError).init(allocator);
     defer parse_errors.deinit();
 
     var tokenizer = Tokenizer.init(allocator, &tokens, &parse_errors);
     defer tokenizer.deinit();
 
-    var dom = Dom.Dom{ .allocator = allocator };
+    var dom = DomTree{ .allocator = allocator };
     defer dom.deinit();
 
     const document = try dom.makeDocument();
@@ -55,7 +56,7 @@ test "Tree constructor usage" {
 
     while (try tokenizer.run(&input)) {
         if (tokens.items.len > 0) {
-            var constructor_result: RunResult = undefined;
+            var constructor_result: TreeConstructor.RunResult = undefined;
             for (tokens.items) |*token| {
                 constructor_result = try constructor.run(token.*);
                 token.deinit(allocator);
@@ -68,31 +69,26 @@ test "Tree constructor usage" {
     }
 }
 
-pub const RunResult = struct {
-    new_tokenizer_state: ?Tokenizer.State = null,
-    adjusted_current_node_is_not_in_html_namespace: bool = undefined,
-};
-
 pub const TreeConstructor = struct {
-    dom: *Dom.Dom,
-    document: *Dom.Document,
+    dom: *DomTree,
+    document: *Document,
     allocator: *Allocator,
 
-    fragment_context: ?*Dom.Element,
+    fragment_context: ?*Element,
     scripting: bool,
 
     insertion_mode: InsertionMode = .Initial,
     original_insertion_mode: InsertionMode = undefined,
 
-    open_elements: ArrayListUnmanaged(*Dom.Element) = .{},
+    open_elements: ArrayListUnmanaged(*Element) = .{},
     template_insertion_modes: ArrayListUnmanaged(InsertionMode) = .{},
 
     active_formatting_elements: ArrayListUnmanaged(FormattingElement) = .{},
-    formatting_element_tag_attributes: ArrayListUnmanaged(Tokenizer.AttributeSet) = .{},
+    formatting_element_tag_attributes: ArrayListUnmanaged(html5.token.AttributeSet) = .{},
     index_of_last_marker: ?usize = null,
 
-    head_element_pointer: ?*Dom.Element = null,
-    form_element_pointer: ?*Dom.Element = null,
+    head_element_pointer: ?*Element = null,
+    form_element_pointer: ?*Element = null,
 
     pending_table_character_tokens: ArrayListUnmanaged(TokenCharacter) = .{},
     pending_table_chars_contains_whitespace: bool = false,
@@ -113,11 +109,17 @@ pub const TreeConstructor = struct {
     };
 
     pub const Arguments = struct {
-        fragment_context: ?*Dom.Element = null,
+        fragment_context: ?*Element = null,
         scripting: bool = false,
     };
 
-    pub fn init(dom: *Dom.Dom, document: *Document, allocator: *Allocator, args: Arguments) TreeConstructor {
+    pub const RunResult = struct {
+        new_tokenizer_state: ?Tokenizer.State = null,
+        adjusted_current_node_is_not_in_html_namespace: bool = undefined,
+    };
+
+    /// Create a new HTML5 tree constructor.
+    pub fn init(dom: *DomTree, document: *Document, allocator: *Allocator, args: Arguments) TreeConstructor {
         return TreeConstructor{
             .dom = dom,
             .document = document,
@@ -127,6 +129,7 @@ pub const TreeConstructor = struct {
         };
     }
 
+    /// Free the memory associated with the tree constructor.
     pub fn deinit(self: *TreeConstructor) void {
         self.open_elements.deinit(self.allocator);
         self.template_insertion_modes.deinit(self.allocator);
@@ -138,13 +141,17 @@ pub const TreeConstructor = struct {
         self.pending_table_character_tokens.deinit(self.allocator);
     }
 
+    /// Process the token using the rules for tree construction.
     pub fn run(self: *TreeConstructor, token: Token) !RunResult {
         var result = RunResult{};
-        defer result.adjusted_current_node_is_not_in_html_namespace = self.open_elements.items.len > 0 and adjustedCurrentNode(self).namespace() != .html;
 
         if (self.ignore_next_lf_token) {
             self.ignore_next_lf_token = false;
-            if (token == .character and token.character.data == '\n') return result;
+            if (token == .character and token.character.data == '\n') {
+                result.adjusted_current_node_is_not_in_html_namespace = self.open_elements.items.len > 0 and
+                    adjustedCurrentNode(self).namespace() != .html;
+                return result;
+            }
         }
 
         // std.debug.print("{any}\n", .{token});
@@ -158,6 +165,8 @@ pub const TreeConstructor = struct {
         result.new_tokenizer_state = self.new_tokenizer_state;
         self.new_tokenizer_state = null;
 
+        result.adjusted_current_node_is_not_in_html_namespace = self.open_elements.items.len > 0 and
+            adjustedCurrentNode(self).namespace() != .html;
         return result;
     }
 };
@@ -186,11 +195,6 @@ const InsertionMode = enum {
     AfterFrameset,
     AfterAfterBody,
     AfterAfterFrameset,
-};
-
-const ParseError = enum {
-    Generic,
-    NonVoidHtmlElementStartTagWithTrailingSolidus,
 };
 
 fn changeTo(c: *TreeConstructor, insertion_mode: InsertionMode) void {
@@ -352,15 +356,6 @@ fn dispatcher(c: *TreeConstructor, token: Token) !void {
 }
 
 fn processToken(c: *TreeConstructor, token: Token) !void {
-    defer {
-        if (token == .start_tag) {
-            if (token.start_tag.self_closing and !c.self_closing_flag_acknowledged) {
-                parseError(.NonVoidHtmlElementStartTagWithTrailingSolidus);
-            }
-            c.self_closing_flag_acknowledged = false;
-        }
-    }
-
     switch (c.insertion_mode) {
         .Initial => try initial(c, token), // Done.
         .BeforeHtml => try beforeHtml(c, token),
@@ -386,6 +381,13 @@ fn processToken(c: *TreeConstructor, token: Token) !void {
         .AfterAfterBody => try afterAfterBody(c, token), // Done.
         .AfterAfterFrameset => try afterAfterFrameset(c, token), // Done.
     }
+
+    if (token == .start_tag) {
+        if (token.start_tag.self_closing and !c.self_closing_flag_acknowledged) {
+            parseError(.NonVoidHtmlElementStartTagWithTrailingSolidus);
+        }
+        c.self_closing_flag_acknowledged = false;
+    }
 }
 
 fn initial(c: *TreeConstructor, token: Token) !void {
@@ -400,7 +402,7 @@ fn initial(c: *TreeConstructor, token: Token) !void {
         .comment => |comment| try insertCommentToDocument(c, comment),
         .doctype => |d| {
             if (!eqlNullStrings(d.name, "html") or (d.public_identifier != null) or (d.system_identifier != null and !strEql(d.system_identifier.?, "about:legacy-compat"))) {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
             }
 
             if (!c.is_iframe_srcdoc_document and !c.parser_cannot_change_the_mode) {
@@ -421,7 +423,7 @@ fn initial(c: *TreeConstructor, token: Token) !void {
 
 fn initialAnythingElse(c: *TreeConstructor) void {
     if (!c.is_iframe_srcdoc_document) {
-        parseError(.Generic);
+        parseError(.TreeConstructionError);
     }
     if (!c.parser_cannot_change_the_mode) {
         c.document.quirks_mode = .quirks;
@@ -432,7 +434,7 @@ fn initialAnythingElse(c: *TreeConstructor) void {
 fn beforeHtml(c: *TreeConstructor, token: Token) !void {
     switch (token) {
         .doctype => {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
             // Ignore the token.
         },
         .comment => |comment| try insertCommentToDocument(c, comment),
@@ -457,7 +459,7 @@ fn beforeHtml(c: *TreeConstructor, token: Token) !void {
             if (strEqlAny(end_tag.name, &.{ "head", "body", "html", "br" })) {
                 try beforeHtmlAnythingElse(c);
             } else {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
                 // Ignore the token.
             }
         },
@@ -483,7 +485,7 @@ fn beforeHead(c: *TreeConstructor, token: Token) !void {
         },
         .comment => |comment| try insertComment(c, comment),
         .doctype => {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
             // Ignore the token.
         },
         .start_tag => |start_tag| {
@@ -501,7 +503,7 @@ fn beforeHead(c: *TreeConstructor, token: Token) !void {
             if (strEqlAny(end_tag.name, &.{ "head", "body", "html", "br" })) {
                 try beforeHeadAnythingElse(c);
             } else {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
                 // Ignore the token.
             }
         },
@@ -528,7 +530,7 @@ fn inHead(c: *TreeConstructor, token: Token) !void {
         },
         .comment => |comment| try inHeadComment(c, comment),
         .doctype => {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
             // Ignore the token.
         },
         .eof => inHeadAnythingElse(c),
@@ -543,7 +545,7 @@ fn inHead(c: *TreeConstructor, token: Token) !void {
                 .html_script => try inHeadStartTagScript(c, start_tag),
                 .html_template => try inHeadStartTagTemplate(c, start_tag),
                 .html_head => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     // Ignore the token.
                 },
                 else => inHeadAnythingElse(c),
@@ -561,7 +563,7 @@ fn inHead(c: *TreeConstructor, token: Token) !void {
             } else if (strEql(end_tag.name, "template")) {
                 _ = inHeadEndTagTemplate(c);
             } else {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
                 // Ignore the token.
             }
         },
@@ -655,13 +657,13 @@ fn inHeadStartTagNoscript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
 // Returns false if the token should be ignored.
 fn inHeadEndTagTemplate(c: *TreeConstructor) bool {
     if (!stackOfOpenElementsHas(c, .html_template)) {
-        parseError(.Generic);
+        parseError(.TreeConstructionError);
         // Ignore the token.
         return false;
     } else {
         generateImpliedEndTagsThoroughly(c);
         if (currentNode(c).element_type != .html_template) {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
         }
         while (c.open_elements.pop().element_type != .html_template) {}
         clearListOfActiveFormattingElementsUpToLastMarker(c);
@@ -680,7 +682,7 @@ fn inHeadAnythingElse(c: *TreeConstructor) void {
 fn inHeadNoscript(c: *TreeConstructor, token: Token) !void {
     switch (token) {
         .doctype => {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
             // Ignore the token.
         },
         .start_tag => |start_tag| {
@@ -690,7 +692,7 @@ fn inHeadNoscript(c: *TreeConstructor, token: Token) !void {
                 .html_meta => try inHeadStartTagMeta(c, start_tag),
                 .html_noframes, .html_style => try inHeadStartTagNoframesStyle(c, start_tag, token_element_type),
                 .html_head, .html_noscript => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     // Ignore the token.
                 },
                 else => inHeadNoscriptAnythingElse(c),
@@ -705,7 +707,7 @@ fn inHeadNoscript(c: *TreeConstructor, token: Token) !void {
             } else if (strEql(end_tag.name, "br")) {
                 inHeadNoscriptAnythingElse(c);
             } else {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
                 // Ignore the token.
             }
         },
@@ -722,7 +724,7 @@ fn inHeadNoscript(c: *TreeConstructor, token: Token) !void {
 }
 
 fn inHeadNoscriptAnythingElse(c: *TreeConstructor) void {
-    parseError(.Generic);
+    parseError(.TreeConstructionError);
     _ = c.open_elements.pop();
     reprocessIn(c, .InHead);
 }
@@ -736,7 +738,7 @@ fn afterHead(c: *TreeConstructor, token: Token) !void {
         },
         .comment => |comment| try insertComment(c, comment),
         .doctype => {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
             // Ignore the token.
         },
         .eof => try afterHeadAnythingElse(c),
@@ -763,7 +765,7 @@ fn afterHead(c: *TreeConstructor, token: Token) !void {
                 .html_template,
                 .html_title,
                 => |et| {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     try c.open_elements.append(c.allocator, c.head_element_pointer.?);
                     switch (et) {
                         .html_base, .html_basefont, .html_bgsound, .html_link => try inHeadStartTagBaseBasefontBgsoundLink(c, start_tag, et),
@@ -777,7 +779,7 @@ fn afterHead(c: *TreeConstructor, token: Token) !void {
                     removeFromStackOfOpenElements(c, c.head_element_pointer.?);
                 },
                 .html_head => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     // Ignore the token.
                 },
                 else => try afterHeadAnythingElse(c),
@@ -791,7 +793,7 @@ fn afterHead(c: *TreeConstructor, token: Token) !void {
             } else if (strEqlAny(end_tag.name, &.{ "body", "html", "br" })) {
                 try afterHeadAnythingElse(c);
             } else {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
                 // Ignore the token.
             }
         },
@@ -825,7 +827,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 .html_template => try inHeadStartTagTemplate(c, start_tag),
                 .html_title => try inHeadStartTagTitle(c, start_tag),
                 .html_body => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     if (c.open_elements.items.len == 1 or
                         c.open_elements.items[1].element_type != .html_body or
                         stackOfOpenElementsHas(c, .html_template))
@@ -843,7 +845,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     }
                 },
                 .html_frameset => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     if (c.open_elements.items.len == 1 or c.open_elements.items[1].element_type != .html_body) {
                         assert(c.fragment_context != null);
                         // Ignore the token.
@@ -895,7 +897,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     if (current_node.namespace() == .html and
                         elemTypeEqlAny(current_node.element_type, &.{ .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 }))
                     {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         _ = c.open_elements.pop();
                     }
                     _ = try insertHtmlElementForTheToken(c, start_tag, token_element_type);
@@ -911,7 +913,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 .html_form => {
                     const stack_has_template_element = stackOfOpenElementsHas(c, .html_template);
                     if (c.form_element_pointer != null and !stack_has_template_element) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else {
                         if (hasElementInButtonScope(c, ElementType.html_p)) {
@@ -931,7 +933,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                         if (node.element_type == .html_li) {
                             generateImpliedEndTags(c, .html_li);
                             if (currentNode(c).element_type != .html_li) {
-                                parseError(.Generic);
+                                parseError(.TreeConstructionError);
                             }
                             while (c.open_elements.pop().element_type != .html_li) {}
                             break;
@@ -954,14 +956,14 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                         if (node.element_type == .html_dd) {
                             generateImpliedEndTags(c, .html_dd);
                             if (currentNode(c).element_type != .html_dd) {
-                                parseError(.Generic);
+                                parseError(.TreeConstructionError);
                             }
                             while (c.open_elements.pop().element_type != .html_dd) {}
                             break;
                         } else if (node.element_type == .html_dt) {
                             generateImpliedEndTags(c, .html_dt);
                             if (currentNode(c).element_type != .html_dt) {
-                                parseError(.Generic);
+                                parseError(.TreeConstructionError);
                             }
                             while (c.open_elements.pop().element_type != .html_dt) {}
                             break;
@@ -988,7 +990,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 },
                 .html_button => {
                     if (hasElementInScope(c, ElementType.html_button)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         generateImpliedEndTags(c, null);
                         while (c.open_elements.pop().element_type != .html_button) {}
                     }
@@ -1000,7 +1002,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     const begin = if (c.index_of_last_marker) |lm| lm + 1 else 0;
                     for (c.active_formatting_elements.items[begin..]) |fe| {
                         if (fe.element.?.element_type == .html_a) {
-                            parseError(.Generic);
+                            parseError(.TreeConstructionError);
                             try adoptionAgencyAlgorithm(c, start_tag.name, .html_a);
                             for (c.active_formatting_elements.items) |fe2, j| {
                                 if (fe2.element == fe.element.?) removeFromListOfActiveFormattingElements(c, j);
@@ -1035,7 +1037,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 .html_nobr => {
                     try reconstructActiveFormattingElements(c);
                     if (hasElementInScope(c, ElementType.html_nobr)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         _ = try adoptionAgencyAlgorithm(c, start_tag.name, .html_nobr);
                         try reconstructActiveFormattingElements(c);
                     }
@@ -1129,7 +1131,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     if (hasElementInScope(c, ElementType.html_ruby)) {
                         generateImpliedEndTags(c, null);
                         if (currentNode(c).element_type != .html_ruby) {
-                            parseError(.Generic);
+                            parseError(.TreeConstructionError);
                         }
                     }
                     _ = try insertHtmlElementForTheToken(c, start_tag, token_element_type);
@@ -1139,7 +1141,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                         generateImpliedEndTags(c, .html_rtc);
                         const current_node_elem_type = currentNode(c).element_type;
                         if (current_node_elem_type != .html_rtc and current_node_elem_type != .html_ruby) {
-                            parseError(.Generic);
+                            parseError(.TreeConstructionError);
                         }
                     }
                     _ = try insertHtmlElementForTheToken(c, start_tag, token_element_type);
@@ -1156,13 +1158,13 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 .html_thead,
                 .html_tr,
                 => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     // Ignore the token.
                 },
                 else => try inBodyStartTagAnythingElse(c, start_tag, token_element_type),
             } else {
                 if (strEql(start_tag.name, "image")) {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     try reconstructActiveFormattingElements(c);
                     _ = try insertHtmlElementForTheToken(c, TokenStartTag{
                         .name = "img",
@@ -1196,7 +1198,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 .html_template => _ = inHeadEndTagTemplate(c),
                 .html_body => {
                     if (!hasElementInScope(c, ElementType.html_body)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else {
                         inBodyEofCheckForParseErrors(c);
@@ -1205,7 +1207,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 },
                 .html_html => {
                     if (!hasElementInScope(c, ElementType.html_body)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else {
                         inBodyEofCheckForParseErrors(c);
@@ -1240,12 +1242,12 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 .html_ul,
                 => {
                     if (!hasElementInScope(c, token_element_type)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else {
                         generateImpliedEndTags(c, null);
                         if (currentNode(c).element_type != token_element_type) {
-                            parseError(.Generic);
+                            parseError(.TreeConstructionError);
                         }
                         while (c.open_elements.pop().element_type != token_element_type) {}
                     }
@@ -1256,7 +1258,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                         c.form_element_pointer = null;
 
                         if (form == null or !hasElementInScope(c, form.?)) {
-                            parseError(.Generic);
+                            parseError(.TreeConstructionError);
                             // Ignore the token;
                             return;
                         }
@@ -1264,25 +1266,25 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
 
                         generateImpliedEndTags(c, null);
                         if (currentNode(c) != form.?) {
-                            parseError(.Generic);
+                            parseError(.TreeConstructionError);
                         }
                         removeFromStackOfOpenElements(c, form.?);
                     } else {
                         if (!hasElementInScope(c, ElementType.html_form)) {
-                            parseError(.Generic);
+                            parseError(.TreeConstructionError);
                             // Ignore the token.
                             return;
                         }
                         generateImpliedEndTags(c, null);
                         if (currentNode(c).element_type != .html_form) {
-                            parseError(.Generic);
+                            parseError(.TreeConstructionError);
                         }
                         while (c.open_elements.pop().element_type != .html_form) {}
                     }
                 },
                 .html_p => {
                     if (!hasElementInButtonScope(c, ElementType.html_p)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         _ = try insertHtmlElementForTheToken(c, TokenStartTag{
                             .name = "p",
                             .attributes = .{},
@@ -1293,36 +1295,36 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 },
                 .html_li => {
                     if (!hasElementInListItemScope(c, ElementType.html_li)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else {
                         generateImpliedEndTags(c, .html_li);
                         if (currentNode(c).element_type != .html_li) {
-                            parseError(.Generic);
+                            parseError(.TreeConstructionError);
                         }
                         while (c.open_elements.pop().element_type != .html_li) {}
                     }
                 },
                 .html_dd, .html_dt => {
                     if (!hasElementInScope(c, token_element_type)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else {
                         generateImpliedEndTags(c, token_element_type);
                         if (currentNode(c).element_type != token_element_type) {
-                            parseError(.Generic);
+                            parseError(.TreeConstructionError);
                         }
                         while (c.open_elements.pop().element_type != token_element_type) {}
                     }
                 },
                 .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 => {
                     if (!hasElementInScope(c, @as([]const ElementType, &[_]ElementType{ .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 }))) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else {
                         generateImpliedEndTags(c, null);
                         if (currentNode(c).element_type != token_element_type) {
-                            parseError(.Generic);
+                            parseError(.TreeConstructionError);
                         }
                         while (!elemTypeEqlAny(c.open_elements.pop().element_type, &.{ .html_h1, .html_h2, .html_h3, .html_h4, .html_h5, .html_h6 })) {}
                     }
@@ -1332,12 +1334,12 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 },
                 .html_applet, .html_marquee, .html_object => {
                     if (!hasElementInScope(c, token_element_type)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else {
                         generateImpliedEndTags(c, null);
                         if (currentNode(c).element_type != token_element_type) {
-                            parseError(.Generic);
+                            parseError(.TreeConstructionError);
                         }
                         while (c.open_elements.pop().element_type != token_element_type) {}
                         clearListOfActiveFormattingElementsUpToLastMarker(c);
@@ -1360,7 +1362,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
 }
 
 fn inBodyDoctype() void {
-    parseError(.Generic);
+    parseError(.TreeConstructionError);
     // Ignore the token.
 }
 
@@ -1400,14 +1402,14 @@ fn inBodyEofCheckForParseErrors(c: *TreeConstructor) void {
     };
     for (c.open_elements.items) |e| {
         if (!elemTypeEqlAny(e.element_type, valid_types)) {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
         }
     }
 }
 
 fn inBodyCharacter(c: *TreeConstructor, character: TokenCharacter) !void {
     if (isNull(character)) {
-        parseError(.Generic);
+        parseError(.TreeConstructionError);
         // Ignore the token.
     } else {
         try reconstructActiveFormattingElements(c);
@@ -1424,7 +1426,7 @@ fn inBodyWhitespaceCharacter(c: *TreeConstructor, character: TokenCharacter) !vo
 }
 
 fn inBodyStartTagHtml(c: *TreeConstructor, start_tag: TokenStartTag) !void {
-    parseError(.Generic);
+    parseError(.TreeConstructionError);
     if (stackOfOpenElementsHas(c, .html_template)) {
         // Ignore the token.
     } else {
@@ -1455,12 +1457,12 @@ fn inBodyEndTagAnythingElse(c: *TreeConstructor, tag_name: []const u8) !void {
         const node = c.open_elements.items[i - 1];
         if (node.namespace() == .html and strEql(tag_name, node.localName(c.dom))) {
             generateImpliedEndTags(c, tag_name);
-            if (i != c.open_elements.items.len) parseError(.Generic);
+            if (i != c.open_elements.items.len) parseError(.TreeConstructionError);
             c.open_elements.shrinkRetainingCapacity(i - 1);
             break;
         } else {
             if (isSpecialElement(node.element_type)) {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
                 // Ignore the token.
                 return;
             }
@@ -1474,7 +1476,7 @@ fn text(c: *TreeConstructor, token: Token) !void {
             try insertCharacter(c, character);
         },
         .eof => {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
             const current_node = c.open_elements.pop();
             if (current_node.element_type == .html_script and c.scripting) {
                 @panic("TODO Text eof, current node is a script, scripting is enabled");
@@ -1501,7 +1503,7 @@ fn text(c: *TreeConstructor, token: Token) !void {
 fn inTable(c: *TreeConstructor, token: Token) !void {
     switch (token) {
         .doctype => {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
             // Ignore the token.
         },
         .comment => |comment| try insertComment(c, comment),
@@ -1551,7 +1553,7 @@ fn inTable(c: *TreeConstructor, token: Token) !void {
                     reprocessIn(c, .InTableBody);
                 },
                 .html_table => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     if (!hasElementInTableScope(c, ElementType.html_table)) {
                         // Ignore the token.
                     } else {
@@ -1568,14 +1570,14 @@ fn inTable(c: *TreeConstructor, token: Token) !void {
                     if (@"type" == null or !std.ascii.eqlIgnoreCase(@"type".?, "hidden")) {
                         try inTableAnythingElse(c, token);
                     } else {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         _ = try insertHtmlElementForTheToken(c, start_tag, .html_input);
                         _ = c.open_elements.pop();
                         acknowledgeSelfClosingFlag(c);
                     }
                 },
                 .html_form => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     if (c.form_element_pointer != null or stackOfOpenElementsHas(c, .html_template)) {
                         // Ignore the token.
                     } else {
@@ -1593,7 +1595,7 @@ fn inTable(c: *TreeConstructor, token: Token) !void {
             if (ElementType.fromStringHtml(end_tag.name)) |token_element_type| switch (token_element_type) {
                 .html_table => {
                     if (!hasElementInTableScope(c, ElementType.html_table)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else {
                         while (c.open_elements.pop().element_type != .html_table) {}
@@ -1612,7 +1614,7 @@ fn inTable(c: *TreeConstructor, token: Token) !void {
                 .html_thead,
                 .html_tr,
                 => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     // Ignore the token.
                 },
                 .html_template => _ = inHeadEndTagTemplate(c),
@@ -1625,7 +1627,7 @@ fn inTable(c: *TreeConstructor, token: Token) !void {
 }
 
 fn inTableAnythingElse(c: *TreeConstructor, token: Token) !void {
-    parseError(.Generic);
+    parseError(.TreeConstructionError);
     c.foster_parenting = true;
     try inBody(c, token);
     c.foster_parenting = false;
@@ -1643,7 +1645,7 @@ fn inTableText(c: *TreeConstructor, token: Token) !void {
     switch (token) {
         .character => |character| {
             if (character.data == 0) {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
                 // Ignore the token.
             } else {
                 if (isWhitespace(character)) c.pending_table_chars_contains_whitespace = true;
@@ -1652,7 +1654,7 @@ fn inTableText(c: *TreeConstructor, token: Token) !void {
         },
         else => {
             if (c.pending_table_chars_contains_whitespace) {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
                 c.foster_parenting = true;
                 for (c.pending_table_character_tokens.items) |character| {
                     try inBodyCharacter(c, character);
@@ -1708,7 +1710,7 @@ fn inCaption(c: *TreeConstructor, token: Token) !void {
                 .html_thead,
                 .html_tr,
                 => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     // Ignore the token.
                 },
                 else => try inCaptionAnythingElse(c, token),
@@ -1723,13 +1725,13 @@ fn inCaption(c: *TreeConstructor, token: Token) !void {
 // Returns false if the token should be ignored.
 fn inCaptionEndTagCaption(c: *TreeConstructor) bool {
     if (!hasElementInTableScope(c, ElementType.html_caption)) {
-        parseError(.Generic);
+        parseError(.TreeConstructionError);
         // Ignore the token.
         return false;
     } else {
         generateImpliedEndTags(c, null);
         if (currentNode(c).element_type != .html_caption) {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
         }
         while (c.open_elements.pop().element_type != .html_caption) {}
         clearListOfActiveFormattingElementsUpToLastMarker(c);
@@ -1753,7 +1755,7 @@ fn inColumnGroup(c: *TreeConstructor, token: Token) !void {
         },
         .comment => |comment| try insertComment(c, comment),
         .doctype => {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
             // Ignore the token.
         },
         .eof => inBodyEof(c),
@@ -1774,7 +1776,7 @@ fn inColumnGroup(c: *TreeConstructor, token: Token) !void {
             if (strEql(end_tag.name, "colgroup")) {
                 _ = inColumnGroupEndTagColgroup(c);
             } else if (strEql(end_tag.name, "col")) {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
                 // Ignore the token.
             } else if (strEql(end_tag.name, "template")) {
                 _ = inHeadEndTagTemplate(c);
@@ -1788,7 +1790,7 @@ fn inColumnGroup(c: *TreeConstructor, token: Token) !void {
 // Returns false if the token should be ignored.
 fn inColumnGroupEndTagColgroup(c: *TreeConstructor) bool {
     if (currentNode(c).element_type != .html_colgroup) {
-        parseError(.Generic);
+        parseError(.TreeConstructionError);
         // Ignore the token.
         return false;
     } else {
@@ -1814,7 +1816,7 @@ fn inTableBody(c: *TreeConstructor, token: Token) !void {
                     changeTo(c, .InRow);
                 },
                 .html_th, .html_td => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     clearTheStackBackToATableBodyContext(c);
                     _ = try insertHtmlElementForTheToken(c, TokenStartTag{
                         .name = "tr",
@@ -1833,7 +1835,7 @@ fn inTableBody(c: *TreeConstructor, token: Token) !void {
             if (ElementType.fromStringHtml(end_tag.name)) |token_element_type| switch (token_element_type) {
                 .html_tbody, .html_tfoot, .html_thead => {
                     if (!hasElementInTableScope(c, token_element_type)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else {
                         clearTheStackBackToATableBodyContext(c);
@@ -1843,7 +1845,7 @@ fn inTableBody(c: *TreeConstructor, token: Token) !void {
                 },
                 .html_table => inTableBodyEndTagTable(c),
                 .html_body, .html_caption, .html_col, .html_colgroup, .html_html, .html_td, .html_th, .html_tr => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     // Ignore the token.
                 },
                 else => try inTableBodyAnythingElse(c, token),
@@ -1857,7 +1859,7 @@ fn inTableBody(c: *TreeConstructor, token: Token) !void {
 
 fn inTableBodyEndTagTable(c: *TreeConstructor) void {
     if (!hasElementInTableScope(c, @as([]const ElementType, &[_]ElementType{ .html_tbody, .html_thead, .html_tfoot }))) {
-        parseError(.Generic);
+        parseError(.TreeConstructionError);
         // Ignore the token.
     } else {
         clearTheStackBackToATableBodyContext(c);
@@ -1908,14 +1910,14 @@ fn inRow(c: *TreeConstructor, token: Token) !void {
                 },
                 .html_tbody, .html_tfoot, .html_thead => {
                     if (!hasElementInTableScope(c, token_element_type)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else if (inRowEndTagTr(c)) {
                         reprocess(c);
                     }
                 },
                 .html_body, .html_caption, .html_col, .html_colgroup, .html_html, .html_td, .html_th => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     // Ignore the token.
                 },
                 else => try inRowAnythingElse(c, token),
@@ -1930,7 +1932,7 @@ fn inRow(c: *TreeConstructor, token: Token) !void {
 // Returns false if the token should be ignored.
 fn inRowEndTagTr(c: *TreeConstructor) bool {
     if (!hasElementInTableScope(c, ElementType.html_tr)) {
-        parseError(.Generic);
+        parseError(.TreeConstructionError);
         // Ignore the token.
         return false;
     } else {
@@ -1959,7 +1961,7 @@ fn inCell(c: *TreeConstructor, token: Token) !void {
             if (ElementType.fromStringHtml(start_tag.name)) |token_element_type| switch (token_element_type) {
                 .html_caption, .html_col, .html_colgroup, .html_tbody, .html_td, .html_tfoot, .html_th, .html_thead, .html_tr => {
                     if (!hasElementInTableScope(c, @as([]const ElementType, &[_]ElementType{ .html_td, .html_th }))) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else {
                         closeTheCell(c);
@@ -1975,12 +1977,12 @@ fn inCell(c: *TreeConstructor, token: Token) !void {
             if (ElementType.fromStringHtml(end_tag.name)) |token_element_type| switch (token_element_type) {
                 .html_td, .html_th => {
                     if (!hasElementInTableScope(c, token_element_type)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else {
                         generateImpliedEndTags(c, null);
                         if (currentNode(c).element_type != token_element_type) {
-                            parseError(.Generic);
+                            parseError(.TreeConstructionError);
                         }
                         while (c.open_elements.pop().element_type != token_element_type) {}
                         clearListOfActiveFormattingElementsUpToLastMarker(c);
@@ -1988,12 +1990,12 @@ fn inCell(c: *TreeConstructor, token: Token) !void {
                     }
                 },
                 .html_body, .html_caption, .html_col, .html_colgroup, .html_html => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     // Ignore the token.
                 },
                 .html_table, .html_tbody, .html_tfoot, .html_thead, .html_tr => {
                     if (!hasElementInTableScope(c, token_element_type)) {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     } else {
                         closeTheCell(c);
@@ -2017,7 +2019,7 @@ fn closeTheCell(c: *TreeConstructor) void {
     generateImpliedEndTags(c, null);
     const current_node_elem_type = currentNode(c).element_type;
     if (!elemTypeEqlAny(current_node_elem_type, &.{ .html_td, .html_th })) {
-        parseError(.Generic);
+        parseError(.TreeConstructionError);
     }
     while (!elemTypeEqlAny(c.open_elements.pop().element_type, &.{ .html_td, .html_th })) {}
     clearListOfActiveFormattingElementsUpToLastMarker(c);
@@ -2028,7 +2030,7 @@ fn inSelect(c: *TreeConstructor, token: Token) !void {
     switch (token) {
         .character => |character| {
             if (isNull(character)) {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
                 // Ignore the token.
             } else {
                 try insertCharacter(c, character);
@@ -2036,7 +2038,7 @@ fn inSelect(c: *TreeConstructor, token: Token) !void {
         },
         .comment => |comment| try insertComment(c, comment),
         .doctype => {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
             // Ignore the token.
         },
         .eof => inBodyEof(c),
@@ -2056,11 +2058,11 @@ fn inSelect(c: *TreeConstructor, token: Token) !void {
                     _ = try insertHtmlElementForTheToken(c, start_tag, token_element_type);
                 },
                 .html_select => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     _ = inSelectEndTagSelect(c);
                 },
                 .html_input, .html_keygen, .html_textarea => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     if (inSelectEndTagSelect(c)) {
                         reprocess(c);
                     }
@@ -2083,7 +2085,7 @@ fn inSelect(c: *TreeConstructor, token: Token) !void {
                     if (currentNode(c).element_type == .html_optgroup) {
                         _ = c.open_elements.pop();
                     } else {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     }
                 },
@@ -2091,7 +2093,7 @@ fn inSelect(c: *TreeConstructor, token: Token) !void {
                     if (currentNode(c).element_type == .html_option) {
                         _ = c.open_elements.pop();
                     } else {
-                        parseError(.Generic);
+                        parseError(.TreeConstructionError);
                         // Ignore the token.
                     }
                 },
@@ -2108,7 +2110,7 @@ fn inSelect(c: *TreeConstructor, token: Token) !void {
 // Returns false if the token should be ignored.
 fn inSelectEndTagSelect(c: *TreeConstructor) bool {
     if (!hasElementInSelectScope(c, .html_select)) {
-        parseError(.Generic);
+        parseError(.TreeConstructionError);
         // Ignore the token.
         return false;
     } else {
@@ -2119,7 +2121,7 @@ fn inSelectEndTagSelect(c: *TreeConstructor) bool {
 }
 
 fn inSelectAnythingElse() void {
-    parseError(.Generic);
+    parseError(.TreeConstructionError);
     // Ignore the token.
 }
 
@@ -2128,7 +2130,7 @@ fn inSelectInTable(c: *TreeConstructor, token: Token) !void {
         .start_tag => |start_tag| {
             if (ElementType.fromStringHtml(start_tag.name)) |token_element_type| switch (token_element_type) {
                 .html_caption, .html_table, .html_tbody, .html_tfoot, .html_thead, .html_tr, .html_td, .html_th => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     inSelectInTableCommon(c);
                 },
                 else => try inSelectInTableAnythingElse(c, token),
@@ -2139,7 +2141,7 @@ fn inSelectInTable(c: *TreeConstructor, token: Token) !void {
         .end_tag => |end_tag| {
             if (ElementType.fromStringHtml(end_tag.name)) |token_element_type| switch (token_element_type) {
                 .html_caption, .html_table, .html_tbody, .html_tfoot, .html_thead, .html_tr, .html_td, .html_th => {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     if (!hasElementInSelectScope(c, token_element_type)) {
                         // Ignore the token.
                     } else {
@@ -2204,7 +2206,7 @@ fn inTemplateEof(c: *TreeConstructor) void {
         stop(c);
         return;
     } else {
-        parseError(.Generic);
+        parseError(.TreeConstructionError);
     }
     while (c.open_elements.pop().element_type == .html_template) {}
     clearListOfActiveFormattingElementsUpToLastMarker(c);
@@ -2224,7 +2226,7 @@ fn inTemplateAnyOtherStartTag(c: *TreeConstructor) !void {
 }
 
 fn inTemplateAnyOtherEndTag() void {
-    parseError(.Generic);
+    parseError(.TreeConstructionError);
     // Ignore the token.
 }
 
@@ -2236,7 +2238,7 @@ fn afterBody(c: *TreeConstructor, token: Token) !void {
             afterBodyAnythingElse(c),
         .comment => |comment| try insertCommentToElement(c, comment, c.open_elements.items[0]),
         .doctype => {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
             // Ignore the token.
         },
         .start_tag => |start_tag| if (strEql(start_tag.name, "html"))
@@ -2245,7 +2247,7 @@ fn afterBody(c: *TreeConstructor, token: Token) !void {
             afterBodyAnythingElse(c),
         .end_tag => |end_tag| if (strEql(end_tag.name, "html")) {
             if (c.fragment_context != null) {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
                 // Ignore the token.
             } else {
                 changeTo(c, .AfterAfterBody);
@@ -2256,7 +2258,7 @@ fn afterBody(c: *TreeConstructor, token: Token) !void {
 }
 
 fn afterBodyAnythingElse(c: *TreeConstructor) void {
-    parseError(.Generic);
+    parseError(.TreeConstructionError);
     reprocessIn(c, .InBody);
 }
 
@@ -2269,12 +2271,12 @@ fn inFrameset(c: *TreeConstructor, token: Token) !void {
         },
         .comment => |comment| try insertComment(c, comment),
         .doctype => {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
             // Ignore the token.
         },
         .eof => {
             if (currentNode(c).element_type != .html_html) {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
             }
             stop(c);
         },
@@ -2296,7 +2298,7 @@ fn inFrameset(c: *TreeConstructor, token: Token) !void {
         .end_tag => |end_tag| {
             if (strEql(end_tag.name, "frameset")) {
                 if (c.open_elements.items.len == 1) {
-                    parseError(.Generic);
+                    parseError(.TreeConstructionError);
                     // Ignore the token.
                 } else {
                     _ = c.open_elements.pop();
@@ -2312,7 +2314,7 @@ fn inFrameset(c: *TreeConstructor, token: Token) !void {
 }
 
 fn inFramesetAnythingElse() void {
-    parseError(.Generic);
+    parseError(.TreeConstructionError);
     // Ignore the token.
 }
 
@@ -2346,7 +2348,7 @@ fn afterFrameset(c: *TreeConstructor, token: Token) !void {
 }
 
 fn afterFramesetAnythingElse() void {
-    parseError(.Generic);
+    parseError(.TreeConstructionError);
     // Ignore the token.
 }
 
@@ -2376,7 +2378,7 @@ fn afterAfterBody(c: *TreeConstructor, token: Token) !void {
 }
 
 fn afterAfterBodyAnythingElse(c: *TreeConstructor) void {
-    parseError(.Generic);
+    parseError(.TreeConstructionError);
     reprocessIn(c, .InBody);
 }
 
@@ -2404,7 +2406,7 @@ fn afterAfterFrameset(c: *TreeConstructor, token: Token) !void {
 }
 
 fn afterAfterFramesetAnythingElse() void {
-    parseError(.Generic);
+    parseError(.TreeConstructionError);
     // Ignore the token.
 }
 
@@ -2412,7 +2414,7 @@ fn processTokenForeignContent(c: *TreeConstructor, token: Token) !void {
     switch (token) {
         .character => |character| {
             if (isNull(character)) {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
                 try insertCharacter(c, TokenCharacter{ .data = '\u{FFFD}' });
             } else {
                 try insertCharacter(c, character);
@@ -2423,7 +2425,7 @@ fn processTokenForeignContent(c: *TreeConstructor, token: Token) !void {
         },
         .comment => |comment| try insertComment(c, comment),
         .doctype => {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
             // Ignore the token.
         },
         .eof => unreachable,
@@ -2509,7 +2511,7 @@ fn processTokenForeignContent(c: *TreeConstructor, token: Token) !void {
 }
 
 fn foreignContentLotsOfStartTags(c: *TreeConstructor, token: Token) !void {
-    parseError(.Generic);
+    parseError(.TreeConstructionError);
     var current_node = currentNode(c);
     while (current_node.namespace() != .html and !isMathMlTextIntegrationPoint(current_node) and !isHtmlIntegrationPoint(c.dom, current_node)) {
         _ = c.open_elements.pop();
@@ -2615,7 +2617,7 @@ fn foreignContentEndTagAnythingElse(c: *TreeConstructor, end_tag: TokenEndTag) !
     var index = c.open_elements.items.len;
     var node = c.open_elements.items[index - 1];
     if (!std.ascii.eqlIgnoreCase(end_tag.name, node.localName(c.dom))) {
-        parseError(.Generic);
+        parseError(.TreeConstructionError);
     }
     while (index > 1) {
         if (std.ascii.eqlIgnoreCase(end_tag.name, node.localName(c.dom))) {
@@ -2844,8 +2846,8 @@ fn appropriateNodeInsertionLocation(c: *TreeConstructor) NodeInsertionLocation {
 fn appropriateNodeInsertionLocationWithTarget(c: *TreeConstructor, target: *Element) NodeInsertionLocation {
     var adjusted_insertion_location: NodeInsertionLocation = undefined;
     if (c.foster_parenting and elemTypeEqlAny(target.element_type, &.{ .html_table, .html_tbody, .html_tfoot, .html_thead, .html_tr })) substeps: {
-        var last_template: ?*Dom.Element = null;
-        var last_table: ?*Dom.Element = null;
+        var last_template: ?*Element = null;
+        var last_table: ?*Element = null;
         var index_of_last_table: usize = undefined;
         var index = c.open_elements.items.len;
 
@@ -3018,7 +3020,7 @@ const adjust_foreign_attributes_map = ComptimeStringMap(void, .{
 });
 
 /// Appends the attributes from the token to the Element.
-fn elementAddAttributes(dom: *Dom.Dom, element: *Element, attributes: *Tokenizer.AttributeSet.Iterator) !void {
+fn elementAddAttributes(dom: *DomTree, element: *Element, attributes: *html5.token.AttributeSet.Iterator) !void {
     while (attributes.next()) |attr| {
         try element.addAttributeNoReplace(dom.allocator, attr.key_ptr.*, attr.value_ptr.*);
     }
@@ -3026,7 +3028,7 @@ fn elementAddAttributes(dom: *Dom.Dom, element: *Element, attributes: *Tokenizer
 
 /// Appends the attributes from the token to the Element, while also doing the
 /// "adjust MathML attributes" and "adjust foreign attributes" algorithms.
-fn appendAttributesAdjustMathMlForeign(dom: *Dom.Dom, element: *Element, attributes: *Tokenizer.AttributeSet.Iterator) !void {
+fn appendAttributesAdjustMathMlForeign(dom: *DomTree, element: *Element, attributes: *html5.token.AttributeSet.Iterator) !void {
     while (attributes.next()) |attr| {
         const key = attr.key_ptr.*;
         const value = attr.value_ptr.*;
@@ -3043,7 +3045,7 @@ fn appendAttributesAdjustMathMlForeign(dom: *Dom.Dom, element: *Element, attribu
 
 /// Appends the attributes from the token to the Element, while also doing the
 /// "adjust SVG attributes" and "adjust foreign attributes" algorithms.
-fn appendAttributesAdjustSvgForeign(dom: *Dom.Dom, element: *Element, attributes: *Tokenizer.AttributeSet.Iterator) !void {
+fn appendAttributesAdjustSvgForeign(dom: *DomTree, element: *Element, attributes: *html5.token.AttributeSet.Iterator) !void {
     const adjust_svg_attributes_map = ComptimeStringMap([]const u8, .{
         .{ "attributename", "attributeName" },
         .{ "attributetype", "attributeType" },
@@ -3205,7 +3207,7 @@ fn addFormattingElementTagAttributes(c: *TreeConstructor, element: *Element) !us
     const attributes_copy = try c.formatting_element_tag_attributes.addOne(c.allocator);
     errdefer _ = c.formatting_element_tag_attributes.pop();
 
-    attributes_copy.* = Tokenizer.AttributeSet{};
+    attributes_copy.* = html5.token.AttributeSet{};
     errdefer html5.util.freeStringHashMapConst(attributes_copy, c.allocator);
     try attributes_copy.ensureTotalCapacity(c.allocator, element.attributes.count());
 
@@ -3379,19 +3381,19 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
             while (i > 0) : (i -= 1) {
                 if (formatting_element.element.? == c.open_elements.items[i - 1]) break :blk i - 1;
             } else {
-                parseError(.Generic);
+                parseError(.TreeConstructionError);
                 removeFromListOfActiveFormattingElements(c, formatting_element_index);
                 return;
             }
         };
         // Step 4.5
         if (!hasElementInScope(c, formatting_element.element.?)) {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
             return;
         }
         // Step 4.6
         if (currentNode(c) != formatting_element.element.?) {
-            parseError(.Generic);
+            parseError(.TreeConstructionError);
         }
         // Step 4.7
         var furthest_block_index = blk: {
@@ -3828,7 +3830,7 @@ fn generateImpliedEndTagsThoroughly(c: *TreeConstructor) void {
 fn closePElement(c: *TreeConstructor) void {
     generateImpliedEndTags(c, .html_p);
     if (currentNode(c).element_type != .html_p) {
-        parseError(.Generic);
+        parseError(.TreeConstructionError);
     }
     while (c.open_elements.pop().element_type != .html_p) {}
 }
@@ -3845,7 +3847,7 @@ fn isMathMlTextIntegrationPoint(element: *Element) bool {
     };
 }
 
-fn isHtmlIntegrationPoint(dom: *Dom.Dom, element: *const Element) bool {
+fn isHtmlIntegrationPoint(dom: *DomTree, element: *const Element) bool {
     return switch (element.element_type) {
         .svg_foreign_object,
         .svg_desc,
