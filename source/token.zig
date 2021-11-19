@@ -3,7 +3,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-const html5 = @import("../html5.zig");
+const rem = @import("../rem.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
@@ -126,7 +126,7 @@ pub const Token = union(enum) {
     }
 
     pub fn eql(lhs: Token, rhs: Token) bool {
-        const eqlNullSlices = html5.util.eqlNullSlices;
+        const eqlNullSlices = rem.util.eqlNullSlices;
         if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
         switch (lhs) {
             .doctype => return lhs.doctype.force_quirks == rhs.doctype.force_quirks and

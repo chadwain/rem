@@ -1,10 +1,10 @@
 # html5-parser
-An HTML5 parser written in [Zig](https://ziglang.org).
+rem is an HTML5 parser written in [Zig](https://ziglang.org).
 
 ## Get the code
 Clone the repository like this:
 ```
-git clone --recurse-submodules --config core.autocrlf=false https://github.com/chwayne/html-parser.git
+git clone --recursive --config core.autocrlf=false https://github.com/chwayne/rem.git
 ```
 There are no dependencies other than a Zig compiler. You should use the latest version of Zig that is available.
 
@@ -15,31 +15,31 @@ Here's an example of using the parser (you can also see the output of this progr
 
 ```zig
 const std = @import("std");
-const html5 = @import("html5");
+const rem = @import("rem");
 const allocator = std.testing.allocator;
 
 pub fn main() !void {
     const string = "<!doctype html><html><body>Click here to download more RAM!";
     // The string must be decoded before it can be passed to the parser.
-    const input = &html5.util.utf8DecodeStringComptime(string);
+    const input = &rem.util.utf8DecodeStringComptime(string);
 
     // Create the DOM in which the parsed Document will be created.
-    var dom = html5.dom.DomTree{ .allocator = allocator };
+    var dom = rem.dom.DomTree{ .allocator = allocator };
     defer dom.deinit();
 
-    var parser = try html5.Parser.init(&dom, input, allocator, false);
+    var parser = try rem.Parser.init(&dom, input, allocator, false);
     defer parser.deinit();
     try parser.run();
 
     const writer = std.io.getStdOut().writer();
-    try html5.util.printDocument(writer, parser.getDocument(), &dom, allocator);
+    try rem.util.printDocument(writer, parser.getDocument(), &dom, allocator);
 }
 ```
 
 ## Test the code
 Note: Before running any tests, be sure that you have already done `zig build gen-named-characters`.
 
-This library uses (a fork of) [html5lib-tests](https://github.com/html5lib/html5lib-tests) as a test suite. Specifically, it tests against the 'tokenizer' and 'tree-construction' tests from that suite. 
+rem uses (a fork of) [html5lib-tests](https://github.com/html5lib/html5lib-tests) as a test suite. Specifically, it tests against the 'tokenizer' and 'tree-construction' tests from that suite. 
 
 `zig build test-tokenizer` will run the 'tokenizer' tests.
 `zig build test-tree-constructor` will run the 'tree-construction' tests in 2 ways: with scripting off, then with scripting on.
@@ -52,7 +52,7 @@ The expected results are as follows:
 ### GPL-3.0-only
 Copyright (C) 2021 Chadwain Holness
 
-This library is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 3.
+rem is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 3.
 
 This library is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
 

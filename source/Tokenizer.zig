@@ -7,7 +7,7 @@ test "Tokenizer usage" {
     const allocator = std.testing.allocator;
 
     const string = "<!doctype><HTML>asdf</body hello=world>";
-    var input: []const u21 = &html5.util.utf8DecodeStringComptime(string);
+    var input: []const u21 = &rem.util.utf8DecodeStringComptime(string);
 
     var all_tokens = std.ArrayList(Token).init(allocator);
     defer {
@@ -47,11 +47,11 @@ test "Tokenizer usage" {
 }
 
 const Self = @This();
-const html5 = @import("../html5.zig");
+const rem = @import("../rem.zig");
 const named_characters = @import("named-character-references");
-const Token = html5.token.Token;
-const AttributeSet = html5.token.AttributeSet;
-const ParseError = html5.Parser.ParseError;
+const Token = rem.token.Token;
+const AttributeSet = rem.token.AttributeSet;
+const ParseError = rem.Parser.ParseError;
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -295,7 +295,7 @@ fn consumeN(self: *Self, input: *[]const u21, count: usize) !void {
 
 fn nextFewCharsEql(input: []const u21, comptime string: []const u8) bool {
     var num_consumed: usize = 0;
-    for (html5.util.utf8DecodeStringComptime(string)) |character| {
+    for (rem.util.utf8DecodeStringComptime(string)) |character| {
         const next_char_info = advancePosition(input[num_consumed..]);
         if (next_char_info.character == null or next_char_info.character.? != character) return false;
         num_consumed += next_char_info.num_consumed;
@@ -305,7 +305,7 @@ fn nextFewCharsEql(input: []const u21, comptime string: []const u8) bool {
 
 fn nextFewCharsCaseInsensitiveEql(input: []const u21, comptime string: []const u8) bool {
     var num_consumed: usize = 0;
-    for (html5.util.utf8DecodeStringComptime(string)) |character| {
+    for (rem.util.utf8DecodeStringComptime(string)) |character| {
         const next_char_info = advancePosition(input[num_consumed..]);
         if (next_char_info.character == null or !caseInsensitiveEql(next_char_info.character.?, character)) return false;
         num_consumed += next_char_info.num_consumed;
@@ -548,7 +548,7 @@ fn emitCharacter(self: *Self, character: u21) !void {
 }
 
 fn emitString(self: *Self, comptime string: []const u8) !void {
-    for (html5.util.utf8DecodeStringComptime(string)) |character| {
+    for (rem.util.utf8DecodeStringComptime(string)) |character| {
         try emitCharacter(self, character);
     }
 }
@@ -671,7 +671,7 @@ fn parseError(self: *Self, err: ParseError) !void {
 }
 
 fn tempBufferEql(self: *Self, comptime string: []const u8) bool {
-    return std.mem.eql(u21, self.temp_buffer.items, &html5.util.utf8DecodeStringComptime(string));
+    return std.mem.eql(u21, self.temp_buffer.items, &rem.util.utf8DecodeStringComptime(string));
 }
 
 fn tempBufferLast(self: *Self) u21 {

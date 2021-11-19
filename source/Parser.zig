@@ -6,16 +6,16 @@
 //! The Parser wraps the Tokenizer and the TreeConstructor.
 //! It handles the execution and the passing of messages between the two objects.
 
-const html5 = @import("../html5.zig");
+const rem = @import("../rem.zig");
 
-const Dom = html5.dom;
+const Dom = rem.dom;
 const DomTree = Dom.DomTree;
 const Document = Dom.Document;
 const Element = Dom.Element;
 
-const Token = html5.token.Token;
-const Tokenizer = html5.Tokenizer;
-const tree_construction = html5.tree_construction;
+const Token = rem.token.Token;
+const Tokenizer = rem.Tokenizer;
+const tree_construction = rem.tree_construction;
 const TreeConstructor = tree_construction.TreeConstructor;
 
 const std = @import("std");
@@ -237,7 +237,7 @@ pub fn errors(self: Self) []const ParseError {
 
 test "Parser usage" {
     const string = "<!doctype html><html>asdf</body hello=world>";
-    const input = &html5.util.utf8DecodeStringComptime(string);
+    const input = &rem.util.utf8DecodeStringComptime(string);
     const allocator = std.testing.allocator;
 
     var dom = DomTree{ .allocator = allocator };
@@ -250,7 +250,7 @@ test "Parser usage" {
 
 test "Parser usage, fragment case" {
     const string = "<span class=pizza>tacos</span>";
-    const input = &html5.util.utf8DecodeStringComptime(string);
+    const input = &rem.util.utf8DecodeStringComptime(string);
     const allocator = std.testing.allocator;
 
     var dom = DomTree{ .allocator = allocator };

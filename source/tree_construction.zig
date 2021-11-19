@@ -10,17 +10,17 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const ComptimeStringMap = std.ComptimeStringMap;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
-const html5 = @import("../html5.zig");
-const Token = html5.token.Token;
-const TokenStartTag = html5.token.TokenStartTag;
-const TokenEndTag = html5.token.TokenEndTag;
-const TokenComment = html5.token.TokenComment;
-const TokenCharacter = html5.token.TokenCharacter;
-const TokenDOCTYPE = html5.token.TokenDOCTYPE;
-const Tokenizer = html5.Tokenizer;
-const ParseError = html5.Parser.ParseError;
+const rem = @import("../rem.zig");
+const Token = rem.token.Token;
+const TokenStartTag = rem.token.TokenStartTag;
+const TokenEndTag = rem.token.TokenEndTag;
+const TokenComment = rem.token.TokenComment;
+const TokenCharacter = rem.token.TokenCharacter;
+const TokenDOCTYPE = rem.token.TokenDOCTYPE;
+const Tokenizer = rem.Tokenizer;
+const ParseError = rem.Parser.ParseError;
 
-const Dom = html5.dom;
+const Dom = rem.dom;
 const DomTree = Dom.DomTree;
 const Document = Dom.Document;
 const Element = Dom.Element;
@@ -32,7 +32,7 @@ test "Tree constructor usage" {
     const allocator = std.testing.allocator;
 
     const string = "<!doctype><html>asdf</body hello=world>";
-    var input: []const u21 = &html5.util.utf8DecodeStringComptime(string);
+    var input: []const u21 = &rem.util.utf8DecodeStringComptime(string);
 
     var tokens = std.ArrayList(Token).init(allocator);
     defer {
@@ -84,7 +84,7 @@ pub const TreeConstructor = struct {
     template_insertion_modes: ArrayListUnmanaged(InsertionMode) = .{},
 
     active_formatting_elements: ArrayListUnmanaged(FormattingElement) = .{},
-    formatting_element_tag_attributes: ArrayListUnmanaged(html5.token.AttributeSet) = .{},
+    formatting_element_tag_attributes: ArrayListUnmanaged(rem.token.AttributeSet) = .{},
     index_of_last_marker: ?usize = null,
 
     head_element_pointer: ?*Element = null,
@@ -136,7 +136,7 @@ pub const TreeConstructor = struct {
         self.template_insertion_modes.deinit(self.allocator);
         self.active_formatting_elements.deinit(self.allocator);
         for (self.formatting_element_tag_attributes.items) |*attributes| {
-            html5.util.freeStringHashMapConst(attributes, self.allocator);
+            rem.util.freeStringHashMapConst(attributes, self.allocator);
         }
         self.formatting_element_tag_attributes.deinit(self.allocator);
         self.pending_table_character_tokens.deinit(self.allocator);
@@ -3021,7 +3021,7 @@ const adjust_foreign_attributes_map = ComptimeStringMap(void, .{
 });
 
 /// Appends the attributes from the token to the Element.
-fn elementAddAttributes(dom: *DomTree, element: *Element, attributes: *html5.token.AttributeSet.Iterator) !void {
+fn elementAddAttributes(dom: *DomTree, element: *Element, attributes: *rem.token.AttributeSet.Iterator) !void {
     while (attributes.next()) |attr| {
         try element.addAttributeNoReplace(dom.allocator, attr.key_ptr.*, attr.value_ptr.*);
     }
@@ -3029,7 +3029,7 @@ fn elementAddAttributes(dom: *DomTree, element: *Element, attributes: *html5.tok
 
 /// Appends the attributes from the token to the Element, while also doing the
 /// "adjust MathML attributes" and "adjust foreign attributes" algorithms.
-fn appendAttributesAdjustMathMlForeign(dom: *DomTree, element: *Element, attributes: *html5.token.AttributeSet.Iterator) !void {
+fn appendAttributesAdjustMathMlForeign(dom: *DomTree, element: *Element, attributes: *rem.token.AttributeSet.Iterator) !void {
     while (attributes.next()) |attr| {
         const key = attr.key_ptr.*;
         const value = attr.value_ptr.*;
@@ -3046,7 +3046,7 @@ fn appendAttributesAdjustMathMlForeign(dom: *DomTree, element: *Element, attribu
 
 /// Appends the attributes from the token to the Element, while also doing the
 /// "adjust SVG attributes" and "adjust foreign attributes" algorithms.
-fn appendAttributesAdjustSvgForeign(dom: *DomTree, element: *Element, attributes: *html5.token.AttributeSet.Iterator) !void {
+fn appendAttributesAdjustSvgForeign(dom: *DomTree, element: *Element, attributes: *rem.token.AttributeSet.Iterator) !void {
     const adjust_svg_attributes_map = ComptimeStringMap([]const u8, .{
         .{ "attributename", "attributeName" },
         .{ "attributetype", "attributeType" },
@@ -3208,8 +3208,8 @@ fn addFormattingElementTagAttributes(c: *TreeConstructor, element: *Element) !us
     const attributes_copy = try c.formatting_element_tag_attributes.addOne(c.allocator);
     errdefer _ = c.formatting_element_tag_attributes.pop();
 
-    attributes_copy.* = html5.token.AttributeSet{};
-    errdefer html5.util.freeStringHashMapConst(attributes_copy, c.allocator);
+    attributes_copy.* = rem.token.AttributeSet{};
+    errdefer rem.util.freeStringHashMapConst(attributes_copy, c.allocator);
     try attributes_copy.ensureTotalCapacity(c.allocator, element.attributes.count());
 
     var iterator = element.attributes.iterator();
@@ -3235,7 +3235,7 @@ fn deleteFormattingElementTagAttributes(c: *TreeConstructor, ref: usize) void {
         }
     }
     const tag_attributes = &c.formatting_element_tag_attributes.items[ref - 1];
-    html5.util.freeStringHashMapConst(tag_attributes, c.allocator);
+    rem.util.freeStringHashMapConst(tag_attributes, c.allocator);
     _ = c.formatting_element_tag_attributes.orderedRemove(ref - 1);
 }
 

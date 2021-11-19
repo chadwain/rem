@@ -1,6 +1,12 @@
+// Copyright (C) 2021 Chadwain Holness
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 // Parts of this file were copied from
 // https://github.com/watzon/zhtml, which is MIT (Expat) licensed.
-
+// A copyright notice is included below.
+//
 // Copyright 2020 Chris Watson
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -26,12 +32,12 @@ const testing = std.testing;
 const ArrayList = std.ArrayList;
 const Progress = std.Progress;
 
-const html5 = @import("html5");
-const Token = html5.token.Token;
-const AttributeSet = html5.token.AttributeSet;
-const Tokenizer = html5.Tokenizer;
+const rem = @import("rem");
+const Token = rem.token.Token;
+const AttributeSet = rem.token.AttributeSet;
+const Tokenizer = rem.Tokenizer;
 const TokenizerState = Tokenizer.State;
-const ParseError = html5.Parser.ParseError;
+const ParseError = rem.Parser.ParseError;
 
 test "content model flags" {
     try runTestFile("test/html5lib-tests/tokenizer/contentModelFlags.test");

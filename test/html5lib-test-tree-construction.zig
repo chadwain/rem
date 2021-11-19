@@ -1,3 +1,8 @@
+// Copyright (C) 2021 Chadwain Holness
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -7,9 +12,9 @@ const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
-const html5 = @import("html5");
+const rem = @import("rem");
 
-const Dom = html5.dom;
+const Dom = rem.dom;
 const DomTree = Dom.DomTree;
 const Document = Dom.Document;
 const DocumentType = Dom.DocumentType;
@@ -17,9 +22,9 @@ const Element = Dom.Element;
 const ElementType = Dom.ElementType;
 const CharacterData = Dom.CharacterData;
 
-const Tokenizer = html5.Tokenizer;
-const TreeConstructor = html5.tree_construction.TreeConstructor;
-const Parser = html5.Parser;
+const Tokenizer = rem.Tokenizer;
+const TreeConstructor = rem.tree_construction.TreeConstructor;
+const Parser = rem.Parser;
 
 fn eql(str1: []const u8, str2: []const u8) bool {
     return std.mem.eql(u8, str1, str2);
@@ -611,7 +616,7 @@ fn expectEqualDoctypes(d1: *const DocumentType, d2: *const DocumentType) !void {
 fn expectEqualElements(e1: *const Element, e2: *const Element) !void {
     // TODO: If the element type has an interface associated with it, check that for equality too.
     try expectEqual(e1.element_type, e2.element_type);
-    try expect(html5.util.eqlStringHashMaps(e1.attributes, e2.attributes));
+    try expect(rem.util.eqlStringHashMaps(e1.attributes, e2.attributes));
 }
 
 fn expectEqualCdatas(c1: *const CharacterData, c2: *const CharacterData) !void {

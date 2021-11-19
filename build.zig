@@ -10,9 +10,9 @@ pub fn build(b: *std.build.Builder) void {
         .name = "named-character-references",
         .path = .{ .path = "tools/named_character_references.zig" },
     };
-    const html5_pkg = std.build.Pkg{
-        .name = "html5",
-        .path = .{ .path = "html5.zig" },
+    const rem_pkg = std.build.Pkg{
+        .name = "rem",
+        .path = .{ .path = "rem.zig" },
         .dependencies = &.{named_character_references_pkg},
     };
 
@@ -20,12 +20,12 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
-    const lib = b.addStaticLibrary("html5", "html5.zig");
+    const lib = b.addStaticLibrary("rem", "rem.zig");
     lib.setBuildMode(mode);
     lib.install();
     lib.addPackage(named_character_references_pkg);
 
-    const lib_tests = b.addTest("html5.zig");
+    const lib_tests = b.addTest("rem.zig");
     lib_tests.setBuildMode(mode);
     lib_tests.addPackage(named_character_references_pkg);
     const lib_tests_step = b.step("test", "Run library tests");
@@ -39,19 +39,19 @@ pub fn build(b: *std.build.Builder) void {
 
     const html5lib_tokenizer_tests = b.addTest("test/html5lib-test-tokenizer.zig");
     html5lib_tokenizer_tests.setBuildMode(mode);
-    html5lib_tokenizer_tests.addPackage(html5_pkg);
+    html5lib_tokenizer_tests.addPackage(rem_pkg);
     const html5lib_tokenizer_tests_step = b.step("test-tokenizer", "Run tokenizer tests from html5lib-tests");
     html5lib_tokenizer_tests_step.dependOn(&html5lib_tokenizer_tests.step);
 
     const html5lib_tree_construction_tests = b.addTest("test/html5lib-test-tree-construction.zig");
     html5lib_tree_construction_tests.setBuildMode(mode);
-    html5lib_tree_construction_tests.addPackage(html5_pkg);
+    html5lib_tree_construction_tests.addPackage(rem_pkg);
     const html5lib_tree_construction_tests_step = b.step("test-tree-constructor", "Run tree construction tests from html5lib-tests");
     html5lib_tree_construction_tests_step.dependOn(&html5lib_tree_construction_tests.step);
 
     const example = b.addExecutable("example", "./example.zig");
     example.setBuildMode(mode);
-    example.addPackage(html5_pkg);
+    example.addPackage(rem_pkg);
     const example_run = example.run();
     const example_step = b.step("example", "Run an example program");
     example_step.dependOn(&example_run.step);

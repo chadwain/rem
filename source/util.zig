@@ -8,11 +8,11 @@ const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
-const html5 = @import("../html5.zig");
-const DomTree = html5.dom.DomTree;
-const Document = html5.dom.Document;
-const Element = html5.dom.Element;
-const CharacterData = html5.dom.CharacterData;
+const rem = @import("../rem.zig");
+const DomTree = rem.dom.DomTree;
+const Document = rem.dom.Document;
+const Element = rem.dom.Element;
+const CharacterData = rem.dom.CharacterData;
 
 pub fn freeStringHashMap(map: *StringHashMapUnmanaged([]u8), allocator: *Allocator) void {
     var iterator = map.iterator();
