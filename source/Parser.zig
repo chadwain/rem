@@ -190,6 +190,8 @@ pub fn initFragment(
     // Step 12
     // TODO: Set the encoding confidence.
 
+    // TODO: Set the tree constructor's 'parser_cannot_change_the_mode' and 'is_iframe_srcdoc_document' flags.
+
     return result;
 }
 

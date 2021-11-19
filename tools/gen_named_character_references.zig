@@ -212,11 +212,11 @@ fn writeValues(writer: anytype, node: *Node, indent: usize) ArrayList(u8).Writer
         if (c.is_match) {
             const len1 = std.unicode.utf8ByteSequenceLength(c.characters[0]) catch unreachable;
             try writer.writeAll("'\\u{");
-            std.fmt.format(writer, "{X}", .{std.unicode.utf8Decode(c.characters[0..len1]) catch unreachable}) catch |err| @panic(@errorName(err));
+            try std.fmt.format(writer, "{X}", .{std.unicode.utf8Decode(c.characters[0..len1]) catch unreachable});
             if (c.characters.len > len1) {
                 const len2 = std.unicode.utf8ByteSequenceLength(c.characters[len1]) catch unreachable;
                 try writer.writeAll("}','\\u{");
-                std.fmt.format(writer, "{X}", .{std.unicode.utf8Decode(c.characters[len1 .. len1 + len2]) catch unreachable}) catch |err| @panic(@errorName(err));
+                try std.fmt.format(writer, "{X}", .{std.unicode.utf8Decode(c.characters[len1 .. len1 + len2]) catch unreachable});
             }
             try writer.writeAll("}'");
         }
@@ -249,7 +249,7 @@ fn writeChildren(writer: anytype, node: *Node, indent: usize) ArrayList(u8).Writ
     try writer.writeAll("},\n");
 }
 
-fn writeIndentation(writer: anytype, indent: usize) ArrayList(u8).Writer.Error!void {
+fn writeIndentation(writer: anytype, indent: usize) !void {
     var i = indent;
     while (i > 0) : (i -= 1) {
         try writer.writeAll("    ");

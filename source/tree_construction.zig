@@ -93,11 +93,12 @@ pub const TreeConstructor = struct {
     pending_table_character_tokens: ArrayListUnmanaged(TokenCharacter) = .{},
     pending_table_chars_contains_whitespace: bool = false,
 
+    parser_cannot_change_the_mode: bool = false,
+    is_iframe_srcdoc_document: bool = false,
+
     reprocess: bool = false,
     stopped: bool = false,
     ignore_next_lf_token: bool = false,
-    parser_cannot_change_the_mode: bool = false,
-    is_iframe_srcdoc_document: bool = false,
     self_closing_flag_acknowledged: bool = false,
     frameset_ok: FramesetOk = .ok,
     foster_parenting: bool = false,

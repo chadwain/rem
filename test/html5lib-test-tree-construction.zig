@@ -94,10 +94,10 @@ test "html5lib-tests tree construction without scripting" {
 }
 
 test "html5lib-tests tree construction with scripting" {
-    // Tests that are commented out are not passing.
-    // The goal of course is to have none of them commented out.
+    // Tests that are being skipped out are not passing.
+    // The goal of course is to skip none of them.
 
-    // NOTE: All of failing tests fail because of:
+    // NOTE: All of the skipped tests fail for 1 of these reasons:
     //     1. Finding a "script" end tag token in the "text" insertion mode
     //     2. Finding an eof token while the current node is a script in the "text" insertion mode
     //     3. Finding a "script" end tag token in foreign content, while the current node is an SVG script
@@ -107,7 +107,7 @@ test "html5lib-tests tree construction with scripting" {
     try runTestFile("test/html5lib-tests/tree-construction/blocks.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/comments01.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/doctype01.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/domjs-unsafe.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/domjs-unsafe.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/entities01.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/entities02.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/foreign-fragment.dat", true);
@@ -123,27 +123,27 @@ test "html5lib-tests tree construction with scripting" {
     try runTestFile("test/html5lib-tests/tree-construction/pending-spec-changes.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/plain-text-unsafe.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/ruby.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/scriptdata01.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/scriptdata01.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/svg.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tables01.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/template.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/tests1.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/tests2.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/tests3.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/tests1.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/tests2.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/tests3.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tests4.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/tests5.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/tests5.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tests6.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/tests7.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/tests7.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tests8.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tests9.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/tests10.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/tests10.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tests11.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tests12.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tests14.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tests15.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/tests16.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/tests16.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tests17.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/tests18.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/tests18.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tests19.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tests20.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tests21.dat", true);
@@ -154,21 +154,34 @@ test "html5lib-tests tree construction with scripting" {
     try runTestFile("test/html5lib-tests/tree-construction/tests26.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tests_innerHTML_1.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/tricky01.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/webkit01.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/webkit01.dat", true);
     try runTestFile("test/html5lib-tests/tree-construction/webkit02.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/scripted/adoption01.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/scripted/ark.dat", true);
-    // try runTestFile("test/html5lib-tests/tree-construction/scripted/webkit01.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/scripted/adoption01.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/scripted/ark.dat", true);
+    skipTestFile("test/html5lib-tests/tree-construction/scripted/webkit01.dat", true);
 }
 
-fn runTestFile(file_path: []const u8, scripting: bool) !void {
+fn skipTestFile(file_path: []const u8, scripting: bool) void {
+    const scripting_string = if (scripting) "enabled" else "disabled";
     std.debug.print(
         \\
-        \\Running the tests in file {s}
+        \\SKIPPING the tests in file {s} (scripting {s})
         \\=======================================================================
         \\
     ,
-        .{file_path},
+        .{ file_path, scripting_string },
+    );
+}
+
+fn runTestFile(file_path: []const u8, scripting: bool) !void {
+    const scripting_string = if (scripting) "enabled" else "disabled";
+    std.debug.print(
+        \\
+        \\Running the tests in file {s} (scripting {s})
+        \\=======================================================================
+        \\
+    ,
+        .{ file_path, scripting_string },
     );
 
     const allocator = std.testing.allocator;
@@ -399,13 +412,21 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Elemen
 
             var element: *Element = undefined;
             if (startsWith(tag_name, "svg ")) {
-                element = try dom.makeElement(.some_other_svg);
-                // TODO Try to find an element type from the tag name.
-                try dom.registerLocalName(element, tag_name[4..]);
+                const maybe_element_type = ElementType.fromStringSvg(tag_name[4..]);
+                if (maybe_element_type) |t| {
+                    element = try dom.makeElement(t);
+                } else {
+                    element = try dom.makeElement(.some_other_svg);
+                    try dom.registerLocalName(element, tag_name[4..]);
+                }
             } else if (startsWith(tag_name, "math ")) {
-                element = try dom.makeElement(.some_other_mathml);
-                // TODO Try to find an element type from the tag name.
-                try dom.registerLocalName(element, tag_name[5..]);
+                const maybe_element_type = ElementType.fromStringMathMl(tag_name[5..]);
+                if (maybe_element_type) |t| {
+                    element = try dom.makeElement(t);
+                } else {
+                    element = try dom.makeElement(.some_other_mathml);
+                    try dom.registerLocalName(element, tag_name[5..]);
+                }
             } else {
                 const maybe_element_type = ElementType.fromStringHtml(tag_name);
                 if (maybe_element_type) |t| {

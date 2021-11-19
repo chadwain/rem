@@ -48,4 +48,11 @@ pub fn build(b: *std.build.Builder) void {
     html5lib_tree_construction_tests.addPackage(html5_pkg);
     const html5lib_tree_construction_tests_step = b.step("test-tree-constructor", "Run tree construction tests from html5lib-tests");
     html5lib_tree_construction_tests_step.dependOn(&html5lib_tree_construction_tests.step);
+
+    const example = b.addExecutable("example", "./example.zig");
+    example.setBuildMode(mode);
+    example.addPackage(html5_pkg);
+    const example_run = example.run();
+    const example_step = b.step("example", "Run an example program");
+    example_step.dependOn(&example_run.step);
 }

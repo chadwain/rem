@@ -73,16 +73,16 @@ pub fn utf8DecodeStringComptime(comptime string: []const u8) [utf8DecodeStringCo
     return result;
 }
 
-pub fn printDocument(dom: *const DomTree, document: *const Document, writer: anytype, allocator: *Allocator) !void {
+pub fn printDocument(writer: anytype, document: *const Document, dom: *const DomTree, allocator: *Allocator) !void {
     try std.fmt.format(writer, "Document: {s}\n", .{@tagName(document.quirks_mode)});
 
-    try printDocumentCdatas(document, writer, 0);
+    try printDocumentCdatas(writer, document, 0);
 
     if (document.doctype) |doctype| {
         try std.fmt.format(writer, "  DocumentType: name={s} publicId={s} systemId={s}\n", .{ doctype.name, doctype.publicId, doctype.systemId });
     }
 
-    try printDocumentCdatas(document, writer, 1);
+    try printDocumentCdatas(writer, document, 1);
 
     const ConstElementOrCharacterData = union(enum) {
         element: *const Element,
@@ -90,9 +90,11 @@ pub fn printDocument(dom: *const DomTree, document: *const Document, writer: any
     };
     var node_stack = ArrayListUnmanaged(struct { node: ConstElementOrCharacterData, depth: usize }){};
     defer node_stack.deinit(allocator);
+
     if (document.element) |document_element| {
         try node_stack.append(allocator, .{ .node = .{ .element = document_element }, .depth = 1 });
     }
+
     while (node_stack.items.len > 0) {
         const item = node_stack.pop();
         var len = item.depth;
@@ -101,17 +103,21 @@ pub fn printDocument(dom: *const DomTree, document: *const Document, writer: any
         }
         switch (item.node) {
             .element => |element| {
-                try std.fmt.format(writer, "Element: type={s} local_name={s} namespace={s}", .{
+                try std.fmt.format(writer, "Element: type={s} local_name={s} namespace={s} attributes=[", .{
                     @tagName(element.element_type),
                     element.localName(dom),
                     @tagName(element.namespace()),
                 });
-                var attr_it = element.attributes.iterator();
-                try std.fmt.format(writer, " [ ", .{});
-                while (attr_it.next()) |attr| {
-                    try std.fmt.format(writer, "\"{s}\"=\"{s}\" ", .{ attr.key_ptr.*, attr.value_ptr.* });
+                if (element.attributes.count() > 0) {
+                    try writer.writeAll(" ");
+                    var attr_it = element.attributes.iterator();
+                    while (attr_it.next()) |attr| {
+                        try std.fmt.format(writer, "\"{s}\"=\"{s}\" ", .{ attr.key_ptr.*, attr.value_ptr.* });
+                    }
                 }
                 try std.fmt.format(writer, "]\n", .{});
+
+                // Add children to stack
                 var num_children = element.children.items.len;
                 while (num_children > 0) : (num_children -= 1) {
                     const node = switch (element.children.items[num_children - 1]) {
@@ -121,21 +127,21 @@ pub fn printDocument(dom: *const DomTree, document: *const Document, writer: any
                     try node_stack.append(allocator, .{ .node = node, .depth = item.depth + 1 });
                 }
             },
-            .cdata => |cdata| try printCdata(cdata, writer),
+            .cdata => |cdata| try printCdata(writer, cdata),
         }
     }
 
-    try printDocumentCdatas(document, writer, 2);
+    try printDocumentCdatas(writer, document, 2);
 }
 
-fn printDocumentCdatas(document: *const Document, writer: anytype, slice_index: u2) !void {
+fn printDocumentCdatas(writer: anytype, document: *const Document, slice_index: u2) !void {
     const slice = document.cdata_slices[slice_index];
     for (slice.sliceOf(document.cdata.items)) |cdata| {
-        try printCdata(cdata, writer);
+        try printCdata(writer, cdata);
     }
 }
 
-fn printCdata(cdata: *const CharacterData, writer: anytype) !void {
+fn printCdata(writer: anytype, cdata: *const CharacterData) !void {
     const interface = switch (cdata.interface) {
         .text => "Text",
         .comment => "Comment",

@@ -462,7 +462,6 @@ fn finishAttributeName(self: *Self) !void {
     };
     if (get_result.found_existing) {
         self.allocator.free(name);
-        self.current_attribute_value_result_location = null;
         try self.parseError(.DuplicateAttribute);
     } else {
         get_result.value_ptr.* = "";

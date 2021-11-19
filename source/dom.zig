@@ -731,6 +731,7 @@ pub const ParentNode = union(enum) {
     document,
 };
 
+/// The type for the attributes of an Element node.
 pub const ElementAttributes = StringHashMapUnmanaged([]u8);
 
 pub const Element = struct {
@@ -800,7 +801,6 @@ pub const CharacterDataInterface = enum {
 };
 
 pub const CharacterData = struct {
-    // TODO Maybe just store a slice
     data: ArrayListUnmanaged(u8) = .{},
     interface: CharacterDataInterface,
 
