@@ -3186,14 +3186,14 @@ fn removeFromStackOfOpenElements(c: *TreeConstructor, element: *Element) void {
 const FormattingElement = struct {
     /// If element is null, then this FormattingElement is considered to be a marker.
     element: ?*Element,
-    /// If this FormattingElement is marker, this is 0.
-    /// Otherwise, this is 1 more than an index into formatting_element_tag_attributes.
+    /// If this FormattingElement is marker, this is undefined.
+    /// Otherwise, this is an index into formatting_element_tag_attributes.
     tag_attributes_ref: usize,
 
     fn eql(self: FormattingElement, c: *TreeConstructor, element: *Element) bool {
         const e = self.element orelse return false;
         if (e.element_type != element.element_type) return false;
-        const tag_attributes = c.formatting_element_tag_attributes.items[self.tag_attributes_ref - 1];
+        const tag_attributes = c.formatting_element_tag_attributes.items[self.tag_attributes_ref];
         if (tag_attributes.count() != element.attributes.count()) return false;
         var attr_it = element.attributes.iterator();
         while (attr_it.next()) |attr| {
@@ -3220,11 +3220,10 @@ fn addFormattingElementTagAttributes(c: *TreeConstructor, element: *Element) !us
         errdefer c.allocator.free(value);
         attributes_copy.putAssumeCapacity(key, value);
     }
-    return c.formatting_element_tag_attributes.items.len;
+    return c.formatting_element_tag_attributes.items.len - 1;
 }
 
 fn deleteFormattingElementTagAttributes(c: *TreeConstructor, ref: usize) void {
-    assert(ref != 0);
     for (c.active_formatting_elements.items) |*fe| {
         if (fe.tag_attributes_ref == ref) {
             // There should be no active formatting elements referring to this
@@ -3234,9 +3233,9 @@ fn deleteFormattingElementTagAttributes(c: *TreeConstructor, ref: usize) void {
             fe.tag_attributes_ref -= 1;
         }
     }
-    const tag_attributes = &c.formatting_element_tag_attributes.items[ref - 1];
+    const tag_attributes = &c.formatting_element_tag_attributes.items[ref];
     rem.util.freeStringHashMapConst(tag_attributes, c.allocator);
-    _ = c.formatting_element_tag_attributes.orderedRemove(ref - 1);
+    _ = c.formatting_element_tag_attributes.orderedRemove(ref);
 }
 
 fn addToListOfActiveFormattingElementsWithoutMatch(c: *TreeConstructor, element: *Element) !void {
@@ -3274,7 +3273,7 @@ fn removeFromListOfActiveFormattingElements(c: *TreeConstructor, index: usize) v
 }
 
 fn insertAMarker(c: *TreeConstructor) !void {
-    try c.active_formatting_elements.append(c.allocator, FormattingElement{ .element = null, .tag_attributes_ref = 0 });
+    try c.active_formatting_elements.append(c.allocator, FormattingElement{ .element = null, .tag_attributes_ref = undefined });
     c.index_of_last_marker = c.active_formatting_elements.items.len - 1;
 }
 
@@ -3330,7 +3329,7 @@ fn reconstructActiveFormattingElements(c: *TreeConstructor) !void {
                 // We can get away with using a "fake" token because createAnElementForTheToken
                 // doesn't use the token's name unless we're creating a custom element (which we aren't).
                 .name = undefined,
-                .attributes = c.formatting_element_tag_attributes.items[entry.tag_attributes_ref - 1],
+                .attributes = c.formatting_element_tag_attributes.items[entry.tag_attributes_ref],
                 .self_closing = undefined,
             },
             entry.element.?.element_type,
@@ -3459,7 +3458,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
                 c,
                 TokenStartTag{
                     .name = undefined,
-                    .attributes = c.formatting_element_tag_attributes.items[node_in_formatting_elements.tag_attributes_ref - 1],
+                    .attributes = c.formatting_element_tag_attributes.items[node_in_formatting_elements.tag_attributes_ref],
                     .self_closing = undefined,
                 },
                 node.*.element_type,
@@ -3495,7 +3494,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
                 c,
                 TokenStartTag{
                     .name = undefined,
-                    .attributes = c.formatting_element_tag_attributes.items[formatting_element.tag_attributes_ref - 1],
+                    .attributes = c.formatting_element_tag_attributes.items[formatting_element.tag_attributes_ref],
                     .self_closing = undefined,
                 },
                 formatting_element.element.?.element_type,

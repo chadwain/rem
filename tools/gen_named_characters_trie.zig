@@ -101,7 +101,7 @@ pub fn main() !void {
     const output = try render(&node, al);
     defer al.free(output);
 
-    var out_file = try std.fs.cwd().createFile("tools/named_character_references.zig", .{});
+    var out_file = try std.fs.cwd().createFile("tools/named_characters_trie.zig", .{});
     defer out_file.close();
     var writer = out_file.writer();
     try writer.writeAll(output);
@@ -131,8 +131,12 @@ fn render(node: *Node, al: *std.mem.Allocator) ![]u8 {
     errdefer output.deinit();
     var writer = output.writer();
     try writer.writeAll(
+        \\//! Note: Trying to run zig fmt on this file might take days.
+        \\
         \\const std = @import("std");
         \\
+        \\/// If the 1st field is null, then the current string does not match any named character references.
+        \\/// Otherwise, there is a match, and the 2nd field may or may not be null.
         \\pub const Value = @Type(std.builtin.TypeInfo{ .Struct = .{
         \\    .layout = .Auto,
         \\    .fields = &.{

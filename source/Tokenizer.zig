@@ -48,7 +48,7 @@ test "Tokenizer usage" {
 
 const Self = @This();
 const rem = @import("../rem.zig");
-const named_characters = @import("named-character-references");
+const named_characters_trie = @import("named-characters-trie");
 const Token = rem.token.Token;
 const AttributeSet = rem.token.AttributeSet;
 const ParseError = rem.Parser.ParseError;
@@ -582,6 +582,7 @@ fn emitCurrentTag(self: *Self) !void {
                 .attributes = self.current_tag_attributes,
                 .self_closing = self.current_tag_self_closing,
             } });
+            self.current_tag_attributes = .{};
         },
         .End => {
             if (self.current_tag_attributes.count() > 0) {
@@ -590,7 +591,7 @@ fn emitCurrentTag(self: *Self) !void {
                     self.allocator.free(attr.key_ptr.*);
                     self.allocator.free(attr.value_ptr.*);
                 }
-                self.current_tag_attributes.deinit(self.allocator);
+                self.current_tag_attributes.clearRetainingCapacity();
                 try self.parseError(.EndTagWithAttributes);
             }
             if (self.current_tag_self_closing) {
@@ -603,7 +604,6 @@ fn emitCurrentTag(self: *Self) !void {
     }
 
     self.current_tag_self_closing = false;
-    self.current_tag_attributes = .{};
     self.current_tag_type = undefined;
 }
 
@@ -621,11 +621,11 @@ fn flushCharacterReference(self: *Self) !void {
     }
 }
 
-fn findNamedCharacterReference(self: *Self, input: *[]const u21) !named_characters.Value {
-    var node = named_characters.root;
+fn findNamedCharacterReference(self: *Self, input: *[]const u21) !named_characters_trie.Value {
+    var node = named_characters_trie.root;
     var input_copy = input.*;
     var character_reference_consumed_codepoints_count: usize = 1;
-    var last_matched_named_character_value = named_characters.Value{};
+    var last_matched_named_character_value = named_characters_trie.Value{};
     while (true) {
         const next_char_info = advancePosition(input_copy);
         const character = next_char_info.character orelse break;
