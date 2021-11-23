@@ -15,10 +15,10 @@ test "Tokenizer usage" {
         all_tokens.deinit();
     }
 
-    var all_parse_errors = std.ArrayList(ParseError).init(allocator);
-    defer all_parse_errors.deinit();
+    var error_handler = ErrorHandler{ .report = ArrayList(ParseError).init(allocator) };
+    defer error_handler.report.deinit();
 
-    var tokenizer = init(allocator, &all_tokens, &all_parse_errors);
+    var tokenizer = init(allocator, &all_tokens, &error_handler);
     defer tokenizer.deinit();
 
     while (try tokenizer.run(&input)) {}
@@ -43,7 +43,7 @@ test "Tokenizer usage" {
     for (all_tokens.items) |token, i| {
         try std.testing.expect(token.eql(expected_tokens[i]));
     }
-    try std.testing.expectEqualSlices(ParseError, expected_parse_errors, all_parse_errors.items);
+    try std.testing.expectEqualSlices(ParseError, expected_parse_errors, error_handler.report.items);
 }
 
 const Self = @This();
@@ -52,6 +52,7 @@ const named_characters_trie = @import("named-characters-trie");
 const Token = rem.token.Token;
 const AttributeSet = rem.token.AttributeSet;
 const ParseError = rem.Parser.ParseError;
+const ErrorHandler = rem.Parser.ErrorHandler;
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -91,15 +92,15 @@ reached_eof: bool = false,
 allocator: *Allocator,
 
 tokens: *ArrayList(Token),
-parse_errors: *ArrayList(ParseError),
+error_handler: *ErrorHandler,
 
 /// Create a new HTML5 tokenizer.
 pub fn init(
     allocator: *Allocator,
     token_sink: *ArrayList(Token),
-    parse_error_sink: *ArrayList(ParseError),
+    error_handler: *ErrorHandler,
 ) Self {
-    return initState(allocator, .Data, token_sink, parse_error_sink);
+    return initState(allocator, .Data, token_sink, error_handler);
 }
 
 /// Create a new HTML5 tokenizer, and change to a particular state.
@@ -107,13 +108,13 @@ pub fn initState(
     allocator: *Allocator,
     state: State,
     token_sink: *ArrayList(Token),
-    parse_error_sink: *ArrayList(ParseError),
+    error_handler: *ErrorHandler,
 ) Self {
     return Self{
         .allocator = allocator,
         .state = state,
         .tokens = token_sink,
-        .parse_errors = parse_error_sink,
+        .error_handler = error_handler,
     };
 }
 
@@ -667,7 +668,7 @@ fn codepointFromCharacterReferenceCode(self: *Self) u21 {
 }
 
 fn parseError(self: *Self, err: ParseError) !void {
-    try self.parse_errors.append(err);
+    try self.error_handler.sendError(err);
 }
 
 fn tempBufferEql(self: *Self, comptime string: []const u8) bool {
@@ -1996,7 +1997,9 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             const chars = try t.findNamedCharacterReference(input);
             const match_found = chars[0] != null;
             if (match_found) {
-                const historical_reasons = t.isPartOfAnAttribute() and t.tempBufferLast() != ';' and switch (t.peekInputChar(input.*) orelse TREAT_AS_ANYTHING_ELSE) {
+                const historical_reasons = t.isPartOfAnAttribute() and
+                    t.tempBufferLast() != ';' and
+                    switch (t.peekInputChar(input.*) orelse TREAT_AS_ANYTHING_ELSE) {
                     '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
                     else => false,
                 };

@@ -16,10 +16,11 @@ pub fn main() !void {
     var dom = rem.dom.DomTree{ .allocator = allocator };
     defer dom.deinit();
 
-    var parser = try rem.Parser.init(&dom, input, allocator, false);
+    var parser = try rem.Parser.init(&dom, input, allocator, .abort, false);
     defer parser.deinit();
     try parser.run();
 
     const writer = std.io.getStdOut().writer();
-    try rem.util.printDocument(writer, parser.getDocument(), &dom, allocator);
+    const document = parser.getDocument();
+    try rem.util.printDocument(writer, document, &dom, allocator);
 }

@@ -84,21 +84,62 @@ pub const ParseError = enum {
     TreeConstructionError,
 };
 
+pub const OnError = enum {
+    /// The parser will continue to run when it encounters an error.
+    ignore,
+    /// The parser will immediately stop when it encounters an error.
+    /// The error that caused the parser to stop can be seen by calling errors().
+    abort,
+    /// The parser will continue to run when it encounters an error.
+    /// All errors that are encountered will be saved to a list, which can be accessed by calling errors().
+    report,
+};
+
+pub const ErrorHandler = union(OnError) {
+    ignore,
+    abort: ?ParseError,
+    report: ArrayList(ParseError),
+
+    pub fn sendError(self: *@This(), err: ParseError) !void {
+        switch (self.*) {
+            .ignore => {},
+            .abort => |*the_error| {
+                the_error.* = err;
+                return error.AbortParsing;
+            },
+            .report => |*list| try list.append(err),
+        }
+    }
+
+    pub fn deinit(self: *@This()) void {
+        switch (self.*) {
+            .ignore, .abort => {},
+            .report => |list| list.deinit(),
+        }
+    }
+};
+
 /// Create a new HTML5 parser.
-pub fn init(dom: *DomTree, input: []const u21, allocator: *Allocator, scripting: bool) !Self {
+pub fn init(dom: *DomTree, input: []const u21, allocator: *Allocator, on_error: OnError, scripting: bool) !Self {
     const document = try dom.makeDocument();
 
     const token_sink = try allocator.create(ArrayList(Token));
     errdefer allocator.destroy(token_sink);
     token_sink.* = ArrayList(Token).init(allocator);
+    errdefer token_sink.deinit();
 
-    const parse_error_sink = try allocator.create(ArrayList(ParseError));
-    errdefer allocator.destroy(parse_error_sink);
-    parse_error_sink.* = ArrayList(ParseError).init(allocator);
+    const error_handler = try allocator.create(ErrorHandler);
+    errdefer allocator.destroy(error_handler);
+    error_handler.* = switch (on_error) {
+        .ignore => .ignore,
+        .abort => .{ .abort = null },
+        .report => .{ .report = ArrayList(ParseError).init(allocator) },
+    };
+    errdefer error_handler.deinit();
 
     return Self{
-        .tokenizer = Tokenizer.init(allocator, token_sink, parse_error_sink),
-        .constructor = TreeConstructor.init(dom, document, allocator, .{ .scripting = scripting }),
+        .tokenizer = Tokenizer.init(allocator, token_sink, error_handler),
+        .constructor = TreeConstructor.init(dom, document, allocator, error_handler, .{ .scripting = scripting }),
         .input = input,
         .allocator = allocator,
     };
@@ -111,6 +152,7 @@ pub fn initFragment(
     context: *Element,
     input: []const u21,
     allocator: *Allocator,
+    on_error: OnError,
     scripting: bool,
     // Must be the same "quirks mode" as the node document of the context.
     quirks_mode: Document.QuirksMode,
@@ -134,14 +176,20 @@ pub fn initFragment(
     const token_sink = try allocator.create(ArrayList(Token));
     errdefer allocator.destroy(token_sink);
     token_sink.* = ArrayList(Token).init(allocator);
+    errdefer token_sink.deinit();
 
-    const parse_error_sink = try allocator.create(ArrayList(ParseError));
-    errdefer allocator.destroy(parse_error_sink);
-    parse_error_sink.* = ArrayList(ParseError).init(allocator);
+    const error_handler = try allocator.create(ErrorHandler);
+    errdefer allocator.destroy(error_handler);
+    error_handler.* = switch (on_error) {
+        .ignore => .ignore,
+        .abort => .{ .abort = null },
+        .report => .{ .report = ArrayList(ParseError).init(allocator) },
+    };
+    errdefer error_handler.deinit();
 
     var result = Self{
-        .tokenizer = Tokenizer.initState(allocator, initial_state, token_sink, parse_error_sink),
-        .constructor = TreeConstructor.init(dom, document, allocator, .{
+        .tokenizer = Tokenizer.initState(allocator, initial_state, token_sink, error_handler),
+        .constructor = TreeConstructor.init(dom, document, allocator, error_handler, .{
             .fragment_context = context,
             .scripting = scripting,
         }),
@@ -199,9 +247,9 @@ pub fn initFragment(
 pub fn deinit(self: *Self) void {
     for (self.tokenizer.tokens.items) |*t| t.deinit(self.allocator);
     self.tokenizer.tokens.deinit();
-    self.tokenizer.parse_errors.deinit();
+    self.tokenizer.error_handler.deinit();
     self.allocator.destroy(self.tokenizer.tokens);
-    self.allocator.destroy(self.tokenizer.parse_errors);
+    self.allocator.destroy(self.tokenizer.error_handler);
     self.tokenizer.deinit();
     self.constructor.deinit();
 }
@@ -209,11 +257,17 @@ pub fn deinit(self: *Self) void {
 /// Runs the tokenization and tree construction steps to completion.
 pub fn run(self: *Self) !void {
     const tokens: *ArrayList(Token) = self.tokenizer.tokens;
-    while (try self.tokenizer.run(&self.input)) {
+    while (self.tokenizer.run(&self.input) catch |err| {
+        if (err == error.AbortParsing) self.abort();
+        return err;
+    }) {
         if (tokens.items.len > 0) {
             var constructor_result: TreeConstructor.RunResult = undefined;
             for (tokens.items) |*token, i| {
-                constructor_result = try self.constructor.run(token.*);
+                constructor_result = self.constructor.run(token.*) catch |err| {
+                    if (err == error.AbortParsing) self.abort();
+                    return err;
+                };
                 token.deinit(self.tokenizer.allocator);
                 assert(constructor_result.new_tokenizer_state == null or i == tokens.items.len - 1);
             }
@@ -225,6 +279,13 @@ pub fn run(self: *Self) !void {
     }
 }
 
+/// Implements HTML's "abort a parser" algorithm
+/// https://html.spec.whatwg.org/multipage/parsing.html#abort-a-parser
+fn abort(self: *Self) void {
+    // TODO: The rest of this algorithm.
+    self.input = &[0]u21{};
+}
+
 /// Returns the Document node associated with this parser.
 pub fn getDocument(self: Self) *Document {
     return self.constructor.document;
@@ -232,7 +293,11 @@ pub fn getDocument(self: Self) *Document {
 
 /// Returns all of the parse errors that were encountered.
 pub fn errors(self: Self) []const ParseError {
-    return self.tokenizer.parse_errors.items;
+    return switch (self.tokenizer.error_handler) {
+        .ignore => &[0]ParseError{},
+        .abort => |err| if (err) |*e| e else &[0]ParseError{},
+        .report => |list| list.items,
+    };
 }
 
 test "Parser usage" {
@@ -243,7 +308,7 @@ test "Parser usage" {
     var dom = DomTree{ .allocator = allocator };
     defer dom.deinit();
 
-    var parser = try init(&dom, input, allocator, false);
+    var parser = try init(&dom, input, allocator, .ignore, false);
     defer parser.deinit();
     try parser.run();
 }
@@ -257,7 +322,7 @@ test "Parser usage, fragment case" {
     defer dom.deinit();
     const context = try dom.makeElement(.html_div);
 
-    var parser = try initFragment(&dom, context, input, allocator, false, .no_quirks);
+    var parser = try initFragment(&dom, context, input, allocator, .ignore, false, .no_quirks);
     defer parser.deinit();
     try parser.run();
 }

@@ -539,13 +539,13 @@ fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
             .attributes = .{},
             .children = .{},
         };
-        var parser = try Parser.initFragment(&result_dom, &context_element, input, allocator, scripting, .no_quirks);
+        var parser = try Parser.initFragment(&result_dom, &context_element, input, allocator, .ignore, scripting, .no_quirks);
         defer parser.deinit();
         try parser.run();
 
         try deeplyCompareDocuments(allocator, t.expected.document, parser.getDocument());
     } else {
-        var parser = try Parser.init(&result_dom, input, allocator, scripting);
+        var parser = try Parser.init(&result_dom, input, allocator, .ignore, scripting);
         defer parser.deinit();
         try parser.run();
 

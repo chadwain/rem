@@ -38,6 +38,7 @@ const AttributeSet = rem.token.AttributeSet;
 const Tokenizer = rem.Tokenizer;
 const TokenizerState = Tokenizer.State;
 const ParseError = rem.Parser.ParseError;
+const ErrorHandler = rem.Parser.ErrorHandler;
 
 test "content model flags" {
     try runTestFile("test/html5lib-tests/tokenizer/contentModelFlags.test");
@@ -162,7 +163,14 @@ fn runTestFile(file_path: []const u8) !void {
     prog_root.end();
 }
 
-fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: []Token, expected_errors: []ErrorInfo, initial_state: TokenizerState, last_start_tag_name: []const u8) !void {
+fn runTest(
+    allocator: *std.mem.Allocator,
+    input: []const u21,
+    expected_tokens: []Token,
+    expected_errors: []ErrorInfo,
+    initial_state: TokenizerState,
+    last_start_tag_name: []const u8,
+) !void {
     var input_mutable = input;
 
     var all_tokens = ArrayList(Token).init(allocator);
@@ -171,10 +179,10 @@ fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: [
         all_tokens.deinit();
     }
 
-    var all_parse_errors = ArrayList(ParseError).init(allocator);
-    defer all_parse_errors.deinit();
+    var error_handler = ErrorHandler{ .report = ArrayList(ParseError).init(allocator) };
+    defer error_handler.deinit();
 
-    var tokenizer = Tokenizer.initState(allocator, initial_state, &all_tokens, &all_parse_errors);
+    var tokenizer = Tokenizer.initState(allocator, initial_state, &all_tokens, &error_handler);
     defer tokenizer.deinit();
     tokenizer.last_start_tag_name = try allocator.dupe(u8, last_start_tag_name);
 
@@ -182,7 +190,10 @@ fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: [
 
     try std.testing.expect(all_tokens.items[all_tokens.items.len - 1] == .eof);
     std.testing.expectEqual(expected_tokens.len, all_tokens.items.len - 1) catch {
-        std.debug.print("Unequal number of tokens\n Expected {}: {any}\n Actual {}: {any}\n", .{ expected_tokens.len, expected_tokens, all_tokens.items.len - 1, all_tokens.items[0 .. all_tokens.items.len - 1] });
+        std.debug.print(
+            "Unequal number of tokens\n Expected {}: {any}\n Actual {}: {any}\n",
+            .{ expected_tokens.len, expected_tokens, all_tokens.items.len - 1, all_tokens.items[0 .. all_tokens.items.len - 1] },
+        );
         return error.UnequalNumberOfTokens;
     };
     for (expected_tokens) |token, i| {
@@ -192,13 +203,19 @@ fn runTest(allocator: *std.mem.Allocator, input: []const u21, expected_tokens: [
         };
     }
 
-    std.testing.expectEqual(expected_errors.len, all_parse_errors.items.len) catch {
-        std.debug.print("Unequal number of parse errors\n Expected {}: {any}\n Actual {}: {any}\n", .{ expected_errors.len, expected_errors, all_parse_errors.items.len, all_parse_errors.items });
+    std.testing.expectEqual(expected_errors.len, error_handler.report.items.len) catch {
+        std.debug.print(
+            "Unequal number of parse errors\n Expected {}: {any}\n Actual {}: {any}\n",
+            .{ expected_errors.len, expected_errors, error_handler.report.items.len, error_handler.report.items },
+        );
         return error.UnequalNumberOfParseErrors;
     };
     for (expected_errors) |err, i| {
-        testing.expectEqualSlices(u8, err.id, ErrorInfo.errorToSpecId(all_parse_errors.items[i])) catch {
-            std.debug.print("Mismatched parse errors\n Expected: {s}\n Actual: {s}\n", .{ err.id, ErrorInfo.errorToSpecId(all_parse_errors.items[i]) });
+        testing.expectEqualSlices(u8, err.id, ErrorInfo.errorToSpecId(error_handler.report.items[i])) catch {
+            std.debug.print(
+                "Mismatched parse errors\n Expected: {s}\n Actual: {s}\n",
+                .{ err.id, ErrorInfo.errorToSpecId(error_handler.report.items[i]) },
+            );
             return error.MismatchedParseErrors;
         };
     }
@@ -237,7 +254,11 @@ fn parseOutput(allocator: *std.mem.Allocator, outputs: anytype, double_escaped: 
             };
             var attributes_obj_it = attributes_obj.iterator();
             while (attributes_obj_it.next()) |attribute_entry| {
-                try token.start_tag.attributes.put(allocator, try getString(attribute_entry.key_ptr.*, allocator, double_escaped), try getString(attribute_entry.value_ptr.String, allocator, double_escaped));
+                try token.start_tag.attributes.put(
+                    allocator,
+                    try getString(attribute_entry.key_ptr.*, allocator, double_escaped),
+                    try getString(attribute_entry.value_ptr.String, allocator, double_escaped),
+                );
             }
             try tokens.append(token);
         } else if (std.mem.eql(u8, token_type_str, "EndTag")) {
