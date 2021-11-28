@@ -10,7 +10,7 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
 const rem = @import("../rem.zig");
-const DomTree = rem.dom.DomTree;
+const Dom = rem.dom.Dom;
 const Document = rem.dom.Document;
 const Element = rem.dom.Element;
 const CharacterData = rem.dom.CharacterData;
@@ -43,18 +43,18 @@ pub fn eqlStringHashMaps(map1: StringHashMapUnmanaged([]u8), map2: StringHashMap
     return true;
 }
 
-pub fn eqlNullSlices(comptime T: type, slice1: ?[]const T, slice2: ?[]const T) bool {
-    if (slice1) |a| {
-        const b = slice2 orelse return false;
+pub fn eqlNullSlices(comptime T: type, endpoint1: ?[]const T, endpoint2: ?[]const T) bool {
+    if (endpoint1) |a| {
+        const b = endpoint2 orelse return false;
         return std.mem.eql(T, a, b);
     } else {
-        return slice2 == null;
+        return endpoint2 == null;
     }
 }
 
-pub fn eqlNullSlices2(comptime T: type, slice1: []const T, slice2: ?[]const T) bool {
-    const b = slice2 orelse return false;
-    return std.mem.eql(T, slice1, b);
+pub fn eqlNullSlices2(comptime T: type, endpoint1: []const T, endpoint2: ?[]const T) bool {
+    const b = endpoint2 orelse return false;
+    return std.mem.eql(T, endpoint1, b);
 }
 
 pub const eqlIgnoreCase = std.ascii.eqlIgnoreCase;
@@ -114,7 +114,7 @@ pub fn utf8DecodeStringComptime(comptime string: []const u8) [utf8DecodeStringCo
     return result;
 }
 
-pub fn printDocument(writer: anytype, document: *const Document, dom: *const DomTree, allocator: *Allocator) !void {
+pub fn printDocument(writer: anytype, document: *const Document, dom: *const Dom, allocator: *Allocator) !void {
     try std.fmt.format(writer, "Document: {s}\n", .{@tagName(document.quirks_mode)});
 
     try printDocumentCdatas(writer, document, 0);
@@ -175,9 +175,9 @@ pub fn printDocument(writer: anytype, document: *const Document, dom: *const Dom
     try printDocumentCdatas(writer, document, 2);
 }
 
-fn printDocumentCdatas(writer: anytype, document: *const Document, slice_index: u2) !void {
-    const slice = document.cdata_slices[slice_index];
-    for (slice.sliceOf(document.cdata.items)) |cdata| {
+fn printDocumentCdatas(writer: anytype, document: *const Document, endpoint_index: u2) !void {
+    const endpoint = document.cdata_endpoints[endpoint_index];
+    for (endpoint.sliceOf(document.cdata.items)) |cdata| {
         try printCdata(writer, cdata);
     }
 }

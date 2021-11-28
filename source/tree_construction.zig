@@ -21,13 +21,12 @@ const Tokenizer = rem.Tokenizer;
 const ParseError = rem.Parser.ParseError;
 const ErrorHandler = rem.Parser.ErrorHandler;
 
-const Dom = rem.dom;
-const DomTree = Dom.DomTree;
-const Document = Dom.Document;
-const Element = Dom.Element;
-const ElementType = Dom.ElementType;
-const CharacterData = Dom.CharacterData;
-const CharacterDataInterface = Dom.CharacterDataInterface;
+const Dom = rem.dom.Dom;
+const Document = rem.dom.Document;
+const Element = rem.dom.Element;
+const ElementType = rem.dom.ElementType;
+const CharacterData = rem.dom.CharacterData;
+const CharacterDataInterface = rem.dom.CharacterDataInterface;
 
 test "Tree constructor usage" {
     const allocator = std.testing.allocator;
@@ -47,7 +46,7 @@ test "Tree constructor usage" {
     var tokenizer = Tokenizer.init(allocator, &tokens, &error_handler);
     defer tokenizer.deinit();
 
-    var dom = DomTree{ .allocator = allocator };
+    var dom = Dom{ .allocator = allocator };
     defer dom.deinit();
 
     const document = try dom.makeDocument();
@@ -71,7 +70,7 @@ test "Tree constructor usage" {
 }
 
 pub const TreeConstructor = struct {
-    dom: *DomTree,
+    dom: *Dom,
     document: *Document,
     allocator: *Allocator,
     error_handler: *ErrorHandler,
@@ -122,7 +121,7 @@ pub const TreeConstructor = struct {
     };
 
     /// Create a new HTML5 tree constructor.
-    pub fn init(dom: *DomTree, document: *Document, allocator: *Allocator, error_handler: *ErrorHandler, args: Arguments) TreeConstructor {
+    pub fn init(dom: *Dom, document: *Document, allocator: *Allocator, error_handler: *ErrorHandler, args: Arguments) TreeConstructor {
         return TreeConstructor{
             .dom = dom,
             .document = document,
@@ -420,7 +419,7 @@ fn initial(c: *TreeConstructor, token: Token) !void {
             }
 
             const doctype = try c.dom.makeDoctype(d.name, d.public_identifier, d.system_identifier);
-            try Dom.mutation.documentAppendDocumentType(c.dom, c.document, doctype, .Suppress);
+            try rem.dom.mutation.documentAppendDocumentType(c.dom, c.document, doctype, .Suppress);
             changeTo(c, .BeforeHtml);
         },
         else => try initialAnythingElse(c),
@@ -454,7 +453,7 @@ fn beforeHtml(c: *TreeConstructor, token: Token) !void {
         .start_tag => |start_tag| {
             if (strEql(start_tag.name, "html")) {
                 const element = try createAnElementForTheToken(c, start_tag, .html_html, .{ .document = c.document }, .dont_adjust);
-                try Dom.mutation.documentAppendElement(c.dom, c.document, element, .Suppress);
+                try rem.dom.mutation.documentAppendElement(c.dom, c.document, element, .Suppress);
                 try c.open_elements.append(c.allocator, element);
                 changeTo(c, .BeforeHead);
             } else {
@@ -477,7 +476,7 @@ fn beforeHtmlAnythingElse(c: *TreeConstructor) !void {
     // TODO: Set the element's "node document"
     const element = try c.dom.makeElement(.html_html);
     element.parent = .document;
-    try Dom.mutation.documentAppendElement(c.dom, c.document, element, .Suppress);
+    try rem.dom.mutation.documentAppendElement(c.dom, c.document, element, .Suppress);
     try c.open_elements.append(c.allocator, element);
     reprocessIn(c, .BeforeHead);
 }
@@ -634,9 +633,9 @@ fn inHeadStartTagScript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
     }
     switch (adjusted_insertion_location) {
         // TODO: Check pre-insertion validity
-        .element_last_child => |e| try Dom.mutation.elementAppend(c.dom, e, .{ .element = element }, .Suppress),
+        .element_last_child => |e| try rem.dom.mutation.elementAppend(c.dom, e, .{ .element = element }, .Suppress),
         // TODO: Check pre-insertion validity
-        .parent_before_child => |s| try Dom.mutation.elementInsert(c.dom, s.parent, .{ .element = s.child }, .{ .element = element }, .Suppress),
+        .parent_before_child => |s| try rem.dom.mutation.elementInsert(c.dom, s.parent, .{ .element = s.child }, .{ .element = element }, .Suppress),
     }
     try c.open_elements.append(c.allocator, element);
     setTokenizerState(c, .ScriptData);
@@ -859,7 +858,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                         // Ignore the token.
                     } else {
                         // The stack of open elements has at least 2 elements because of previous checks.
-                        Dom.mutation.elementRemove(c.dom, c.open_elements.items[1], .Suppress);
+                        rem.dom.mutation.elementRemove(c.dom, c.open_elements.items[1], .Suppress);
                         c.open_elements.shrinkRetainingCapacity(1);
                         _ = try insertHtmlElementForTheToken(c, start_tag, .html_frameset);
                         changeTo(c, .InFrameset);
@@ -2951,7 +2950,7 @@ fn insertCharacter(c: *TreeConstructor, character: TokenCharacter) !void {
             } else {
                 const cdata = try c.dom.makeCdata(code_units[0..len], .text);
                 // TODO: Catch a possible DomException.
-                try Dom.mutation.elementAppend(c.dom, element, .{ .cdata = cdata }, .Suppress);
+                try rem.dom.mutation.elementAppend(c.dom, element, .{ .cdata = cdata }, .Suppress);
             }
         },
         .parent_before_child => |s| {
@@ -2961,7 +2960,7 @@ fn insertCharacter(c: *TreeConstructor, character: TokenCharacter) !void {
             } else {
                 const cdata = try c.dom.makeCdata(code_units[0..len], .text);
                 // TODO: Catch a possible DomException.
-                try Dom.mutation.elementInsert(c.dom, s.parent, .{ .element = s.child }, .{ .cdata = cdata }, .Suppress);
+                try rem.dom.mutation.elementInsert(c.dom, s.parent, .{ .element = s.child }, .{ .cdata = cdata }, .Suppress);
             }
         },
     }
@@ -2978,19 +2977,19 @@ fn insertComment(c: *TreeConstructor, comment: TokenComment) !void {
 fn insertCommentToDocument(c: *TreeConstructor, comment: TokenComment) !void {
     const cdata = try c.dom.makeCdata(comment.data, .comment);
     // TODO: Catch a possible DomException.
-    return Dom.mutation.documentAppendCdata(c.dom, c.document, cdata, .Suppress);
+    return rem.dom.mutation.documentAppendCdata(c.dom, c.document, cdata, .Suppress);
 }
 
 fn insertCommentToElement(c: *TreeConstructor, comment: TokenComment, element: *Element) !void {
     const cdata = try c.dom.makeCdata(comment.data, .comment);
     // TODO: Catch a possible DomException.
-    return Dom.mutation.elementAppend(c.dom, element, .{ .cdata = cdata }, .Suppress);
+    return rem.dom.mutation.elementAppend(c.dom, element, .{ .cdata = cdata }, .Suppress);
 }
 
 fn insertCommentToElementBeforeChild(c: *TreeConstructor, comment: TokenComment, parent: *Element, child: *Element) !void {
     const cdata = try c.dom.makeCdata(comment.data, .comment);
     // TODO: Catch a possible DomException.
-    return Dom.mutation.elementInsert(c.dom, parent, .{ .element = child }, .{ .cdata = cdata }, .Suppress);
+    return rem.dom.mutation.elementInsert(c.dom, parent, .{ .element = child }, .{ .cdata = cdata }, .Suppress);
 }
 
 fn createAnElementForTheToken(
@@ -3040,7 +3039,7 @@ const adjust_foreign_attributes_map = ComptimeStringMap(void, .{
 });
 
 /// Appends the attributes from the token to the Element.
-fn elementAddAttributes(dom: *DomTree, element: *Element, attributes: *TokenStartTag.Attributes.Iterator) !void {
+fn elementAddAttributes(dom: *Dom, element: *Element, attributes: *TokenStartTag.Attributes.Iterator) !void {
     while (attributes.next()) |attr| {
         try element.addAttributeNoReplace(dom.allocator, attr.key_ptr.*, attr.value_ptr.*);
     }
@@ -3048,7 +3047,7 @@ fn elementAddAttributes(dom: *DomTree, element: *Element, attributes: *TokenStar
 
 /// Appends the attributes from the token to the Element, while also doing the
 /// "adjust MathML attributes" and "adjust foreign attributes" algorithms.
-fn appendAttributesAdjustMathMlForeign(dom: *DomTree, element: *Element, attributes: *TokenStartTag.Attributes.Iterator) !void {
+fn appendAttributesAdjustMathMlForeign(dom: *Dom, element: *Element, attributes: *TokenStartTag.Attributes.Iterator) !void {
     while (attributes.next()) |attr| {
         const key = attr.key_ptr.*;
         const value = attr.value_ptr.*;
@@ -3065,7 +3064,7 @@ fn appendAttributesAdjustMathMlForeign(dom: *DomTree, element: *Element, attribu
 
 /// Appends the attributes from the token to the Element, while also doing the
 /// "adjust SVG attributes" and "adjust foreign attributes" algorithms.
-fn appendAttributesAdjustSvgForeign(dom: *DomTree, element: *Element, attributes: *TokenStartTag.Attributes.Iterator) !void {
+fn appendAttributesAdjustSvgForeign(dom: *Dom, element: *Element, attributes: *TokenStartTag.Attributes.Iterator) !void {
     const adjust_svg_attributes_map = ComptimeStringMap([]const u8, .{
         .{ "attributename", "attributeName" },
         .{ "attributetype", "attributeType" },
@@ -3161,8 +3160,8 @@ fn insertForeignElementForTheToken(
     switch (adjusted_insertion_location) {
         // TODO: Check pre-insertion validity
         // TODO: If it is NOT possible to insert element at the adjusted insertion location, then ignore the error.
-        .element_last_child => |e| try Dom.mutation.elementAppend(c.dom, e, .{ .element = element }, .Suppress),
-        .parent_before_child => |s| try Dom.mutation.elementInsert(c.dom, s.parent, .{ .element = s.child }, .{ .element = element }, .Suppress),
+        .element_last_child => |e| try rem.dom.mutation.elementAppend(c.dom, e, .{ .element = element }, .Suppress),
+        .parent_before_child => |s| try rem.dom.mutation.elementInsert(c.dom, s.parent, .{ .element = s.child }, .{ .element = element }, .Suppress),
     }
     if (c.fragment_context != null) {
         // TODO: pop the element queue from element's relevant agent's custom element reactions stack,
@@ -3502,7 +3501,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
             }
 
             // Step 4.13.8
-            try Dom.mutation.elementAppend(c.dom, node.*, .{ .element = c.open_elements.items[last_node] }, .Suppress);
+            try rem.dom.mutation.elementAppend(c.dom, node.*, .{ .element = c.open_elements.items[last_node] }, .Suppress);
 
             // Step 4.13.9
             last_node = node_in_open_elements_index;
@@ -3512,8 +3511,8 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
         // Step 4.14
         const location = appropriateNodeInsertionLocationWithTarget(c, common_ancestor);
         switch (location) {
-            .element_last_child => |e| try Dom.mutation.elementAppend(c.dom, e, .{ .element = c.open_elements.items[last_node] }, .Suppress),
-            .parent_before_child => |s| try Dom.mutation.elementInsert(
+            .element_last_child => |e| try rem.dom.mutation.elementAppend(c.dom, e, .{ .element = c.open_elements.items[last_node] }, .Suppress),
+            .parent_before_child => |s| try rem.dom.mutation.elementInsert(
                 c.dom,
                 s.parent,
                 .{ .element = s.child },
@@ -3536,9 +3535,9 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
                 .dont_adjust,
             );
             // Step 4.16
-            std.mem.swap(ArrayListUnmanaged(Dom.ElementOrCharacterData), &furthest_block.children, &elem.children);
+            std.mem.swap(ArrayListUnmanaged(rem.dom.ElementOrCharacterData), &furthest_block.children, &elem.children);
             // Step 4.17
-            try Dom.mutation.elementAppend(c.dom, furthest_block, .{ .element = elem }, .Suppress);
+            try rem.dom.mutation.elementAppend(c.dom, furthest_block, .{ .element = elem }, .Suppress);
             break :blk elem;
         };
 
@@ -3882,7 +3881,7 @@ fn isMathMlTextIntegrationPoint(element: *Element) bool {
     };
 }
 
-fn isHtmlIntegrationPoint(dom: *DomTree, element: *const Element) bool {
+fn isHtmlIntegrationPoint(dom: *Dom, element: *const Element) bool {
     return switch (element.element_type) {
         .svg_foreign_object,
         .svg_desc,

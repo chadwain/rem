@@ -8,10 +8,9 @@
 
 const rem = @import("../rem.zig");
 
-const Dom = rem.dom;
-const DomTree = Dom.DomTree;
-const Document = Dom.Document;
-const Element = Dom.Element;
+const Dom = rem.dom.Dom;
+const Document = rem.dom.Document;
+const Element = rem.dom.Element;
 
 const Token = rem.token.Token;
 const Tokenizer = rem.Tokenizer;
@@ -121,7 +120,7 @@ pub const ErrorHandler = union(OnError) {
 
 /// Create a new HTML5 parser.
 pub fn init(
-    dom: *DomTree,
+    dom: *Dom,
     /// Must not be freed while being used by the parser.
     input: []const u21,
     allocator: *Allocator,
@@ -155,7 +154,7 @@ pub fn init(
 /// Create a new HTML5 fragment parser.
 // Follows https://html.spec.whatwg.org/multipage/parsing.html#parsing-html-fragments
 pub fn initFragment(
-    dom: *DomTree,
+    dom: *Dom,
     context: *Element,
     /// Must not be freed while being used by the parser.
     input: []const u21,
@@ -208,7 +207,7 @@ pub fn initFragment(
 
     // Steps 5-7
     const html = try dom.makeElement(.html_html);
-    try Dom.mutation.documentAppendElement(dom, document, html, .Suppress);
+    try rem.dom.mutation.documentAppendElement(dom, document, html, .Suppress);
     try result.constructor.open_elements.append(result.constructor.allocator, html);
 
     // Step 8
@@ -309,6 +308,9 @@ pub fn getDocument(self: Self) *Document {
 }
 
 /// Returns all of the parse errors that were encountered.
+/// If the error handling strategy is `ignore`, the slice will be empty.
+/// If the error handling strategy is `abort`, the slice will have at most 1 element.
+/// If the error handling strategy is `report`, the slice can have any number of elements.
 pub fn errors(self: Self) []const ParseError {
     return switch (self.tokenizer.error_handler) {
         .ignore => &[0]ParseError{},
@@ -322,7 +324,7 @@ test "Parser usage" {
     const input = &rem.util.utf8DecodeStringComptime(string);
     const allocator = std.testing.allocator;
 
-    var dom = DomTree{ .allocator = allocator };
+    var dom = Dom{ .allocator = allocator };
     defer dom.deinit();
 
     var parser = try init(&dom, input, allocator, .ignore, false);
@@ -335,7 +337,7 @@ test "Parser usage, fragment case" {
     const input = &rem.util.utf8DecodeStringComptime(string);
     const allocator = std.testing.allocator;
 
-    var dom = DomTree{ .allocator = allocator };
+    var dom = Dom{ .allocator = allocator };
     defer dom.deinit();
     const context = try dom.makeElement(.html_div);
 

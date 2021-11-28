@@ -13,7 +13,7 @@ pub fn main() !void {
     const input = &rem.util.utf8DecodeStringComptime(string);
 
     // Create the DOM in which the parsed Document will be created.
-    var dom = rem.dom.DomTree{ .allocator = allocator };
+    var dom = rem.dom.Dom{ .allocator = allocator };
     defer dom.deinit();
 
     var parser = try rem.Parser.init(&dom, input, allocator, .abort, false);

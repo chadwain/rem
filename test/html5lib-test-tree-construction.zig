@@ -13,14 +13,12 @@ const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
 const rem = @import("rem");
-
-const Dom = rem.dom;
-const DomTree = Dom.DomTree;
-const Document = Dom.Document;
-const DocumentType = Dom.DocumentType;
-const Element = Dom.Element;
-const ElementType = Dom.ElementType;
-const CharacterData = Dom.CharacterData;
+const Dom = rem.dom.Dom;
+const Document = rem.dom.Document;
+const DocumentType = rem.dom.DocumentType;
+const Element = rem.dom.Element;
+const ElementType = rem.dom.ElementType;
+const CharacterData = rem.dom.CharacterData;
 
 const Tokenizer = rem.Tokenizer;
 const TreeConstructor = rem.tree_construction.TreeConstructor;
@@ -232,7 +230,7 @@ fn runTestFile(file_path: []const u8, scripting: bool) !void {
 }
 
 const Expected = struct {
-    dom: DomTree,
+    dom: Dom,
     document: *Document,
     fragment_context: ?*Element,
 
@@ -314,7 +312,7 @@ fn createTest(test_string: *[]const u8, allocator: *Allocator) !Test {
     //var document: []const u8 = lines.rest();
     //std.debug.print("#document\n{s}\n", .{document});
 
-    var expected = parseDomTree(&lines, context_element_type, allocator) catch |err| switch (err) {
+    var expected = parseDom(&lines, context_element_type, allocator) catch |err| switch (err) {
         error.DomException => unreachable,
         else => |e| return e,
     };
@@ -330,11 +328,11 @@ fn createTest(test_string: *[]const u8, allocator: *Allocator) !Test {
     };
 }
 
-fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?ElementType, allocator: *Allocator) !Expected {
+fn parseDom(lines: *std.mem.SplitIterator(u8), context_element_type: ?ElementType, allocator: *Allocator) !Expected {
     var stack = ArrayList(*Element).init(allocator);
     defer stack.deinit();
 
-    var dom = DomTree{ .allocator = allocator };
+    var dom = Dom{ .allocator = allocator };
     errdefer dom.deinit();
     const document = try dom.makeDocument();
     const fragment_context = if (context_element_type) |ty| try dom.makeElement(ty) else null;
@@ -374,7 +372,7 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Elemen
 
                 break :blk try dom.makeDoctype(name, public_id, system_id);
             } else try dom.makeDoctype(name, null, null);
-            try Dom.mutation.documentAppendDocumentType(&dom, document, doctype, .Suppress);
+            try rem.dom.mutation.documentAppendDocumentType(&dom, document, doctype, .Suppress);
         } else if (startsWith(data, "<!-- ")) {
             // comment
             var comment: []const u8 = data[0..0];
@@ -391,12 +389,12 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Elemen
             const cdata = try dom.makeCdata(comment, .comment);
             if (depth == 0) {
                 if (fragment_context) |e| {
-                    try Dom.mutation.elementAppend(&dom, e, .{ .cdata = cdata }, .Suppress);
+                    try rem.dom.mutation.elementAppend(&dom, e, .{ .cdata = cdata }, .Suppress);
                 } else {
-                    try Dom.mutation.documentAppendCdata(&dom, document, cdata, .Suppress);
+                    try rem.dom.mutation.documentAppendCdata(&dom, document, cdata, .Suppress);
                 }
             } else {
-                try Dom.mutation.elementAppend(&dom, stack.items[depth - 1], .{ .cdata = cdata }, .Suppress);
+                try rem.dom.mutation.elementAppend(&dom, stack.items[depth - 1], .{ .cdata = cdata }, .Suppress);
             }
         } else if (startsWith(data, "<?")) {
             // processing instruction
@@ -444,12 +442,12 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Elemen
 
             if (depth == 0) {
                 if (fragment_context) |e| {
-                    try Dom.mutation.elementAppend(&dom, e, .{ .element = element }, .Suppress);
+                    try rem.dom.mutation.elementAppend(&dom, e, .{ .element = element }, .Suppress);
                 } else {
-                    try Dom.mutation.documentAppendElement(&dom, document, element, .Suppress);
+                    try rem.dom.mutation.documentAppendElement(&dom, document, element, .Suppress);
                 }
             } else {
-                try Dom.mutation.elementAppend(&dom, stack.items[stack.items.len - 1], .{ .element = element }, .Suppress);
+                try rem.dom.mutation.elementAppend(&dom, stack.items[stack.items.len - 1], .{ .element = element }, .Suppress);
             }
             try stack.append(element);
         } else if (data[0] == '"') {
@@ -467,9 +465,9 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Elemen
 
             const cdata = try dom.makeCdata(text, .text);
             if (depth == 0) {
-                try Dom.mutation.elementAppend(&dom, fragment_context.?, .{ .cdata = cdata }, .Suppress);
+                try rem.dom.mutation.elementAppend(&dom, fragment_context.?, .{ .cdata = cdata }, .Suppress);
             } else {
-                try Dom.mutation.elementAppend(&dom, stack.items[stack.items.len - 1], .{ .cdata = cdata }, .Suppress);
+                try rem.dom.mutation.elementAppend(&dom, stack.items[stack.items.len - 1], .{ .cdata = cdata }, .Suppress);
             }
         } else if (eql(data, "content")) {
             // template contents
@@ -495,7 +493,7 @@ fn parseDomTree(lines: *std.mem.SplitIterator(u8), context_element_type: ?Elemen
     return Expected{ .dom = dom, .document = document, .fragment_context = fragment_context };
 }
 
-fn parseAttribute(dom: *DomTree, stack: *ArrayList(*Element), data: []const u8, depth: usize) !void {
+fn parseAttribute(dom: *Dom, stack: *ArrayList(*Element), data: []const u8, depth: usize) !void {
     assert(depth == stack.items.len);
     const eql_sign = std.mem.indexOfScalar(u8, data, '=').?;
     assert(data[eql_sign + 1] == '"');
@@ -529,7 +527,7 @@ fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
     };
     defer allocator.free(input);
 
-    var result_dom = DomTree{ .allocator = allocator };
+    var result_dom = Dom{ .allocator = allocator };
     defer result_dom.deinit();
 
     if (t.expected.fragment_context) |e| {
@@ -556,8 +554,8 @@ fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
 fn deeplyCompareDocuments(allocator: *Allocator, doc1: *const Document, doc2: *const Document) !void {
     //try expectEqual(doc1.quirks_mode, doc2.quirks_mode);
     comptime var i = 0;
-    inline while (i < doc1.cdata_slices.len) : (i += 1) {
-        try expectEqual(doc1.cdata_slices[i], doc2.cdata_slices[i]);
+    inline while (i < doc1.cdata_endpoints.len) : (i += 1) {
+        try expectEqual(doc1.cdata_endpoints[i], doc2.cdata_endpoints[i]);
     }
     for (doc1.cdata.items) |c1, j| {
         try expectEqualCdatas(c1, doc2.cdata.items[j]);

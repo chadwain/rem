@@ -18,14 +18,14 @@ pub const DomException = enum {
     HierarchyRequest,
 };
 
-pub const DomTree = struct {
+pub const Dom = struct {
     allocator: *Allocator,
 
     /// For elements whose local name cannot be determined by looking at its element_type.
     /// This does not take precedence over looking at element_type.
     local_names: AutoHashMapUnmanaged(*const Element, []const u8) = .{},
     /// Specifically holds MathML annotation-xml elements that are HTML integration points.
-    /// This does not take precedence if finding if an element is an HTML integration point could be found by other means.
+    /// This does not take precedence if finding if an element is an HTML integration point could be done by other means.
     html_integration_points: AutoHashMapUnmanaged(*const Element, void) = .{},
 
     all_documents: ArrayListUnmanaged(*Document) = .{},
@@ -33,7 +33,7 @@ pub const DomTree = struct {
     all_cdatas: ArrayListUnmanaged(*CharacterData) = .{},
     all_doctypes: ArrayListUnmanaged(*DocumentType) = .{},
 
-    pub fn deinit(self: *DomTree) void {
+    pub fn deinit(self: *Dom) void {
         for (self.all_elements.items) |item| {
             item.deinit(self.allocator);
             self.allocator.destroy(item);
@@ -62,14 +62,14 @@ pub const DomTree = struct {
         self.html_integration_points.deinit(self.allocator);
     }
 
-    pub fn exception(self: *DomTree, ex: DomException) error{DomException} {
+    pub fn exception(self: *Dom, ex: DomException) error{DomException} {
         _ = self;
         std.debug.print("DOM Exception raised: {s}\n", .{@tagName(ex)});
         return error.DomException;
     }
 
-    /// Creates a new Document node. The returned node is owned by the DomTree.
-    pub fn makeDocument(self: *DomTree) !*Document {
+    /// Creates a new Document node. The returned node is owned by the Dom.
+    pub fn makeDocument(self: *Dom) !*Document {
         const document = try self.allocator.create(Document);
         errdefer self.allocator.destroy(document);
         try self.all_documents.append(self.allocator, document);
@@ -77,8 +77,8 @@ pub const DomTree = struct {
         return document;
     }
 
-    /// Creates a new CharacterData node. The returned node is owned by the DomTree.
-    pub fn makeCdata(self: *DomTree, data: []const u8, interface: CharacterDataInterface) !*CharacterData {
+    /// Creates a new CharacterData node. The returned node is owned by the Dom.
+    pub fn makeCdata(self: *Dom, data: []const u8, interface: CharacterDataInterface) !*CharacterData {
         const cdata = try self.allocator.create(CharacterData);
         errdefer self.allocator.destroy(cdata);
         try self.all_cdatas.append(self.allocator, cdata);
@@ -86,8 +86,8 @@ pub const DomTree = struct {
         return cdata;
     }
 
-    /// Creates a new DocumentType node. The returned node is owned by the DomTree.
-    pub fn makeDoctype(self: *DomTree, doctype_name: ?[]const u8, public_identifier: ?[]const u8, system_identifier: ?[]const u8) !*DocumentType {
+    /// Creates a new DocumentType node. The returned node is owned by the Dom.
+    pub fn makeDoctype(self: *Dom, doctype_name: ?[]const u8, public_identifier: ?[]const u8, system_identifier: ?[]const u8) !*DocumentType {
         const doctype = try self.allocator.create(DocumentType);
         errdefer self.allocator.destroy(doctype);
         try self.all_doctypes.append(self.allocator, doctype);
@@ -95,8 +95,8 @@ pub const DomTree = struct {
         return doctype;
     }
 
-    /// Creates a new Element node. The returned node is owned by the DomTree.
-    pub fn makeElement(self: *DomTree, element_type: ElementType) !*Element {
+    /// Creates a new Element node. The returned node is owned by the Dom.
+    pub fn makeElement(self: *Dom, element_type: ElementType) !*Element {
         // TODO: This function should implement the "create an element" algorithm.
         // https://dom.spec.whatwg.org/#concept-create-element
         const element = try self.allocator.create(Element);
@@ -106,13 +106,13 @@ pub const DomTree = struct {
         return element;
     }
 
-    pub fn registerLocalName(self: *DomTree, element: *const Element, name: []const u8) !void {
+    pub fn registerLocalName(self: *Dom, element: *const Element, name: []const u8) !void {
         const copy = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(copy);
         try self.local_names.putNoClobber(self.allocator, element, copy);
     }
 
-    pub fn registerHtmlIntegrationPoint(self: *DomTree, element: *const Element) !void {
+    pub fn registerHtmlIntegrationPoint(self: *Dom, element: *const Element) !void {
         assert(element.element_type == .mathml_annotation_xml);
         try self.html_integration_points.putNoClobber(self.allocator, element, {});
     }
@@ -122,15 +122,15 @@ pub const Document = struct {
     doctype: ?*DocumentType = null,
     element: ?*Element = null,
     cdata: ArrayListUnmanaged(*CharacterData) = .{},
-    cdata_slices: [3]ArraySlice = .{.{ .begin = 0, .end = 0 }} ** 3,
-    cdata_current_slice: u2 = 0,
+    cdata_endpoints: [3]Endpoints = .{.{ .begin = 0, .end = 0 }} ** 3,
+    cdata_current_endpoint: u2 = 0,
     quirks_mode: QuirksMode = .no_quirks,
 
-    pub const ArraySlice = struct {
+    pub const Endpoints = struct {
         begin: usize,
         end: usize,
 
-        pub fn sliceOf(self: ArraySlice, array: anytype) @TypeOf(array) {
+        pub fn sliceOf(self: Endpoints, array: anytype) @TypeOf(array) {
             return array[self.begin..self.end];
         }
     };
@@ -757,7 +757,7 @@ pub const Element = struct {
         return self.element_type.namespace();
     }
 
-    pub fn localName(self: *const Element, dom: *const DomTree) []const u8 {
+    pub fn localName(self: *const Element, dom: *const Dom) []const u8 {
         return self.element_type.toLocalName() orelse dom.local_names.get(self) orelse unreachable;
     }
 
