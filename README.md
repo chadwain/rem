@@ -26,6 +26,8 @@ Clone the repository like this:
 ```
 git clone --recursive --config core.autocrlf=false https://github.com/chwayne/rem.git
 ```
+There is also a [GitLab mirror](https://gitlab.com/chwayne/rem).
+
 There are no dependencies other than a Zig compiler. You should use the latest version of Zig that is available.
 
 ## Use the code
