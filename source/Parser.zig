@@ -87,10 +87,10 @@ pub const OnError = enum {
     /// The parser will continue to run when it encounters an error.
     ignore,
     /// The parser will immediately stop when it encounters an error.
-    /// The error that caused the parser to stop can be seen by calling errors().
+    /// The error that caused the parser to stop can be seen by calling `errors`.
     abort,
     /// The parser will continue to run when it encounters an error.
-    /// All errors that are encountered will be saved to a list, which can be accessed by calling errors().
+    /// All errors that are encountered will be saved to a list, which can be accessed by calling `errors`.
     report,
 };
 
@@ -312,9 +312,9 @@ pub fn getDocument(self: Self) *Document {
 /// If the error handling strategy is `abort`, the slice will have at most 1 element.
 /// If the error handling strategy is `report`, the slice can have any number of elements.
 pub fn errors(self: Self) []const ParseError {
-    return switch (self.tokenizer.error_handler) {
+    return switch (self.tokenizer.error_handler.*) {
         .ignore => &[0]ParseError{},
-        .abort => |err| if (err) |*e| e else &[0]ParseError{},
+        .abort => |err| if (err) |e| &[1]ParseError{e} else &[0]ParseError{},
         .report => |list| list.items,
     };
 }

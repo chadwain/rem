@@ -1,6 +1,26 @@
 # rem
 rem is an HTML5 parser written in [Zig](https://ziglang.org).
 
+## About
+### Features
+- [x] An HTML5 parser consisting of a tokenizer (complete) and a tree constructor (works "well enough")
+- [x] A minimal DOM implementation
+- [x] HTML fragment parsing
+- [x] Tested by [html5lib-tests](https://github.com/html5lib/html5lib-tests)
+
+### Things to be improved
+- [ ] Better DOM functionality
+- [ ] Support for more character encodings
+- [ ] Support for Javascript
+
+### Why create this?
+* To understand what it takes "implement" HTML, even if just a small portion of it. As I discovered, even just trying to parse an HTML file _correctly_ can be quite challenging.
+* To learn more about web standards in general. Reading the HTML spec naturally causes (or rather, forces) one to learn about DOM (especially), SVG, CSS, and many others.
+* For use in other projects, and to be useful to others.
+
+### Lastly...
+rem is still a work in progress. Not all the features of a fully-capable HTML5 parser are implemented.
+
 ## Get the code
 Clone the repository like this:
 ```
@@ -9,7 +29,7 @@ git clone --recursive --config core.autocrlf=false https://github.com/chwayne/re
 There are no dependencies other than a Zig compiler. You should use the latest version of Zig that is available.
 
 ## Use the code
-Before doing anything, you should run `zig build gen-named-characters-trie`. This creates `tools/named_characters_trie.zig`, which contains some data that is required for the parser to work. This only needs to be done once.
+Before using rem, you must run `zig build gen-named-characters-trie`. This creates `tools/named_characters_trie.zig`, which has some data that is required for the parser to work. This only needs to be done once.
 
 Here's an example of using the parser (you can also see the output of this program by running `zig build example`).
 
@@ -18,22 +38,29 @@ const std = @import("std");
 const rem = @import("rem");
 const allocator = std.testing.allocator;
 
-pub fn main() !void {
+pub fn main() !u8 {
     const string = "<!doctype html><html><body>Click here to download more RAM!";
     // The string must be decoded before it can be passed to the parser.
     const input = &rem.util.utf8DecodeStringComptime(string);
 
     // Create the DOM in which the parsed Document will be created.
-    var dom = rem.dom.DomTree{ .allocator = allocator };
+    var dom = rem.dom.Dom{ .allocator = allocator };
     defer dom.deinit();
 
     var parser = try rem.Parser.init(&dom, input, allocator, .abort, false);
     defer parser.deinit();
     try parser.run();
 
+    const errors = parser.errors();
+    if (errors.len > 0) {
+        std.log.err("A parsing error occured!\n{s}\n", .{@tagName(errors[0])});
+        return 1;
+    }
+
     const writer = std.io.getStdOut().writer();
     const document = parser.getDocument();
     try rem.util.printDocument(writer, document, &dom, allocator);
+    return 0;
 }
 ```
 
@@ -63,4 +90,3 @@ You should have received a copy of the GNU General Public License along with thi
 [HTML Parsing Specification](https://html.spec.whatwg.org/multipage/parsing.html)
 
 [DOM Specification](https://dom.spec.whatwg.org/)
-
