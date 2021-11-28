@@ -131,8 +131,6 @@ fn render(node: *Node, al: *std.mem.Allocator) ![]u8 {
     errdefer output.deinit();
     var writer = output.writer();
     try writer.writeAll(
-        \\//! Note: Trying to run zig fmt on this file might take days.
-        \\
         \\const std = @import("std");
         \\
         \\/// If the 1st field is null, then the current string does not match any named character references.

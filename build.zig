@@ -52,6 +52,7 @@ pub fn build(b: *std.build.Builder) void {
     const example = b.addExecutable("example", "./example.zig");
     example.setBuildMode(mode);
     example.addPackage(rem_pkg);
+    example.install();
     const example_run = example.run();
     const example_step = b.step("example", "Run an example program");
     example_step.dependOn(&example_run.step);

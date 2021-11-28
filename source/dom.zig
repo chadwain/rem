@@ -22,8 +22,10 @@ pub const DomTree = struct {
     allocator: *Allocator,
 
     /// For elements whose local name cannot be determined by looking at its element_type.
+    /// This does not take precedence over looking at element_type.
     local_names: AutoHashMapUnmanaged(*const Element, []const u8) = .{},
     /// Specifically holds MathML annotation-xml elements that are HTML integration points.
+    /// This does not take precedence if finding if an element is an HTML integration point could be found by other means.
     html_integration_points: AutoHashMapUnmanaged(*const Element, void) = .{},
 
     all_documents: ArrayListUnmanaged(*Document) = .{},
@@ -111,6 +113,7 @@ pub const DomTree = struct {
     }
 
     pub fn registerHtmlIntegrationPoint(self: *DomTree, element: *const Element) !void {
+        assert(element.element_type == .mathml_annotation_xml);
         try self.html_integration_points.putNoClobber(self.allocator, element, {});
     }
 };

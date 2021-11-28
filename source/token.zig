@@ -15,12 +15,12 @@ pub const TokenDOCTYPE = struct {
     force_quirks: bool,
 };
 
-pub const AttributeSet = StringHashMapUnmanaged([]const u8);
-
 pub const TokenStartTag = struct {
     name: []const u8,
-    attributes: AttributeSet,
+    attributes: TokenStartTag.Attributes,
     self_closing: bool,
+
+    pub const Attributes = StringHashMapUnmanaged([]const u8);
 };
 
 pub const TokenEndTag = struct {
@@ -92,7 +92,7 @@ pub const Token = union(enum) {
                 const name = try allocator.dupe(u8, st.name);
                 errdefer allocator.free(name);
 
-                var attributes = AttributeSet{};
+                var attributes = TokenStartTag.Attributes{};
                 errdefer {
                     var iterator = attributes.iterator();
                     while (iterator.next()) |attr| {

@@ -4,6 +4,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
@@ -49,6 +50,46 @@ pub fn eqlNullSlices(comptime T: type, slice1: ?[]const T, slice2: ?[]const T) b
     } else {
         return slice2 == null;
     }
+}
+
+pub fn eqlNullSlices2(comptime T: type, slice1: []const T, slice2: ?[]const T) bool {
+    const b = slice2 orelse return false;
+    return std.mem.eql(T, slice1, b);
+}
+
+pub const eqlIgnoreCase = std.ascii.eqlIgnoreCase;
+
+/// Assumes the second string is already lowercase.
+pub fn eqlIgnoreCase2(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (b) |c2, i| {
+        assert(c2 == std.ascii.toLower(c2));
+        if (c2 != std.ascii.toLower(a[i])) return false;
+    }
+    return true;
+}
+
+pub fn toLowercaseComptime(comptime string: []const u8) [string.len]u8 {
+    var result: [string.len]u8 = undefined;
+    for (string) |c, i| {
+        result[i] = std.ascii.toLower(c);
+    }
+    return result;
+}
+
+pub fn mapToLowercaseComptime(comptime strings: []const []const u8) [strings.len][]const u8 {
+    comptime {
+        var result: [strings.len][]const u8 = undefined;
+        for (strings) |s, i| {
+            result[i] = &toLowercaseComptime(s);
+        }
+        return result;
+    }
+}
+
+/// Assumes `needle` is already lowercase.
+pub fn startsWithIgnoreCase2(haystack: []const u8, needle: []const u8) bool {
+    return if (needle.len > haystack.len) false else eqlIgnoreCase2(haystack[0..needle.len], needle);
 }
 
 pub fn utf8DecodeStringComptimeLen(comptime string: []const u8) usize {

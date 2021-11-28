@@ -50,7 +50,7 @@ const Self = @This();
 const rem = @import("../rem.zig");
 const named_characters_trie = @import("named-characters-trie");
 const Token = rem.token.Token;
-const AttributeSet = rem.token.AttributeSet;
+const Attributes = rem.token.TokenStartTag.Attributes;
 const ParseError = rem.Parser.ParseError;
 const ErrorHandler = rem.Parser.ErrorHandler;
 
@@ -68,7 +68,7 @@ state: State = .Data,
 return_state: State = undefined,
 character_reference_code: u32 = 0,
 current_tag_name: ArrayListUnmanaged(u8) = .{},
-current_tag_attributes: AttributeSet = .{},
+current_tag_attributes: Attributes = .{},
 current_tag_self_closing: bool = false,
 current_tag_type: enum { Start, End } = undefined,
 last_start_tag_name: []u8 = &[_]u8{},

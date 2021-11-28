@@ -120,7 +120,14 @@ pub const ErrorHandler = union(OnError) {
 };
 
 /// Create a new HTML5 parser.
-pub fn init(dom: *DomTree, input: []const u21, allocator: *Allocator, on_error: OnError, scripting: bool) !Self {
+pub fn init(
+    dom: *DomTree,
+    /// Must not be freed while being used by the parser.
+    input: []const u21,
+    allocator: *Allocator,
+    on_error: OnError,
+    scripting: bool,
+) !Self {
     const document = try dom.makeDocument();
 
     const token_sink = try allocator.create(ArrayList(Token));
@@ -150,6 +157,7 @@ pub fn init(dom: *DomTree, input: []const u21, allocator: *Allocator, on_error: 
 pub fn initFragment(
     dom: *DomTree,
     context: *Element,
+    /// Must not be freed while being used by the parser.
     input: []const u21,
     allocator: *Allocator,
     on_error: OnError,
@@ -209,15 +217,11 @@ pub fn initFragment(
     }
 
     // Step 9
-    const should_be_html_integration_point = switch (context.element_type) {
-        .svg_foreign_object, .svg_desc, .svg_title => true,
-        .mathml_annotation_xml => blk: {
-            const eql = std.ascii.eqlIgnoreCase;
-            const encoding = context.attributes.get("encoding") orelse break :blk false;
-            break :blk eql(encoding, "text/html") or eql(encoding, "application/xhtml+xml");
-        },
-        else => false,
-    };
+    const should_be_html_integration_point = if (context.element_type == .mathml_annotation_xml) blk: {
+        const eql = rem.util.eqlIgnoreCase2;
+        const encoding = context.attributes.get("encoding") orelse break :blk false;
+        break :blk eql(encoding, "text/html") or eql(encoding, "application/xhtml+xml");
+    } else false;
     if (should_be_html_integration_point) try dom.registerHtmlIntegrationPoint(context);
 
     // Step 10
@@ -257,16 +261,29 @@ pub fn deinit(self: *Self) void {
 /// Runs the tokenization and tree construction steps to completion.
 pub fn run(self: *Self) !void {
     const tokens: *ArrayList(Token) = self.tokenizer.tokens;
-    while (self.tokenizer.run(&self.input) catch |err| {
-        if (err == error.AbortParsing) self.abort();
-        return err;
+    while (self.tokenizer.run(&self.input) catch |err| switch (err) {
+        error.AbortParsing => blk: {
+            self.abort();
+            break :blk false;
+        },
+        error.OutOfMemory,
+        error.Utf8CannotEncodeSurrogateHalf,
+        error.CodepointTooLarge,
+        => |e| return e,
     }) {
         if (tokens.items.len > 0) {
             var constructor_result: TreeConstructor.RunResult = undefined;
             for (tokens.items) |*token, i| {
-                constructor_result = self.constructor.run(token.*) catch |err| {
-                    if (err == error.AbortParsing) self.abort();
-                    return err;
+                constructor_result = self.constructor.run(token.*) catch |err| switch (err) {
+                    error.AbortParsing => {
+                        self.abort();
+                        break;
+                    },
+                    error.OutOfMemory,
+                    error.Utf8CannotEncodeSurrogateHalf,
+                    error.CodepointTooLarge,
+                    => |e| return e,
+                    error.DomException => @panic("TODO Handle DOM Exceptions"),
                 };
                 token.deinit(self.tokenizer.allocator);
                 assert(constructor_result.new_tokenizer_state == null or i == tokens.items.len - 1);
