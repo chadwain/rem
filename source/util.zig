@@ -15,7 +15,7 @@ const Document = rem.dom.Document;
 const Element = rem.dom.Element;
 const CharacterData = rem.dom.CharacterData;
 
-pub fn freeStringHashMap(map: *StringHashMapUnmanaged([]u8), allocator: *Allocator) void {
+pub fn freeStringHashMap(map: *StringHashMapUnmanaged([]u8), allocator: Allocator) void {
     var iterator = map.iterator();
     while (iterator.next()) |attr| {
         allocator.free(attr.key_ptr.*);
@@ -24,7 +24,7 @@ pub fn freeStringHashMap(map: *StringHashMapUnmanaged([]u8), allocator: *Allocat
     map.deinit(allocator);
 }
 
-pub fn freeStringHashMapConst(map: *StringHashMapUnmanaged([]const u8), allocator: *Allocator) void {
+pub fn freeStringHashMapConst(map: *StringHashMapUnmanaged([]const u8), allocator: Allocator) void {
     var iterator = map.iterator();
     while (iterator.next()) |attr| {
         allocator.free(attr.key_ptr.*);
@@ -114,7 +114,7 @@ pub fn utf8DecodeStringComptime(comptime string: []const u8) [utf8DecodeStringCo
     return result;
 }
 
-pub fn printDocument(writer: anytype, document: *const Document, dom: *const Dom, allocator: *Allocator) !void {
+pub fn printDocument(writer: anytype, document: *const Document, dom: *const Dom, allocator: Allocator) !void {
     try std.fmt.format(writer, "Document: {s}\n", .{@tagName(document.quirks_mode)});
 
     try printDocumentCdatas(writer, document, 0);

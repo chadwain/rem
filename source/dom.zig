@@ -19,7 +19,7 @@ pub const DomException = enum {
 };
 
 pub const Dom = struct {
-    allocator: *Allocator,
+    allocator: Allocator,
 
     /// For elements whose local name cannot be determined by looking at its element_type.
     /// This does not take precedence over looking at element_type.
@@ -141,7 +141,7 @@ pub const Document = struct {
         limited_quirks,
     };
 
-    fn deinit(self: *Document, allocator: *Allocator) void {
+    fn deinit(self: *Document, allocator: Allocator) void {
         self.cdata.deinit(allocator);
     }
 };
@@ -151,7 +151,7 @@ pub const DocumentType = struct {
     publicId: []u8,
     systemId: []u8,
 
-    fn init(allocator: *Allocator, doctype_name: ?[]const u8, public_identifier: ?[]const u8, system_identifier: ?[]const u8) !DocumentType {
+    fn init(allocator: Allocator, doctype_name: ?[]const u8, public_identifier: ?[]const u8, system_identifier: ?[]const u8) !DocumentType {
         const name = doctype_name orelse "";
         const publicId = public_identifier orelse "";
         const systemId = system_identifier orelse "";
@@ -172,7 +172,7 @@ pub const DocumentType = struct {
         return result;
     }
 
-    fn deinit(self: *DocumentType, allocator: *Allocator) void {
+    fn deinit(self: *DocumentType, allocator: Allocator) void {
         const memory = self.name.ptr[0 .. self.name.len + self.publicId.len + self.systemId.len];
         allocator.free(memory);
     }
@@ -743,7 +743,7 @@ pub const Element = struct {
     attributes: ElementAttributes,
     children: ArrayListUnmanaged(ElementOrCharacterData),
 
-    pub fn deinit(self: *Element, allocator: *Allocator) void {
+    pub fn deinit(self: *Element, allocator: Allocator) void {
         var attr_it = self.attributes.iterator();
         while (attr_it.next()) |attr| {
             allocator.free(attr.key_ptr.*);
@@ -761,7 +761,7 @@ pub const Element = struct {
         return self.element_type.toLocalName() orelse dom.local_names.get(self) orelse unreachable;
     }
 
-    pub fn addAttribute(self: *Element, allocator: *Allocator, key: []const u8, value: []const u8) !void {
+    pub fn addAttribute(self: *Element, allocator: Allocator, key: []const u8, value: []const u8) !void {
         const key_copy = try allocator.dupe(u8, key);
         errdefer allocator.free(key_copy);
         const value_copy = try allocator.dupe(u8, value);
@@ -769,7 +769,7 @@ pub const Element = struct {
         try self.attributes.putNoClobber(allocator, key_copy, value_copy);
     }
 
-    pub fn addAttributeNoReplace(self: *Element, allocator: *Allocator, key: []const u8, value: []const u8) !void {
+    pub fn addAttributeNoReplace(self: *Element, allocator: Allocator, key: []const u8, value: []const u8) !void {
         if (!self.attributes.contains(key)) {
             return self.addAttribute(allocator, key, value);
         }
@@ -807,18 +807,18 @@ pub const CharacterData = struct {
     data: ArrayListUnmanaged(u8) = .{},
     interface: CharacterDataInterface,
 
-    fn init(allocator: *Allocator, data: []const u8, interface: CharacterDataInterface) !CharacterData {
+    fn init(allocator: Allocator, data: []const u8, interface: CharacterDataInterface) !CharacterData {
         var result = CharacterData{ .interface = interface };
         try result.data.appendSlice(allocator, data);
         return result;
     }
 
-    fn deinit(self: *CharacterData, allocator: *Allocator) void {
+    fn deinit(self: *CharacterData, allocator: Allocator) void {
         self.data.deinit(allocator);
     }
 
     // TODO: Move this function to mutation.
-    pub fn append(self: *CharacterData, allocator: *Allocator, data: []const u8) !void {
+    pub fn append(self: *CharacterData, allocator: Allocator, data: []const u8) !void {
         try self.data.appendSlice(allocator, data);
     }
 };

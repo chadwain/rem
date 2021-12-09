@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const ArrayList = std.ArrayList;
+const Allocator = std.mem.Allocator;
 
 const Node = struct {
     children: ArrayList(Entry),
@@ -16,7 +17,7 @@ const Node = struct {
         is_match: bool,
         characters: []const u8,
 
-        fn getOrCreateChildNode(entry: *Entry, al: *std.mem.Allocator) !*Node {
+        fn getOrCreateChildNode(entry: *Entry, al: Allocator) !*Node {
             if (entry.node == null) {
                 entry.node = try al.create(Node);
                 entry.node.?.* = .{ .children = ArrayList(Entry).init(al), .input = ArrayList(Item).init(al) };
@@ -75,7 +76,7 @@ const Item = struct {
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const al = &arena.allocator;
+    const al = arena.allocator();
 
     const data = blk: {
         const file = try std.fs.cwd().openFile("tools/named_character_references.json", .{});
@@ -107,7 +108,7 @@ pub fn main() !void {
     try writer.writeAll(output);
 }
 
-fn createTree(al: *std.mem.Allocator, node: *Node) error{OutOfMemory}!void {
+fn createTree(al: Allocator, node: *Node) error{OutOfMemory}!void {
     for (node.input.items) |i| {
         const key = i.name[0];
         const entry = try node.getOrCreateEntry(key);
@@ -126,7 +127,7 @@ fn createTree(al: *std.mem.Allocator, node: *Node) error{OutOfMemory}!void {
     }
 }
 
-fn render(node: *Node, al: *std.mem.Allocator) ![]u8 {
+fn render(node: *Node, al: Allocator) ![]u8 {
     var output = ArrayList(u8).init(al);
     errdefer output.deinit();
     var writer = output.writer();

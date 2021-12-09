@@ -30,6 +30,7 @@
 const std = @import("std");
 const testing = std.testing;
 const ArrayList = std.ArrayList;
+const Allocator = std.mem.Allocator;
 const Progress = std.Progress;
 
 const rem = @import("rem");
@@ -100,14 +101,15 @@ test "unicode chars problematic" {
 fn runTestFile(file_path: []const u8) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(!gpa.deinit());
+    const gpa_allocator = gpa.allocator();
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    var allocator = &arena.allocator;
+    var arena_allocator = arena.allocator();
 
-    var contents = try std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize));
-    defer allocator.free(contents);
-    var parser = std.json.Parser.init(allocator, false);
+    var contents = try std.fs.cwd().readFileAlloc(arena_allocator, file_path, std.math.maxInt(usize));
+    defer arena_allocator.free(contents);
+    var parser = std.json.Parser.init(arena_allocator, false);
     defer parser.deinit();
     var tree = try parser.parse(contents);
     defer tree.deinit();
@@ -135,22 +137,22 @@ fn runTestFile(file_path: []const u8) !void {
         prog_task.activate();
 
         const double_escaped = if (test_obj.Object.get("doubleEscaped")) |de| de.Bool else false;
-        const input = try getStringDecoded(test_obj.Object.get("input").?.String, allocator, double_escaped);
-        defer allocator.free(input);
-        const expected_tokens = try parseOutput(allocator, test_obj.Object.get("output").?.Array, double_escaped);
+        const input = try getStringDecoded(test_obj.Object.get("input").?.String, arena_allocator, double_escaped);
+        defer arena_allocator.free(input);
+        const expected_tokens = try parseOutput(arena_allocator, test_obj.Object.get("output").?.Array, double_escaped);
         defer expected_tokens.deinit();
         const expected_errors = blk: {
             if (test_obj.Object.get("errors")) |errors_obj| {
-                break :blk try parseErrors(&arena.allocator, errors_obj.Array);
+                break :blk try parseErrors(arena_allocator, errors_obj.Array);
             } else {
-                break :blk std.ArrayList(ErrorInfo).init(allocator);
+                break :blk std.ArrayList(ErrorInfo).init(arena_allocator);
             }
         };
         defer expected_errors.deinit();
         const last_start_tag_name = if (test_obj.Object.get("lastStartTag")) |lastStartTagObj| lastStartTagObj.String else "";
 
         for (states[0..num_states]) |state| {
-            runTest(&gpa.allocator, input, expected_tokens.items, expected_errors.items, state, last_start_tag_name) catch |err| {
+            runTest(gpa_allocator, input, expected_tokens.items, expected_errors.items, state, last_start_tag_name) catch |err| {
                 std.debug.print("Test \"{s}\" with initial state \"{s}\" failed\n", .{ description, @tagName(state) });
                 return err;
             };
@@ -164,7 +166,7 @@ fn runTestFile(file_path: []const u8) !void {
 }
 
 fn runTest(
-    allocator: *std.mem.Allocator,
+    allocator: Allocator,
     input: []const u21,
     expected_tokens: []Token,
     expected_errors: []ErrorInfo,
@@ -221,7 +223,7 @@ fn runTest(
     }
 }
 
-fn parseOutput(allocator: *std.mem.Allocator, outputs: anytype, double_escaped: bool) !std.ArrayList(Token) {
+fn parseOutput(allocator: Allocator, outputs: anytype, double_escaped: bool) !std.ArrayList(Token) {
     var tokens = try std.ArrayList(Token).initCapacity(allocator, outputs.items.len);
     for (outputs.items) |output_obj| {
         const output_array = output_obj.Array.items;
@@ -286,7 +288,7 @@ fn parseOutput(allocator: *std.mem.Allocator, outputs: anytype, double_escaped: 
     return tokens;
 }
 
-pub fn parseErrors(allocator: *std.mem.Allocator, errors: anytype) !std.ArrayList(ErrorInfo) {
+pub fn parseErrors(allocator: Allocator, errors: anytype) !std.ArrayList(ErrorInfo) {
     var error_infos = try std.ArrayList(ErrorInfo).initCapacity(allocator, errors.items.len);
     for (errors.items) |error_obj| {
         const err_string = error_obj.Object.get("code").?.String;
@@ -401,7 +403,7 @@ const ErrorInfo = struct {
     }
 };
 
-fn getString(string: []const u8, allocator: *std.mem.Allocator, double_escaped: bool) ![]u8 {
+fn getString(string: []const u8, allocator: Allocator, double_escaped: bool) ![]u8 {
     if (!double_escaped) {
         return allocator.dupe(u8, string);
     } else {
@@ -409,7 +411,7 @@ fn getString(string: []const u8, allocator: *std.mem.Allocator, double_escaped: 
     }
 }
 
-fn getStringDecoded(string: []const u8, allocator: *std.mem.Allocator, double_escaped: bool) ![]u21 {
+fn getStringDecoded(string: []const u8, allocator: Allocator, double_escaped: bool) ![]u21 {
     if (!double_escaped) {
         var it = (try std.unicode.Utf8View.init(string)).iterator();
         var list = std.ArrayList(u21).init(allocator);
@@ -423,7 +425,7 @@ fn getStringDecoded(string: []const u8, allocator: *std.mem.Allocator, double_es
     }
 }
 
-fn doubleEscape(allocator: *std.mem.Allocator, string: []const u8) ![]u8 {
+fn doubleEscape(allocator: Allocator, string: []const u8) ![]u8 {
     var result = std.ArrayList(u8).init(allocator);
     errdefer result.deinit();
     var state: enum { Data, Backslash, Unicode } = .Data;
@@ -464,7 +466,7 @@ fn doubleEscape(allocator: *std.mem.Allocator, string: []const u8) ![]u8 {
     return result.toOwnedSlice();
 }
 
-fn decodeDoubleEscape(allocator: *std.mem.Allocator, string: []const u8) ![]u21 {
+fn decodeDoubleEscape(allocator: Allocator, string: []const u8) ![]u21 {
     var result = std.ArrayList(u21).init(allocator);
     errdefer result.deinit();
     var state: enum { Data, Backslash, Unicode } = .Data;

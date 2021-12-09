@@ -89,14 +89,14 @@ adjusted_current_node_is_not_in_html_namespace: bool = false,
 reconsumed_input_char: ?u21 = undefined,
 should_reconsume: bool = false,
 reached_eof: bool = false,
-allocator: *Allocator,
+allocator: Allocator,
 
 tokens: *ArrayList(Token),
 error_handler: *ErrorHandler,
 
 /// Create a new HTML5 tokenizer.
 pub fn init(
-    allocator: *Allocator,
+    allocator: Allocator,
     token_sink: *ArrayList(Token),
     error_handler: *ErrorHandler,
 ) Self {
@@ -105,7 +105,7 @@ pub fn init(
 
 /// Create a new HTML5 tokenizer, and change to a particular state.
 pub fn initState(
-    allocator: *Allocator,
+    allocator: Allocator,
     state: State,
     token_sink: *ArrayList(Token),
     error_handler: *ErrorHandler,

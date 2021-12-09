@@ -6,7 +6,7 @@ rem is an HTML5 parser written in [Zig](https://ziglang.org).
 - [x] An HTML5 parser consisting of a tokenizer (complete) and a tree constructor (works "well enough")
 - [x] A minimal DOM implementation
 - [x] HTML fragment parsing
-- [x] Tested by [html5lib-tests](https://github.com/html5lib/html5lib-tests)
+- [x] Tested by [html5lib-tests](https://github.com/chwayne/html5lib-tests)
 
 ### Things to be improved
 - [ ] Better DOM functionality

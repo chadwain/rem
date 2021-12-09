@@ -249,7 +249,7 @@ const Test = struct {
     const ScriptOption = enum { on, off, both };
 };
 
-fn createTest(test_string: *[]const u8, allocator: *Allocator) !Test {
+fn createTest(test_string: *[]const u8, allocator: Allocator) !Test {
     var lines = std.mem.split(u8, test_string.*, "\n");
     defer test_string.* = lines.rest();
     var section = lines.next().?;
@@ -328,7 +328,7 @@ fn createTest(test_string: *[]const u8, allocator: *Allocator) !Test {
     };
 }
 
-fn parseDom(lines: *std.mem.SplitIterator(u8), context_element_type: ?ElementType, allocator: *Allocator) !Expected {
+fn parseDom(lines: *std.mem.SplitIterator(u8), context_element_type: ?ElementType, allocator: Allocator) !Expected {
     var stack = ArrayList(*Element).init(allocator);
     defer stack.deinit();
 
@@ -512,7 +512,7 @@ fn parseAttribute(dom: *Dom, stack: *ArrayList(*Element), data: []const u8, dept
     }
 }
 
-fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
+fn runTest(t: Test, allocator: Allocator, scripting: bool) !void {
     const input = input: {
         var list = ArrayList(u21).init(allocator);
         errdefer list.deinit();
@@ -551,7 +551,7 @@ fn runTest(t: Test, allocator: *Allocator, scripting: bool) !void {
     }
 }
 
-fn deeplyCompareDocuments(allocator: *Allocator, doc1: *const Document, doc2: *const Document) !void {
+fn deeplyCompareDocuments(allocator: Allocator, doc1: *const Document, doc2: *const Document) !void {
     //try expectEqual(doc1.quirks_mode, doc2.quirks_mode);
     comptime var i = 0;
     inline while (i < doc1.cdata_endpoints.len) : (i += 1) {
@@ -572,7 +572,7 @@ fn deeplyCompareDocuments(allocator: *Allocator, doc1: *const Document, doc2: *c
     }
 }
 
-fn deeplyCompareElements(allocator: *Allocator, element1: *const Element, element2: *const Element) !void {
+fn deeplyCompareElements(allocator: Allocator, element1: *const Element, element2: *const Element) !void {
     const ElementPair = struct {
         e1: *const Element,
         e2: *const Element,

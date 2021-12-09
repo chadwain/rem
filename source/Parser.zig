@@ -25,7 +25,7 @@ const ArrayList = std.ArrayList;
 tokenizer: Tokenizer,
 constructor: TreeConstructor,
 input: []const u21,
-allocator: *Allocator,
+allocator: Allocator,
 
 const Self = @This();
 
@@ -123,7 +123,7 @@ pub fn init(
     dom: *Dom,
     /// Must not be freed while being used by the parser.
     input: []const u21,
-    allocator: *Allocator,
+    allocator: Allocator,
     on_error: OnError,
     scripting: bool,
 ) !Self {
@@ -158,7 +158,7 @@ pub fn initFragment(
     context: *Element,
     /// Must not be freed while being used by the parser.
     input: []const u21,
-    allocator: *Allocator,
+    allocator: Allocator,
     on_error: OnError,
     scripting: bool,
     // Must be the same "quirks mode" as the node document of the context.

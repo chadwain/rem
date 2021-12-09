@@ -72,7 +72,7 @@ test "Tree constructor usage" {
 pub const TreeConstructor = struct {
     dom: *Dom,
     document: *Document,
-    allocator: *Allocator,
+    allocator: Allocator,
     error_handler: *ErrorHandler,
 
     fragment_context: ?*Element,
@@ -121,7 +121,7 @@ pub const TreeConstructor = struct {
     };
 
     /// Create a new HTML5 tree constructor.
-    pub fn init(dom: *Dom, document: *Document, allocator: *Allocator, error_handler: *ErrorHandler, args: Arguments) TreeConstructor {
+    pub fn init(dom: *Dom, document: *Document, allocator: Allocator, error_handler: *ErrorHandler, args: Arguments) TreeConstructor {
         return TreeConstructor{
             .dom = dom,
             .document = document,

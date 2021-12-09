@@ -45,7 +45,7 @@ pub const Token = union(enum) {
     character: TokenCharacter,
     eof: TokenEOF,
 
-    pub fn deinit(self: *Token, allocator: *Allocator) void {
+    pub fn deinit(self: *Token, allocator: Allocator) void {
         switch (self.*) {
             .doctype => |d| {
                 if (d.name) |name| allocator.free(name);
@@ -72,7 +72,7 @@ pub const Token = union(enum) {
         }
     }
 
-    pub fn copy(self: Token, allocator: *Allocator) !Token {
+    pub fn copy(self: Token, allocator: Allocator) !Token {
         switch (self) {
             .doctype => |d| {
                 const name = if (d.name) |s| try allocator.dupe(u8, s) else null;
