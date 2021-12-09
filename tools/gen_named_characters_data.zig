@@ -74,6 +74,8 @@ const Item = struct {
 };
 
 pub fn main() !void {
+    std.debug.print("Generating named character reference data.\n", .{});
+
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const al = arena.allocator();
@@ -102,7 +104,7 @@ pub fn main() !void {
     const output = try render(&node, al);
     defer al.free(output);
 
-    var out_file = try std.fs.cwd().createFile("tools/named_characters_trie.zig", .{});
+    var out_file = try std.fs.cwd().createFile("tools/named_characters_data.zig", .{});
     defer out_file.close();
     var writer = out_file.writer();
     try writer.writeAll(output);

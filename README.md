@@ -31,8 +31,6 @@ There is also a [GitLab mirror](https://gitlab.com/chwayne/rem).
 There are no dependencies other than a Zig compiler. You should use the latest version of Zig that is available.
 
 ## Use the code
-Before using rem, you must run `zig build gen-named-characters-trie`. This creates `tools/named_characters_trie.zig`, which has some data that is required for the parser to work. This only needs to be done once.
-
 Here's an example of using the parser (you can also see the output of this program by running `zig build example`).
 
 ```zig
@@ -67,8 +65,6 @@ pub fn main() !u8 {
 ```
 
 ## Test the code
-Note: Before running any tests, be sure that you have already done `zig build gen-named-characters-trie`.
-
 rem uses (a fork of) [html5lib-tests](https://github.com/html5lib/html5lib-tests) as a test suite. Specifically, it tests against the 'tokenizer' and 'tree-construction' tests from that suite. 
 
 `zig build test-tokenizer` will run the 'tokenizer' tests.
