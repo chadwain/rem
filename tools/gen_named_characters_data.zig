@@ -190,7 +190,7 @@ fn render(node: *Node, al: Allocator) ![]u8 {
     try writeKeys(writer, node, 1);
     try writeValues(writer, node, 1);
     try writeChildren(writer, node, 1);
-    try writer.writeAll("};");
+    try writer.writeAll("};\n");
 
     return output.toOwnedSlice();
 }
@@ -198,12 +198,16 @@ fn render(node: *Node, al: Allocator) ![]u8 {
 fn writeKeys(writer: anytype, node: *Node, indent: usize) ArrayList(u8).Writer.Error!void {
     try writeIndentation(writer, indent);
     try writer.writeAll(".keys = &[_]u8{");
+    const len = node.children.items.len;
+    if (len > 1) try writer.writeByte(' ');
     for (node.children.items) |c, index| {
         try writer.writeAll("\'");
         try writer.writeAll(&.{c.key});
         try writer.writeAll("\'");
-        if (index != node.children.items.len - 1) {
+        if (index != len - 1) {
             try writer.writeAll(", ");
+        } else if (len > 1) {
+            try writer.writeByte(' ');
         }
     }
     try writer.writeAll("},\n");
@@ -212,22 +216,29 @@ fn writeKeys(writer: anytype, node: *Node, indent: usize) ArrayList(u8).Writer.E
 fn writeValues(writer: anytype, node: *Node, indent: usize) ArrayList(u8).Writer.Error!void {
     try writeIndentation(writer, indent);
     try writer.writeAll(".values = &[_]Value{");
+    if (node.children.items.len > 1) try writer.writeByte(' ');
     for (node.children.items) |c, index| {
         try writer.writeAll(".{");
         if (c.is_match) {
             const len1 = std.unicode.utf8ByteSequenceLength(c.characters[0]) catch unreachable;
-            try writer.writeAll("'\\u{");
-            try std.fmt.format(writer, "{X}", .{std.unicode.utf8Decode(c.characters[0..len1]) catch unreachable});
             if (c.characters.len > len1) {
                 const len2 = std.unicode.utf8ByteSequenceLength(c.characters[len1]) catch unreachable;
-                try writer.writeAll("}','\\u{");
+                try writer.writeAll(" '\\u{");
+                try std.fmt.format(writer, "{X}", .{std.unicode.utf8Decode(c.characters[0..len1]) catch unreachable});
+                try writer.writeAll("}', '\\u{");
                 try std.fmt.format(writer, "{X}", .{std.unicode.utf8Decode(c.characters[len1 .. len1 + len2]) catch unreachable});
+                try writer.writeAll("}' ");
+            } else {
+                try writer.writeAll("'\\u{");
+                try std.fmt.format(writer, "{X}", .{std.unicode.utf8Decode(c.characters[0..len1]) catch unreachable});
+                try writer.writeAll("}'");
             }
-            try writer.writeAll("}'");
         }
         try writer.writeAll("}");
         if (index != node.children.items.len - 1) {
             try writer.writeAll(", ");
+        } else if (node.children.items.len > 1) {
+            try writer.writeByte(' ');
         }
     }
     try writer.writeAll("},\n");
