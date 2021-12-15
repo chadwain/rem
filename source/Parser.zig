@@ -314,7 +314,7 @@ pub fn getDocument(self: Self) *Document {
 pub fn errors(self: Self) []const ParseError {
     return switch (self.tokenizer.error_handler.*) {
         .ignore => &[0]ParseError{},
-        .abort => |err| if (err) |e| &[1]ParseError{e} else &[0]ParseError{},
+        .abort => |err| if (err) |*e| @ptrCast([*]const ParseError, e)[0..1] else &[0]ParseError{},
         .report => |list| list.items,
     };
 }
