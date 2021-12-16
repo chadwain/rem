@@ -6,14 +6,14 @@
 const std = @import("std");
 
 pub fn build(b: *std.build.Builder) void {
-    const named_characters_trie_pkg = std.build.Pkg{
+    const named_characters_data_pkg = std.build.Pkg{
         .name = "named-characters-data",
         .path = .{ .path = "tools/named_characters_data.zig" },
     };
     const rem_pkg = std.build.Pkg{
         .name = "rem",
         .path = .{ .path = "rem.zig" },
-        .dependencies = &.{named_characters_trie_pkg},
+        .dependencies = &.{named_characters_data_pkg},
     };
 
     const mode = b.standardReleaseOptions();
@@ -29,13 +29,13 @@ pub fn build(b: *std.build.Builder) void {
     lib.setBuildMode(mode);
     lib.setTarget(target);
     lib.install();
-    lib.addPackage(named_characters_trie_pkg);
+    lib.addPackage(named_characters_data_pkg);
     if (do_gen_char_data) b.default_step.dependOn(&run_gen_char_data.step);
 
     const lib_tests = b.addTest("rem.zig");
     lib_tests.setBuildMode(mode);
     lib_tests.setTarget(target);
-    lib_tests.addPackage(named_characters_trie_pkg);
+    lib_tests.addPackage(named_characters_data_pkg);
     if (do_gen_char_data) lib_tests.step.dependOn(&run_gen_char_data.step);
     const lib_tests_step = b.step("test", "Run library tests");
     lib_tests_step.dependOn(&lib_tests.step);
