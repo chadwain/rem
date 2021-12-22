@@ -657,10 +657,7 @@ fn findNamedCharacterReference(self: *Self, input: *[]const u21) !named_characte
 }
 
 fn characterReferenceCodeAddDigit(self: *Self, base: u32, digit: u32) void {
-    var overflow = false;
-    overflow = overflow or @mulWithOverflow(u32, self.character_reference_code, base, &self.character_reference_code);
-    overflow = overflow or @addWithOverflow(u32, self.character_reference_code, digit, &self.character_reference_code);
-    if (overflow) self.character_reference_code = std.math.maxInt(u32);
+    self.character_reference_code = self.character_reference_code *| base +| digit;
 }
 
 fn codepointFromCharacterReferenceCode(self: *Self) u21 {
