@@ -116,7 +116,7 @@ fn runTestFile(file_path: []const u8) !void {
 
     var tests = tree.root.Object.get("tests").?.Array;
     var progress = Progress{};
-    const prog_root = try progress.start("", tests.items.len);
+    const prog_root = progress.start("", tests.items.len);
 
     for (tests.items) |test_obj| {
         const description = test_obj.Object.get("description").?.String;

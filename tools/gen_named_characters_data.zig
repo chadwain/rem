@@ -144,14 +144,14 @@ fn render(node: *Node, al: Allocator) ![]u8 {
         \\        .{
         \\            .name = "0",
         \\            .field_type = ?u21,
-        \\            .default_value = @as(?u21, null),
+        \\            .default_value = @as(*const anyopaque, &@as(?u21, null)),
         \\            .is_comptime = false,
         \\            .alignment = @alignOf(?u21),
         \\        },
         \\        .{
         \\            .name = "1",
         \\            .field_type = ?u21,
-        \\            .default_value = @as(?u21, null),
+        \\            .default_value = @as(*const anyopaque, &@as(?u21, null)),
         \\            .is_comptime = false,
         \\            .alignment = @alignOf(?u21),
         \\        },
