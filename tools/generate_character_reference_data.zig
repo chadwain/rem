@@ -3,6 +3,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+//! Expects as program arguments the path to JSON data, and the path to
+//! output the resulting zig file. Must be built with runtime safety enabled.
+
 const std = @import("std");
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
@@ -74,14 +77,20 @@ const Item = struct {
 };
 
 pub fn main() !void {
-    std.debug.print("Generating named character reference data.\n", .{});
-
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const al = arena.allocator();
 
+    const args = try std.process.argsAlloc(al);
+    defer std.process.argsFree(al, args);
+
+    const out_file_path = args[2];
+    const cwd = std.fs.cwd();
+    if (cwd.access(out_file_path, .{})) return else |_| {}
+
     const data = blk: {
-        const file = try std.fs.cwd().openFile("tools/named_character_references.json", .{});
+        const input_file = args[1];
+        const file = try std.fs.cwd().openFile(input_file, .{});
         defer file.close();
         break :blk try file.readToEndAlloc(al, std.math.maxInt(c_int));
     };
@@ -104,10 +113,12 @@ pub fn main() !void {
     const output = try render(&node, al);
     defer al.free(output);
 
-    var out_file = try std.fs.cwd().createFile("tools/named_characters_data.zig", .{});
+    var out_file = try cwd.createFile(out_file_path, .{});
     defer out_file.close();
     var writer = out_file.writer();
     try writer.writeAll(output);
+
+    std.debug.print("Generated character reference data at {s}\n", .{out_file_path});
 }
 
 fn createTree(al: Allocator, node: *Node) error{OutOfMemory}!void {
