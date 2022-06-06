@@ -48,7 +48,7 @@ test "Tokenizer usage" {
 
 const Self = @This();
 const rem = @import("../rem.zig");
-const named_characters_data = @import("named-characters-data");
+const named_characters_data = @import("./character_reference_data.zig");
 const Token = rem.token.Token;
 const Attributes = rem.token.TokenStartTag.Attributes;
 const ParseError = rem.Parser.ParseError;
@@ -141,7 +141,7 @@ pub fn deinit(self: *Self) void {
 /// It will shrink input by the amount of characters consumed.
 /// It will output 0 or more tokens to the token sink and 0 or more parse errors to the parse error sink.
 /// The memory taken up by these tokens and parse errors are owned by the user.
-/// 
+///
 /// Between every call to this function, the user must:
 ///     1. Change the tokenizer's state via setState, if appropriate.
 ///     2. Call setAdjustedCurrentNodeIsNotInHtmlNamespace with an appropriate value.
