@@ -8,7 +8,7 @@ const std = @import("std");
 pub fn build(builder: *std.build.Builder) void {
     const rem_pkg = std.build.Pkg{
         .name = "rem",
-        .path = .{ .path = "rem.zig" },
+        .source = .{ .path = "rem.zig" },
     };
 
     const mode = builder.standardReleaseOptions();

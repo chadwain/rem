@@ -177,7 +177,7 @@ fn render(node: *Node, al: Allocator) ![]u8 {
         \\    children: []const ?*const Node,
         \\
         \\    pub fn find(node: *const Node, key: u21) ?usize {
-        \\        const truncated = std.math.cast(u8, key) catch return null;
+        \\        const truncated = std.math.cast(u8, key) orelse return null;
         \\        return std.sort.binarySearch(u8, truncated, node.keys, {}, keyCmp);
         \\    }
         \\

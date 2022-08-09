@@ -5,12 +5,15 @@
 
 const std = @import("std");
 const rem = @import("rem");
-const allocator = std.testing.allocator;
 
 pub fn main() !u8 {
     const string = "<!doctype html><html><body>Click here to download more RAM!";
     // The string must be decoded before it can be passed to the parser.
     const input = &rem.util.utf8DecodeStringComptime(string);
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
     // Create the DOM in which the parsed Document will be created.
     var dom = rem.dom.Dom{ .allocator = allocator };
