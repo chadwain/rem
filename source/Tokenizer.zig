@@ -568,7 +568,7 @@ fn emitComment(self: *Self) !void {
 
 fn emitEOF(self: *Self) !void {
     self.reached_eof = true;
-    try self.tokens.append(Token{ .eof = .{} });
+    try self.tokens.append(Token{ .eof = {} });
 }
 
 fn emitCurrentTag(self: *Self) !void {
