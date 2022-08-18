@@ -155,14 +155,14 @@ fn render(node: *Node, al: Allocator) ![]u8 {
         \\        .{
         \\            .name = "0",
         \\            .field_type = ?u21,
-        \\            .default_value = @as(*const anyopaque, &@as(?u21, null)),
+        \\            .default_value = null,
         \\            .is_comptime = false,
         \\            .alignment = @alignOf(?u21),
         \\        },
         \\        .{
         \\            .name = "1",
         \\            .field_type = ?u21,
-        \\            .default_value = @as(*const anyopaque, &@as(?u21, null)),
+        \\            .default_value = null,
         \\            .is_comptime = false,
         \\            .alignment = @alignOf(?u21),
         \\        },
@@ -239,11 +239,15 @@ fn writeValues(writer: anytype, node: *Node, indent: usize) ArrayList(u8).Writer
                 try writer.writeAll("}', '\\u{");
                 try std.fmt.format(writer, "{X}", .{std.unicode.utf8Decode(c.characters[len1 .. len1 + len2]) catch unreachable});
                 try writer.writeAll("}' ");
-            } else {
+            } else if (c.characters.len == len1) {
                 try writer.writeAll("'\\u{");
                 try std.fmt.format(writer, "{X}", .{std.unicode.utf8Decode(c.characters[0..len1]) catch unreachable});
-                try writer.writeAll("}'");
+                try writer.writeAll("}', null");
+            } else {
+                try writer.writeAll("null, null");
             }
+        } else {
+            try writer.writeAll("null, null");
         }
         try writer.writeAll("}");
         if (index != node.children.items.len - 1) {
