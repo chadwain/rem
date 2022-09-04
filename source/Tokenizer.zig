@@ -568,7 +568,7 @@ fn emitComment(self: *Self) !void {
 
 fn emitEOF(self: *Self) !void {
     self.reached_eof = true;
-    try self.tokens.append(Token{ .eof = .{} });
+    try self.tokens.append(Token{ .eof = {} });
 }
 
 fn emitCurrentTag(self: *Self) !void {
@@ -626,7 +626,7 @@ fn findNamedCharacterReference(self: *Self, input: *[]const u21) !named_characte
     var node = named_characters_data.root;
     var input_copy = input.*;
     var character_reference_consumed_codepoints_count: usize = 1;
-    var last_matched_named_character_value = named_characters_data.Value{};
+    var last_matched_named_character_value = named_characters_data.Value{ null, null };
     while (true) {
         const next_char_info = advancePosition(input_copy);
         const character = next_char_info.character orelse break;
