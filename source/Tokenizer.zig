@@ -61,6 +61,8 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 const Allocator = std.mem.Allocator;
 
+const debug = @import("builtin").mode == .Debug;
+
 const REPLACEMENT_CHARACTER = '\u{FFFD}';
 const TREAT_AS_ANYTHING_ELSE = '\u{FFFF}';
 
@@ -88,7 +90,13 @@ adjusted_current_node_is_not_in_html_namespace: bool = false,
 
 reconsumed_input_char: ?u21 = undefined,
 should_reconsume: bool = false,
+previous_char_was_carriage_return: bool = false,
 reached_eof: bool = false,
+/// Stores codepoints that were read from the input stream but were not consumed.
+/// This buffer has a maximum length of 32, which is the length of the longest named character reference,
+/// ignoring the leading ampersand (namely '&CounterClockwiseContourIntegral;').
+replayed_characters: [32]u21 = undefined,
+replayed_characters_len: u6 = 0,
 allocator: Allocator,
 
 tokens: *ArrayList(Token),
@@ -243,79 +251,151 @@ pub const State = enum {
     NumericCharacterReferenceEnd,
 };
 
-/// Returns what would be the next input character in the input stream,
-/// as well as how many characters to remove from the front of the input stream.
-/// A value of `null` for character represents the "EOF" character.
-/// Does not modify the input stream.
-/// Implements §13.2.3.5 "Preprocessing the input stream" of the HTML standard.
-fn nextInputStreamChar(input: []const u21) struct { character: ?u21, num_removed: u2 } {
-    if (input.len == 0) return .{ .character = null, .num_removed = 0 };
-    var character = input[0];
-    var num_removed: u2 = 1;
-    if (character == '\r') {
-        character = '\n';
-        if (input.len > 1 and input[1] == '\n') {
-            num_removed = 2;
-        }
+fn consumeReplayedCharacters(self: *Self, count: u6) void {
+    for (self.replayed_characters[count..self.replayed_characters_len]) |c, i| {
+        self.replayed_characters[i] = c;
     }
-    return .{ .character = character, .num_removed = num_removed };
+    self.replayed_characters_len -= count;
 }
 
-/// Returns either the next input character in the input stream, or
-/// the previous input character to be reconsumed. In the former case,
-/// the character is removed from the input stream.
-fn nextInputChar(self: *Self, input: *[]const u21) !?u21 {
-    if (self.should_reconsume) {
-        self.should_reconsume = false;
-        return self.reconsumed_input_char;
-    } else {
-        const next_char_info = nextInputStreamChar(input.*);
-        self.reconsumed_input_char = next_char_info.character;
-        input.* = input.*[next_char_info.num_removed..];
-        if (next_char_info.character) |character| {
-            try self.checkInputCharacterForErrors(character);
+fn replayCharacters(self: *Self, codepoints: []const u21) void {
+    if (debug) {
+        if (codepoints.len <= self.replayed_characters_len) {
+            for (codepoints) |c, i| {
+                assert(self.replayed_characters[i] == c);
+            }
+        } else {
+            for (self.replayed_characters[0..self.replayed_characters_len]) |c, i| {
+                assert(codepoints[i] == c);
+            }
         }
-        return next_char_info.character;
+    }
+
+    if (codepoints.len > self.replayed_characters_len) {
+        for (codepoints[self.replayed_characters_len..]) |c, i| {
+            self.replayed_characters[self.replayed_characters_len + i] = c;
+        }
+        self.replayed_characters_len = @intCast(u6, codepoints.len);
+    }
+}
+
+/// Returns what would be the next input character in the input stream,
+/// taking into account that it could be a replayed character.
+/// A value of `null` represents the "EOF" character.
+fn nextInputStreamChar(self: *Self, input: *[]const u21, replayed_characters_index: *u6) ?u21 {
+    if (replayed_characters_index.* < self.replayed_characters_len) {
+        const character = self.replayed_characters[replayed_characters_index.*];
+        replayed_characters_index.* += 1;
+        return character;
+    } else {
+        if (input.*.len == 0) return null;
+        const character = input.*[0];
+        input.* = input.*[1..];
+        return character;
     }
 }
 
 /// Returns either the next input character in the input stream, or
 /// the previous input character to be reconsumed.
-fn peekInputChar(self: *Self, input: []const u21) ?u21 {
+/// Normalizes newlines according to §13.2.3.5 "Preprocessing the input stream" of the HTML standard.
+fn nextInputChar(self: *Self, input: *[]const u21) !?u21 {
+    if (self.should_reconsume) {
+        self.should_reconsume = false;
+        return self.reconsumed_input_char;
+    } else {
+        var replayed_characters_index: u6 = 0;
+        defer self.consumeReplayedCharacters(replayed_characters_index);
+
+        var next_char = self.nextInputStreamChar(input, &replayed_characters_index);
+
+        if (next_char) |character| {
+            if (character == '\n' and self.previous_char_was_carriage_return) {
+                next_char = self.nextInputStreamChar(input, &replayed_characters_index);
+            }
+        }
+
+        if (next_char) |*character| {
+            if (character.* == '\r') {
+                character.* = '\n';
+                self.previous_char_was_carriage_return = true;
+            } else {
+                self.previous_char_was_carriage_return = false;
+            }
+
+            try self.checkInputCharacterForErrors(character.*);
+        }
+
+        self.reconsumed_input_char = next_char;
+        return next_char;
+    }
+}
+
+/// Returns either the next input character in the input stream, or
+/// the previous input character to be reconsumed.
+/// Does not modify the state of the tokenizer.
+/// Normalizes newlines according to §13.2.3.5 "Preprocessing the input stream" of the HTML standard.
+fn peekInputChar(self: *Self, input: *[]const u21) ?u21 {
     if (self.should_reconsume) {
         return self.reconsumed_input_char;
     } else {
-        return nextInputStreamChar(input).character;
+        var replayed_characters_index: u6 = 0;
+        var replayed: []const u21 = &[_]u21{};
+        defer self.replayCharacters(replayed);
+
+        var next_char = self.nextInputStreamChar(input, &replayed_characters_index) orelse return null;
+        replayed = &[1]u21{next_char};
+
+        if (next_char == '\n' and self.previous_char_was_carriage_return) {
+            next_char = self.nextInputStreamChar(input, &replayed_characters_index) orelse return null;
+            replayed = &[2]u21{ '\n', next_char };
+        }
+
+        if (next_char == '\r') {
+            next_char = '\n';
+        }
+
+        return next_char;
     }
 }
 
 /// Scans the next characters in the input stream to see if they are equal to `string`.
-/// If so, consumes those characters and returns `true`. Otherwise, leaves the input stream
-/// unmodified and returns `false`.
-fn consumeCharsIfEql(input: *[]const u21, comptime string: []const u8) bool {
-    var num_removed: usize = 0;
-    for (rem.util.utf8DecodeStringComptime(string)) |character| {
-        const next_char_info = nextInputStreamChar(input.*[num_removed..]);
-        if (next_char_info.character == null or next_char_info.character.? != character) return false;
-        num_removed += next_char_info.num_removed;
-    }
-    input.* = input.*[num_removed..];
-    return true;
+/// If so, consumes those characters and returns `true`. Otherwise, adds any read characters
+/// to the list of replayed characters and returns `false`.
+fn consumeCharsIfEql(self: *Self, input: *[]const u21, comptime string: []const u8) bool {
+    comptime assert(string.len <= 7);
+    comptime assert(std.mem.indexOfScalar(u8, string, '\r') == null);
+    const decoded_string = rem.util.utf8DecodeStringComptime(string);
+    return consumeCharsIfEqlGeneric(self, input, &decoded_string, caseSensitiveEql);
 }
 
 /// Scans the next characters in the input stream to see if they are equal to `string` in
 /// a case-insensitive manner.
-/// If so, consumes those characters and returns `true`. Otherwise, leaves the input stream
-/// unmodified and returns `false`.
-fn consumeCharsIfCaseInsensitiveEql(input: *[]const u21, comptime string: []const u8) bool {
-    var num_removed: usize = 0;
-    for (rem.util.utf8DecodeStringComptime(string)) |character| {
-        const next_char_info = nextInputStreamChar(input.*[num_removed..]);
-        if (next_char_info.character == null or !caseInsensitiveEql(next_char_info.character.?, character)) return false;
-        num_removed += next_char_info.num_removed;
+/// If so, consumes those characters and returns `true`. Otherwise, adds any read characters
+/// to the list of replayed characters and returns `false`.
+fn consumeCharsIfCaseInsensitiveEql(self: *Self, input: *[]const u21, comptime string: []const u8) bool {
+    comptime assert(string.len <= 7);
+    comptime assert(std.mem.indexOfScalar(u8, string, '\r') == null);
+    const decoded_string = rem.util.utf8DecodeStringComptime(string);
+    return consumeCharsIfEqlGeneric(self, input, &decoded_string, caseInsensitiveEql);
+}
+
+fn consumeCharsIfEqlGeneric(self: *Self, input: *[]const u21, decoded_string: []const u21, comptime eqlFn: fn (u21, u21) bool) bool {
+    var read_characters: [7]u21 = undefined;
+    var read_characters_len: u6 = 0;
+
+    var replayed_characters_index: u6 = 0;
+    for (decoded_string) |character| {
+        const next_char = self.nextInputStreamChar(input, &replayed_characters_index) orelse break;
+        read_characters[read_characters_len] = next_char;
+        read_characters_len += 1;
+        if (!eqlFn(next_char, character)) break;
+    } else {
+        self.consumeReplayedCharacters(replayed_characters_index);
+        return true;
     }
-    input.* = input.*[num_removed..];
-    return true;
+
+    self.replayCharacters(read_characters[0..read_characters_len]);
+    return false;
 }
 
 /// Check if a character that was just taken from the input stream
@@ -636,16 +716,14 @@ fn flushCharacterReference(self: *Self) !void {
 
 fn findNamedCharacterReference(self: *Self, input: *[]const u21) !named_characters_data.Value {
     var node = named_characters_data.root;
-    var input_copy = input.*;
+    var replayed_characters_index: u6 = 0;
     var character_reference_consumed_codepoints_count: usize = 1;
     var last_matched_named_character_value = named_characters_data.Value{ null, null };
     while (true) {
-        const next_char_info = nextInputStreamChar(input_copy);
-        const character = next_char_info.character orelse break;
-        const key_index = node.find(character) orelse break;
+        const character = self.nextInputStreamChar(input, &replayed_characters_index) orelse break;
         try self.appendTempBuffer(character);
+        const key_index = node.find(character) orelse break;
 
-        input_copy = input_copy[next_char_info.num_removed..];
         if (node.child(key_index)) |c_node| {
             const new_value = node.value(key_index);
             if (new_value[0] != null) {
@@ -662,7 +740,8 @@ fn findNamedCharacterReference(self: *Self, input: *[]const u21) !named_characte
         }
     }
 
-    input.* = input.*[character_reference_consumed_codepoints_count - 1 ..];
+    self.consumeReplayedCharacters(std.math.min(replayed_characters_index, character_reference_consumed_codepoints_count));
+    self.replayCharacters(self.temp_buffer.items[character_reference_consumed_codepoints_count..]);
     self.temp_buffer.shrinkRetainingCapacity(character_reference_consumed_codepoints_count);
     // There is no need to check the consumed characters for errors (controls, surrogates, noncharacters)
     // beacuse we've just determined that they form a valid character reference.
@@ -1355,12 +1434,12 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .MarkupDeclarationOpen => {
-            if (consumeCharsIfEql(input, "--")) {
+            if (t.consumeCharsIfEql(input, "--")) {
                 t.createCommentToken();
                 t.setState(.CommentStart);
-            } else if (consumeCharsIfCaseInsensitiveEql(input, "DOCTYPE")) {
+            } else if (t.consumeCharsIfCaseInsensitiveEql(input, "DOCTYPE")) {
                 t.setState(.DOCTYPE);
-            } else if (consumeCharsIfEql(input, "[CDATA[")) {
+            } else if (t.consumeCharsIfEql(input, "[CDATA[")) {
                 if (t.adjustedCurrentNodeIsNotInHtmlNamespace()) {
                     t.setState(.CDATASection);
                 } else {
@@ -1609,9 +1688,9 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                         try t.emitDOCTYPE();
                     },
                     else => |c| {
-                        if (caseInsensitiveEql(c, 'P') and consumeCharsIfCaseInsensitiveEql(input, "UBLIC")) {
+                        if (caseInsensitiveEql(c, 'P') and t.consumeCharsIfCaseInsensitiveEql(input, "UBLIC")) {
                             t.setState(.AfterDOCTYPEPublicKeyword);
-                        } else if (caseInsensitiveEql(c, 'S') and consumeCharsIfCaseInsensitiveEql(input, "YSTEM")) {
+                        } else if (caseInsensitiveEql(c, 'S') and t.consumeCharsIfCaseInsensitiveEql(input, "YSTEM")) {
                             t.setState(.AfterDOCTYPESystemKeyword);
                         } else {
                             try t.parseError(.InvalidCharacterSequenceAfterDOCTYPEName);
@@ -1978,7 +2057,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             // NOTE: This is not exactly as the spec says, but should yield the same results.
             t.clearTempBuffer();
             try t.appendTempBuffer('&');
-            switch (t.peekInputChar(input.*) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch (t.peekInputChar(input) orelse TREAT_AS_ANYTHING_ELSE) {
                 '0'...'9', 'A'...'Z', 'a'...'z' => {
                     t.setState(.NamedCharacterReference);
                 },
@@ -2000,7 +2079,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             if (match_found) {
                 const historical_reasons = t.isPartOfAnAttribute() and
                     t.tempBufferLast() != ';' and
-                    switch (t.peekInputChar(input.*) orelse TREAT_AS_ANYTHING_ELSE) {
+                    switch (t.peekInputChar(input) orelse TREAT_AS_ANYTHING_ELSE) {
                     '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
                     else => false,
                 };
@@ -2226,6 +2305,10 @@ fn toLowercase(character: u21) u21 {
         'A'...'Z' => character + 0x20,
         else => unreachable,
     };
+}
+
+fn caseSensitiveEql(c1: u21, c2: u21) bool {
+    return c1 == c2;
 }
 
 fn caseInsensitiveEql(c1: u21, c2: u21) bool {

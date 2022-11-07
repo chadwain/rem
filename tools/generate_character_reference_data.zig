@@ -105,7 +105,9 @@ pub fn main() !void {
     defer list.deinit();
     var it = tree.root.Object.iterator();
     while (it.next()) |o| {
-        try list.append(.{ .name = o.key_ptr.*[1..], .characters = o.value_ptr.Object.get("characters").?.String });
+        const name = o.key_ptr.*[1..];
+        std.debug.assert(name.len <= 32);
+        try list.append(.{ .name = name, .characters = o.value_ptr.Object.get("characters").?.String });
     }
 
     var node = Node{ .children = ArrayList(Node.Entry).init(al), .input = list };
