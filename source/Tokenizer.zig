@@ -74,8 +74,7 @@ current_tag_attributes: Attributes = .{},
 current_tag_self_closing: bool = false,
 current_tag_type: enum { Start, End } = undefined,
 last_start_tag_name: []u8 = &[_]u8{},
-current_attribute_name: ArrayListUnmanaged(u8) = .{},
-current_attribute_value: ArrayListUnmanaged(u8) = .{},
+generic_buffer: ArrayListUnmanaged(u8) = .{},
 current_attribute_value_result_location: ?*[]const u8 = null,
 current_doctype_name: ArrayListUnmanaged(u8) = .{},
 current_doctype_public_identifier: ArrayListUnmanaged(u8) = .{},
@@ -136,8 +135,7 @@ pub fn deinit(self: *Self) void {
     }
     self.current_tag_attributes.deinit(self.allocator);
     self.allocator.free(self.last_start_tag_name);
-    self.current_attribute_name.deinit(self.allocator);
-    self.current_attribute_value.deinit(self.allocator);
+    self.generic_buffer.deinit(self.allocator);
     self.current_doctype_name.deinit(self.allocator);
     self.current_doctype_public_identifier.deinit(self.allocator);
     self.current_doctype_system_identifier.deinit(self.allocator);
@@ -488,8 +486,7 @@ fn createEndTagToken(self: *Self) void {
 }
 
 fn createAttribute(self: *Self) void {
-    assert(self.current_attribute_name.items.len == 0);
-    assert(self.current_attribute_value.items.len == 0);
+    assert(self.generic_buffer.items.len == 0);
 }
 
 fn createCommentToken(self: *Self) void {
@@ -538,17 +535,18 @@ fn resetCurrentTagName(self: *Self) void {
 fn appendCurrentAttributeName(self: *Self, character: u21) !void {
     var code_units: [4]u8 = undefined;
     const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.current_attribute_name.appendSlice(self.allocator, code_units[0..len]);
+    try self.generic_buffer.appendSlice(self.allocator, code_units[0..len]);
 }
 
 fn appendCurrentAttributeValue(self: *Self, character: u21) !void {
     var code_units: [4]u8 = undefined;
     const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.current_attribute_value.appendSlice(self.allocator, code_units[0..len]);
+    try self.generic_buffer.appendSlice(self.allocator, code_units[0..len]);
 }
 
 fn finishAttributeName(self: *Self) !void {
-    const name = self.current_attribute_name.toOwnedSlice(self.allocator);
+    const name = try self.allocator.dupe(u8, self.generic_buffer.items);
+    self.generic_buffer.clearRetainingCapacity();
     const get_result = self.current_tag_attributes.getOrPut(self.allocator, name) catch |err| {
         self.allocator.free(name);
         return err;
@@ -562,9 +560,9 @@ fn finishAttributeName(self: *Self) !void {
     }
 }
 
-fn finishAttributeValue(self: *Self) void {
-    const value = self.current_attribute_value.toOwnedSlice(self.allocator);
-    errdefer self.allocator.free(value);
+fn finishAttributeValue(self: *Self) !void {
+    const value = try self.allocator.dupe(u8, self.generic_buffer.items);
+    self.generic_buffer.clearRetainingCapacity();
     if (self.current_attribute_value_result_location) |ptr| {
         ptr.* = value;
         self.current_attribute_value_result_location = null;
@@ -610,25 +608,23 @@ fn clearTempBuffer(self: *Self) void {
 }
 
 fn emitDOCTYPE(self: *Self) !void {
-    var name = self.current_doctype_name.toOwnedSlice(self.allocator);
-    errdefer self.allocator.free(name);
+    const token = try self.tokens.addOne();
+
+    const name = self.current_doctype_name.toOwnedSlice(self.allocator);
     if (self.current_doctype_name_is_missing) assert(name.len == 0);
 
     const public_identifier = self.current_doctype_public_identifier.toOwnedSlice(self.allocator);
-    errdefer self.allocator.free(public_identifier);
     if (self.current_doctype_public_identifier_is_missing) assert(public_identifier.len == 0);
 
     const system_identifier = self.current_doctype_system_identifier.toOwnedSlice(self.allocator);
-    errdefer self.allocator.free(system_identifier);
     if (self.current_doctype_system_identifier_is_missing) assert(system_identifier.len == 0);
 
-    const token = Token{ .doctype = .{
+    token.* = Token{ .doctype = .{
         .name = if (self.current_doctype_name_is_missing) null else name,
         .public_identifier = if (self.current_doctype_public_identifier_is_missing) null else public_identifier,
         .system_identifier = if (self.current_doctype_system_identifier_is_missing) null else system_identifier,
         .force_quirks = self.current_doctype_force_quirks,
     } };
-    try self.tokens.append(token);
 
     self.current_doctype_name_is_missing = true;
     self.current_doctype_public_identifier_is_missing = true;
@@ -678,6 +674,7 @@ fn emitCurrentTag(self: *Self) !void {
             self.current_tag_attributes = .{};
         },
         .End => {
+            // TODO: Don't store any attributes in the first place
             if (self.current_tag_attributes.count() > 0) {
                 var iterator = self.current_tag_attributes.iterator();
                 while (iterator.next()) |attr| {
@@ -705,7 +702,7 @@ fn flushCharacterReference(self: *Self) !void {
         for (self.temp_buffer.items) |character| {
             var code_units: [4]u8 = undefined;
             const len = try std.unicode.utf8Encode(character, &code_units);
-            try self.current_attribute_value.appendSlice(self.allocator, code_units[0..len]);
+            try self.generic_buffer.appendSlice(self.allocator, code_units[0..len]);
         }
     } else {
         for (self.temp_buffer.items) |character| {
@@ -1313,7 +1310,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             if (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
                     '"' => {
-                        t.finishAttributeValue();
+                        try t.finishAttributeValue();
                         t.setState(.AfterAttributeValueQuoted);
                     },
                     '&' => t.toCharacterReferenceState(.AttributeValueDoubleQuoted),
@@ -1333,7 +1330,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             if (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
                     '\'' => {
-                        t.finishAttributeValue();
+                        try t.finishAttributeValue();
                         t.setState(.AfterAttributeValueQuoted);
                     },
                     '&' => t.toCharacterReferenceState(.AttributeValueSingleQuoted),
@@ -1352,12 +1349,12 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             if (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => {
-                        t.finishAttributeValue();
+                        try t.finishAttributeValue();
                         t.setState(.BeforeAttributeName);
                     },
                     '&' => t.toCharacterReferenceState(.AttributeValueUnquoted),
                     '>' => {
-                        t.finishAttributeValue();
+                        try t.finishAttributeValue();
                         t.setState(.Data);
                         try t.emitCurrentTag();
                     },
