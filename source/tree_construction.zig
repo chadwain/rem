@@ -92,7 +92,7 @@ pub const TreeConstructor = struct {
     form_element_pointer: ?*Element = null,
 
     pending_table_character_tokens: ArrayListUnmanaged(TokenCharacter) = .{},
-    pending_table_chars_contains_whitespace: bool = false,
+    pending_table_chars_contains_non_whitespace: bool = false,
 
     parser_cannot_change_the_mode: bool = false,
     is_iframe_srcdoc_document: bool = false,
@@ -1676,16 +1676,16 @@ fn clearTheStackBackToATableContext(c: *TreeConstructor) void {
 fn inTableText(c: *TreeConstructor, token: Token) !void {
     switch (token) {
         .character => |character| {
-            if (character.data == 0) {
+            if (isNull(character)) {
                 try parseError(c, .TreeConstructionError);
                 // Ignore the token.
             } else {
-                if (isWhitespace(character)) c.pending_table_chars_contains_whitespace = true;
+                if (!isWhitespace(character)) c.pending_table_chars_contains_non_whitespace = true;
                 try c.pending_table_character_tokens.append(c.allocator, character);
             }
         },
         else => {
-            if (c.pending_table_chars_contains_whitespace) {
+            if (c.pending_table_chars_contains_non_whitespace) {
                 try parseError(c, .TreeConstructionError);
                 c.foster_parenting = true;
                 for (c.pending_table_character_tokens.items) |character| {
@@ -1697,7 +1697,7 @@ fn inTableText(c: *TreeConstructor, token: Token) !void {
                     try insertCharacter(c, character);
                 }
             }
-            c.pending_table_chars_contains_whitespace = false;
+            c.pending_table_chars_contains_non_whitespace = false;
             c.pending_table_character_tokens.clearRetainingCapacity();
             reprocessInOriginalInsertionMode(c);
         },
