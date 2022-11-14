@@ -17,10 +17,10 @@ const Element = rem.dom.Element;
 const CharacterData = rem.dom.CharacterData;
 const ElementOrCharacterData = rem.dom.ElementOrCharacterData;
 
-pub const SuppressObservers = enum { Suppress, NoSuppress };
+pub const SuppressMutationEvents = enum { Suppress, NoSuppress };
 
 /// This is the DOM's append mutation algorithm, specialized for a Document parent and a DocumentType node.
-pub fn documentAppendDocumentType(dom: *Dom, document: *Document, doctype: *DocumentType, suppress: SuppressObservers) !void {
+pub fn documentAppendDocumentType(dom: *Dom, document: *Document, doctype: *DocumentType, suppress: SuppressMutationEvents) !void {
     // Ensure pre-insertion validity. Only step 6 of this algorithm applies.
     if (document.doctype != null or document.element != null) {
         return dom.exception(.HierarchyRequest);
@@ -41,7 +41,7 @@ pub fn documentAppendDocumentType(dom: *Dom, document: *Document, doctype: *Docu
 }
 
 /// This is the DOM's append mutation algorithm, specialized for a Document parent and an Element node.
-pub fn documentAppendElement(dom: *Dom, document: *Document, element: *Element, suppress: SuppressObservers) !void {
+pub fn documentAppendElement(dom: *Dom, document: *Document, element: *Element, suppress: SuppressMutationEvents) !void {
     // Ensure pre-insertion validity. Only step 6 of this algorithm applies.
     if (document.element != null) {
         return dom.exception(.HierarchyRequest);
@@ -67,7 +67,7 @@ pub fn documentAppendElement(dom: *Dom, document: *Document, element: *Element, 
 }
 
 /// This is the DOM's append mutation algorithm, specialized for a Document parent and a CharacterData node.
-pub fn documentAppendCdata(dom: *Dom, document: *Document, cdata: *CharacterData, suppress: SuppressObservers) !void {
+pub fn documentAppendCdata(dom: *Dom, document: *Document, cdata: *CharacterData, suppress: SuppressMutationEvents) !void {
     // Ensure pre-insertion validity. Only step 5 of this algorithm applies.
     if (cdata.interface == .text) {
         return dom.exception(.HierarchyRequest);
@@ -88,7 +88,7 @@ pub fn elementInsert(
     parent: *Element,
     child: ElementOrCharacterData,
     node: ElementOrCharacterData,
-    suppress: SuppressObservers,
+    suppress: SuppressMutationEvents,
 ) !void {
     // Insert node into parent before child.
     // TODO: Most of the steps in this algorithm have been skipped.
@@ -103,7 +103,7 @@ pub fn elementInsert(
 }
 
 /// This is the DOM's append mutation algorithm, specialized for an Element node parent.
-pub fn elementAppend(dom: *Dom, parent: *Element, node: ElementOrCharacterData, suppress: SuppressObservers) !void {
+pub fn elementAppend(dom: *Dom, parent: *Element, node: ElementOrCharacterData, suppress: SuppressMutationEvents) !void {
     // TODO: Ensure pre-insertion validity. Only step 2 of that algorithm applies.
     // TODO: Check if node is a host-including inclusive ancestor of parent.
 
@@ -120,7 +120,7 @@ pub fn elementAppend(dom: *Dom, parent: *Element, node: ElementOrCharacterData, 
     }
 }
 
-pub fn elementRemove(dom: *Dom, node: *Element, suppress: SuppressObservers) void {
+pub fn elementRemove(dom: *Dom, node: *Element, suppress: SuppressMutationEvents) void {
     // Remove node.
     // TODO: Most of the steps in this algorithm have been skipped.
     _ = dom;
