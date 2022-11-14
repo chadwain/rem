@@ -408,6 +408,9 @@ fn initial(c: *TreeConstructor, token: Token) !void {
                 try parseError(c, .TreeConstructionError);
             }
 
+            const doctype = try c.dom.makeDoctype(d.name, d.public_identifier, d.system_identifier);
+            try rem.dom.mutation.documentAppendDocumentType(c.dom, c.document, doctype, .Suppress);
+
             if (!c.is_iframe_srcdoc_document and !c.parser_cannot_change_the_mode) {
                 if (doctypeEnablesQuirks(d)) {
                     c.document.quirks_mode = .quirks;
@@ -416,8 +419,6 @@ fn initial(c: *TreeConstructor, token: Token) !void {
                 }
             }
 
-            const doctype = try c.dom.makeDoctype(d.name, d.public_identifier, d.system_identifier);
-            try rem.dom.mutation.documentAppendDocumentType(c.dom, c.document, doctype, .Suppress);
             changeTo(c, .BeforeHtml);
         },
         else => try initialAnythingElse(c),
