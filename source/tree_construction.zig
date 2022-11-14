@@ -244,20 +244,18 @@ pub fn resetInsertionModeAppropriately(c: *TreeConstructor) void {
         const node = if (last and c.fragment_context != null) c.fragment_context.? else c.open_elements.items[i - 1];
         switch (node.element_type) {
             .html_select => {
-                if (last) {
-                    changeTo(c, .InSelect);
-                    return;
-                }
-                var j = i - 1;
-                while (j != 0) : (j -= 1) {
-                    const ancestor = c.open_elements.items[j];
-                    switch (ancestor.element_type) {
-                        .html_template => break,
-                        .html_table => {
-                            changeTo(c, .InSelectInTable);
-                            return;
-                        },
-                        else => {},
+                if (!last) {
+                    var j = i - 1;
+                    while (j > 0) : (j -= 1) {
+                        const ancestor = c.open_elements.items[j - 1];
+                        switch (ancestor.element_type) {
+                            .html_template => break,
+                            .html_table => {
+                                changeTo(c, .InSelectInTable);
+                                return;
+                            },
+                            else => {},
+                        }
                     }
                 }
                 changeTo(c, .InSelect);
