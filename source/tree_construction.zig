@@ -313,7 +313,7 @@ pub fn resetInsertionModeAppropriately(c: *TreeConstructor) void {
                 if (c.head_element_pointer == null) {
                     changeTo(c, .BeforeHead);
                 } else {
-                    changeTo(c, .InBody);
+                    changeTo(c, .AfterHead);
                 }
                 return;
             },
