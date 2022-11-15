@@ -2506,13 +2506,13 @@ fn processTokenForeignContent(c: *TreeConstructor, token: Token) !void {
                 .html_u,
                 .html_ul,
                 .html_var,
-                => try foreignContentLotsOfStartTags(c, token),
+                => try foreignContentEndTagBrP(c, token),
                 .html_font => {
                     if (start_tag.attributes.contains("color") or
                         start_tag.attributes.contains("face") or
                         start_tag.attributes.contains("size"))
                     {
-                        try foreignContentLotsOfStartTags(c, token);
+                        try foreignContentEndTagBrP(c, token);
                     } else {
                         try foreignContentStartTagAnythingElse(c, start_tag, .html_font);
                     }
@@ -2524,7 +2524,7 @@ fn processTokenForeignContent(c: *TreeConstructor, token: Token) !void {
         },
         .end_tag => |end_tag| {
             if (ElementType.fromStringHtml(end_tag.name)) |token_element_type| switch (token_element_type) {
-                .html_br, .html_p => try foreignContentLotsOfStartTags(c, token),
+                .html_br, .html_p => try foreignContentEndTagBrP(c, token),
                 .html_script => {
                     if (currentNode(c).element_type != .svg_script) {
                         return foreignContentEndTagAnythingElse(c, end_tag);
@@ -2541,7 +2541,7 @@ fn processTokenForeignContent(c: *TreeConstructor, token: Token) !void {
     }
 }
 
-fn foreignContentLotsOfStartTags(c: *TreeConstructor, token: Token) !void {
+fn foreignContentEndTagBrP(c: *TreeConstructor, token: Token) !void {
     try parseError(c, .TreeConstructionError);
     var current_node = currentNode(c);
     while (current_node.namespace() != .html and !isMathMlTextIntegrationPoint(current_node) and !isHtmlIntegrationPoint(c.dom, current_node)) {
