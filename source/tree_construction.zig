@@ -1265,7 +1265,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     }
                 },
                 .html_form => {
-                    if (stackOfOpenElementsHas(c, .html_template)) {
+                    if (!stackOfOpenElementsHas(c, .html_template)) {
                         const form = c.form_element_pointer;
                         c.form_element_pointer = null;
 
