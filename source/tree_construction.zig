@@ -2213,13 +2213,13 @@ fn inTemplate(c: *TreeConstructor, token: Token) !void {
                 .html_script => try inHeadStartTagScript(c, start_tag),
                 .html_template => try inHeadStartTagTemplate(c, start_tag),
                 .html_title => try inHeadStartTagTitle(c, start_tag),
-                .html_caption, .html_colgroup, .html_tbody, .html_tfoot, .html_thead => try inTemplatePushTemplate(c, .InTable),
-                .html_col => try inTemplatePushTemplate(c, .InColumnGroup),
-                .html_tr => try inTemplatePushTemplate(c, .InTableBody),
-                .html_td, .html_th => try inTemplatePushTemplate(c, .InRow),
-                else => try inTemplateAnyOtherStartTag(c),
+                .html_caption, .html_colgroup, .html_tbody, .html_tfoot, .html_thead => inTemplatePushTemplate(c, .InTable),
+                .html_col => inTemplatePushTemplate(c, .InColumnGroup),
+                .html_tr => inTemplatePushTemplate(c, .InTableBody),
+                .html_td, .html_th => inTemplatePushTemplate(c, .InRow),
+                else => inTemplateAnyOtherStartTag(c),
             } else {
-                try inTemplateAnyOtherStartTag(c);
+                inTemplateAnyOtherStartTag(c);
             }
         },
         .end_tag => |end_tag| {
@@ -2247,14 +2247,13 @@ fn inTemplateEof(c: *TreeConstructor) !void {
     reprocess(c);
 }
 
-fn inTemplatePushTemplate(c: *TreeConstructor, insertion_mode: InsertionMode) !void {
-    _ = c.template_insertion_modes.pop();
-    try c.template_insertion_modes.append(c.allocator, insertion_mode);
+fn inTemplatePushTemplate(c: *TreeConstructor, insertion_mode: InsertionMode) void {
+    c.template_insertion_modes.items[c.template_insertion_modes.items.len - 1] = insertion_mode;
     reprocessIn(c, insertion_mode);
 }
 
-fn inTemplateAnyOtherStartTag(c: *TreeConstructor) !void {
-    try inTemplatePushTemplate(c, .InBody);
+fn inTemplateAnyOtherStartTag(c: *TreeConstructor) void {
+    inTemplatePushTemplate(c, .InBody);
 }
 
 fn inTemplateAnyOtherEndTag(c: *TreeConstructor) !void {
