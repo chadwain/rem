@@ -2652,7 +2652,7 @@ fn foreignContentEndTagAnythingElse(c: *TreeConstructor, end_tag: TokenEndTag) !
     }
     while (index > 1) {
         if (rem.util.eqlIgnoreCase(end_tag.name, node.localName(c.dom))) {
-            c.open_elements.shrinkRetainingCapacity(index);
+            c.open_elements.shrinkRetainingCapacity(index - 1);
             return;
         }
         index -= 1;
