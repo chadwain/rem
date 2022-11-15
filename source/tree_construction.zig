@@ -2131,7 +2131,10 @@ fn inSelect(c: *TreeConstructor, token: Token) !void {
                     _ = try insertHtmlElementForTheToken(c, start_tag, token_element_type);
                 },
                 .html_optgroup => {
-                    if (elemTypeEqlAny(currentNode(c).element_type, &.{ .html_option, .html_optgroup })) {
+                    if (currentNode(c).element_type == .html_option) {
+                        _ = c.open_elements.pop();
+                    }
+                    if (currentNode(c).element_type == .html_optgroup) {
                         _ = c.open_elements.pop();
                     }
                     _ = try insertHtmlElementForTheToken(c, start_tag, token_element_type);
