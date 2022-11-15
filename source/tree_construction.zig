@@ -1330,8 +1330,8 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                             .attributes = .{},
                             .self_closing = false,
                         }, .html_p);
-                        try closePElement(c);
                     }
+                    try closePElement(c);
                 },
                 .html_li => {
                     if (!hasElementInListItemScope(c, ElementType.html_li)) {
