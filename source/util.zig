@@ -43,18 +43,18 @@ pub fn eqlStringHashMaps(map1: StringHashMapUnmanaged([]u8), map2: StringHashMap
     return true;
 }
 
-pub fn eqlNullSlices(comptime T: type, endpoint1: ?[]const T, endpoint2: ?[]const T) bool {
-    if (endpoint1) |a| {
-        const b = endpoint2 orelse return false;
+pub fn eqlNullSlices(comptime T: type, slice1: ?[]const T, slice2: ?[]const T) bool {
+    if (slice1) |a| {
+        const b = slice2 orelse return false;
         return std.mem.eql(T, a, b);
     } else {
-        return endpoint2 == null;
+        return slice2 == null;
     }
 }
 
-pub fn eqlNullSlices2(comptime T: type, endpoint1: []const T, endpoint2: ?[]const T) bool {
-    const b = endpoint2 orelse return false;
-    return std.mem.eql(T, endpoint1, b);
+pub fn eqlNullSlices2(comptime T: type, slice1: []const T, slice2: ?[]const T) bool {
+    const b = slice2 orelse return false;
+    return std.mem.eql(T, slice1, b);
 }
 
 pub const eqlIgnoreCase = std.ascii.eqlIgnoreCase;
