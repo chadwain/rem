@@ -1083,7 +1083,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     _ = c.open_elements.pop();
                     acknowledgeSelfClosingFlag(c);
                     const @"type" = start_tag.attributes.get("type");
-                    if (@"type" == null or rem.util.eqlIgnoreCase2(@"type".?, "hidden")) {
+                    if (@"type" == null or !rem.util.eqlIgnoreCase2(@"type".?, "hidden")) {
                         c.frameset_ok = .not_ok;
                     }
                 },
@@ -1611,7 +1611,7 @@ fn inTable(c: *TreeConstructor, token: Token) !void {
                 .html_template => try inHeadStartTagTemplate(c, start_tag),
                 .html_input => {
                     const @"type" = start_tag.attributes.get("type");
-                    if (@"type" == null or rem.util.eqlIgnoreCase2(@"type".?, "hidden")) {
+                    if (@"type" == null or !rem.util.eqlIgnoreCase2(@"type".?, "hidden")) {
                         try inTableAnythingElse(c, token);
                     } else {
                         try parseError(c, .TreeConstructionError);
