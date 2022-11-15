@@ -1460,7 +1460,7 @@ fn inBodyEofCheckForParseErrors(c: *TreeConstructor) !void {
     };
     for (c.open_elements.items) |e| {
         if (!elemTypeEqlAny(e.element_type, valid_types)) {
-            try parseError(c, .TreeConstructionError);
+            return parseError(c, .TreeConstructionError);
         }
     }
 }
