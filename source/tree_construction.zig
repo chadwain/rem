@@ -1543,6 +1543,7 @@ fn inBodyEndTagAnythingElse(c: *TreeConstructor, element_type_or_tag_name: anyty
 fn text(c: *TreeConstructor, token: Token) !void {
     switch (token) {
         .character => |character| {
+            assert(!isNull(character));
             try insertCharacter(c, character);
         },
         .eof => {
