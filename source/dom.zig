@@ -766,6 +766,7 @@ pub const Element = struct {
     }
 
     pub fn addAttribute(self: *Element, allocator: Allocator, key: []const u8, value: []const u8) !void {
+        // TOOD: This should implement https://dom.spec.whatwg.org/#concept-element-attributes-append
         const key_copy = try allocator.dupe(u8, key);
         errdefer allocator.free(key_copy);
         const value_copy = try allocator.dupe(u8, value);
@@ -774,6 +775,7 @@ pub const Element = struct {
     }
 
     pub fn addAttributeNoReplace(self: *Element, allocator: Allocator, key: []const u8, value: []const u8) !void {
+        // TOOD: This should implement https://dom.spec.whatwg.org/#concept-element-attributes-append
         if (!self.attributes.contains(key)) {
             return self.addAttribute(allocator, key, value);
         }
