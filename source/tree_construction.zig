@@ -1483,12 +1483,24 @@ fn inBodyStartTagAnythingElse(c: *TreeConstructor, start_tag: TokenStartTag, ele
     _ = try insertHtmlElementForTheToken(c, start_tag, element_type);
 }
 
-fn inBodyEndTagAnythingElse(c: *TreeConstructor, tag_name: []const u8) !void {
+fn inBodyEndTagAnythingElse(c: *TreeConstructor, element_type_or_tag_name: anytype) !void {
+    switch (@TypeOf(element_type_or_tag_name)) {
+        ElementType => assert(element_type_or_tag_name.namespace() == .html),
+        []const u8 => {},
+        else => |T| @compileError("expected " ++ @typeName(ElementType) ++ " or " ++ @typeName([]const u8) ++ ", found '" ++ @typeName(T) ++ "'"),
+    }
+
     var i = c.open_elements.items.len;
     while (i > 0) : (i -= 1) {
         const node = c.open_elements.items[i - 1];
-        if (node.namespace() == .html and strEql(tag_name, node.localName(c.dom))) {
-            generateImpliedEndTags(c, tag_name);
+        const node_matches_tag: bool = switch (@TypeOf(element_type_or_tag_name)) {
+            ElementType => node.element_type == element_type_or_tag_name,
+            []const u8 => node.namespace() == .html and strEql(element_type_or_tag_name, node.localName(c.dom)),
+            else => unreachable,
+        };
+
+        if (node_matches_tag) {
+            generateImpliedEndTags(c, element_type_or_tag_name);
             if (i != c.open_elements.items.len) try parseError(c, .TreeConstructionError);
             c.open_elements.shrinkRetainingCapacity(i - 1);
             break;
@@ -3377,11 +3389,13 @@ fn clearListOfActiveFormattingElementsUpToLastMarker(c: *TreeConstructor) void {
     }
 }
 
-fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_type: ElementType) !void {
+fn adoptionAgencyAlgorithm(c: *TreeConstructor, element_type: ElementType) !void {
+    assert(element_type.namespace() == .html);
+
     // Step 2
     blk: {
         const current_node = currentNode(c);
-        if (current_node.namespace() == .html and current_node.element_type == element_type) {
+        if (current_node.element_type == element_type) {
             for (c.active_formatting_elements.items) |fe| {
                 const fe_element = fe.element orelse continue;
                 if (current_node == fe_element) break :blk;
@@ -3395,15 +3409,14 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
     while (outer_loop_counter < 8) : (outer_loop_counter += 1) {
         // Step 4.3
         const formatting_element_index = blk: {
-            var after_last_marker = if (c.index_of_last_marker) |lm| lm + 1 else 0;
+            const after_last_marker = if (c.index_of_last_marker) |lm| lm + 1 else 0;
             var i = c.active_formatting_elements.items.len;
             while (i > after_last_marker) : (i -= 1) {
                 if (c.active_formatting_elements.items[i - 1].element.?.element_type == element_type) break :blk i - 1;
             } else {
-                return inBodyEndTagAnythingElse(c, tag_name);
+                return inBodyEndTagAnythingElse(c, element_type);
             }
         };
-        // formatting_element is not a marker.
         const formatting_element = c.active_formatting_elements.items[formatting_element_index];
         // Step 4.4
         const formatting_element_in_open_elements_index = blk: {
@@ -3426,7 +3439,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
             try parseError(c, .TreeConstructionError);
         }
         // Step 4.7
-        var furthest_block_index = blk: {
+        var furthest_block_in_open_elements_index = blk: {
             var i = formatting_element_in_open_elements_index + 1;
             while (i < c.open_elements.items.len) : (i += 1) {
                 const node = c.open_elements.items[i];
@@ -3438,52 +3451,51 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
                 return;
             }
         };
-        const furthest_block = c.open_elements.items[furthest_block_index];
+        const furthest_block = c.open_elements.items[furthest_block_in_open_elements_index];
 
         // Step 4.9
         const common_ancestor = c.open_elements.items[formatting_element_in_open_elements_index - 1];
 
         // Step 4.10
-        var bookmark = formatting_element_index;
+        var bookmark_in_formatting_elements_index = formatting_element_index;
 
         // Step 4.11
-        var node_in_open_elements_index = furthest_block_index;
-        var last_node = furthest_block_index;
-        var next_node = furthest_block_index - 1;
+        var node_in_open_elements_index = furthest_block_in_open_elements_index;
+        var last_node_in_open_elements_index = furthest_block_in_open_elements_index;
+        var next_node_in_open_elements_index = furthest_block_in_open_elements_index - 1;
 
         // Steps 4.12 and 4.13
         var inner_loop_counter: usize = 0;
         while (true) {
             inner_loop_counter += 1;
-            node_in_open_elements_index = next_node;
-            const node = &c.open_elements.items[node_in_open_elements_index];
-            if (node.* == formatting_element.element.?) break;
+            node_in_open_elements_index = next_node_in_open_elements_index;
+            const node_in_open_elements = &c.open_elements.items[node_in_open_elements_index];
+            if (node_in_open_elements.* == formatting_element.element.?) break;
 
             var node_in_formatting_elements_index = blk: {
                 var i = c.active_formatting_elements.items.len;
                 while (i > 0) : (i -= 1) {
-                    if (node.* == c.active_formatting_elements.items[i - 1].element) break :blk i - 1;
+                    if (node_in_open_elements.* == c.active_formatting_elements.items[i - 1].element) break :blk i - 1;
                 } else break :blk null;
             };
 
             // Step 4.13.4
             if (inner_loop_counter > 3 and node_in_formatting_elements_index != null) {
                 removeFromListOfActiveFormattingElements(c, node_in_formatting_elements_index.?);
-                if (node_in_formatting_elements_index.? < bookmark) bookmark -= 1;
+                if (node_in_formatting_elements_index.? < bookmark_in_formatting_elements_index) bookmark_in_formatting_elements_index -= 1;
                 node_in_formatting_elements_index = null;
             }
 
             // Step 4.13.5
             if (node_in_formatting_elements_index == null) {
                 _ = c.open_elements.orderedRemove(node_in_open_elements_index);
-                last_node -= 1;
-                next_node = node_in_open_elements_index - 1;
+                last_node_in_open_elements_index -= 1;
+                next_node_in_open_elements_index = node_in_open_elements_index - 1;
                 continue;
             }
 
-            const node_in_formatting_elements = c.active_formatting_elements.items[node_in_formatting_elements_index.?];
-
             // Step 4.13.6
+            const node_in_formatting_elements = &c.active_formatting_elements.items[node_in_formatting_elements_index.?];
             const new_element = try createAnElementForTheToken(
                 c,
                 TokenStartTag{
@@ -3491,72 +3503,81 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
                     .attributes = c.formatting_element_tag_attributes.items[node_in_formatting_elements.tag_attributes_ref],
                     .self_closing = undefined,
                 },
-                node.*.element_type,
+                node_in_open_elements.*.element_type,
                 .{ .element = common_ancestor },
                 .dont_adjust,
             );
-            c.active_formatting_elements.items[node_in_formatting_elements_index.?].element = new_element;
-            node.* = new_element;
+            node_in_formatting_elements.*.element = new_element;
+            node_in_open_elements.* = new_element;
 
             // Step 4.13.7
-            if (last_node == furthest_block_index) {
-                bookmark = node_in_formatting_elements_index.? + 1;
+            if (last_node_in_open_elements_index == furthest_block_in_open_elements_index) {
+                bookmark_in_formatting_elements_index = node_in_formatting_elements_index.? + 1;
             }
 
             // Step 4.13.8
-            try rem.dom.mutation.elementAppend(c.dom, node.*, .{ .element = c.open_elements.items[last_node] }, .Suppress);
+            try rem.dom.mutation.elementAppend(
+                c.dom,
+                node_in_open_elements.*,
+                .{ .element = c.open_elements.items[last_node_in_open_elements_index] },
+                .Suppress,
+            );
 
             // Step 4.13.9
-            last_node = node_in_open_elements_index;
-            next_node = node_in_open_elements_index - 1;
+            last_node_in_open_elements_index = node_in_open_elements_index;
+            next_node_in_open_elements_index = node_in_open_elements_index - 1;
         }
 
         // Step 4.14
         const location = appropriateNodeInsertionLocationWithTarget(c, common_ancestor);
         switch (location) {
-            .element_last_child => |e| try rem.dom.mutation.elementAppend(c.dom, e, .{ .element = c.open_elements.items[last_node] }, .Suppress),
+            .element_last_child => |e| try rem.dom.mutation.elementAppend(
+                c.dom,
+                e,
+                .{ .element = c.open_elements.items[last_node_in_open_elements_index] },
+                .Suppress,
+            ),
             .parent_before_child => |s| try rem.dom.mutation.elementInsert(
                 c.dom,
                 s.parent,
                 .{ .element = s.child },
-                .{ .element = c.open_elements.items[last_node] },
+                .{ .element = c.open_elements.items[last_node_in_open_elements_index] },
                 .Suppress,
             ),
         }
 
-        const new_element = blk: {
-            // Step 4.15
-            const elem = try createAnElementForTheToken(
-                c,
-                TokenStartTag{
-                    .name = undefined,
-                    .attributes = c.formatting_element_tag_attributes.items[formatting_element.tag_attributes_ref],
-                    .self_closing = undefined,
-                },
-                formatting_element.element.?.element_type,
-                .{ .element = furthest_block },
-                .dont_adjust,
-            );
-            // Step 4.16
-            std.mem.swap(ArrayListUnmanaged(rem.dom.ElementOrCharacterData), &furthest_block.children, &elem.children);
-            // Step 4.17
-            try rem.dom.mutation.elementAppend(c.dom, furthest_block, .{ .element = elem }, .Suppress);
-            break :blk elem;
-        };
+        // Step 4.15
+        const new_element = try createAnElementForTheToken(
+            c,
+            TokenStartTag{
+                .name = undefined,
+                .attributes = c.formatting_element_tag_attributes.items[formatting_element.tag_attributes_ref],
+                .self_closing = undefined,
+            },
+            formatting_element.element.?.element_type,
+            .{ .element = furthest_block },
+            .dont_adjust,
+        );
+        // Step 4.16
+        // TODO: This needs to go through the DOM API
+        std.mem.swap(ArrayListUnmanaged(rem.dom.ElementOrCharacterData), &furthest_block.children, &new_element.children);
+
+        // Step 4.17
+        try rem.dom.mutation.elementAppend(c.dom, furthest_block, .{ .element = new_element }, .Suppress);
 
         // Step 4.18
         // Instead of calling removeFromListOfActiveFormattingElements, which might delete the tag attributes
         // for formatting_element, remove it from the list directly.
         _ = c.active_formatting_elements.orderedRemove(formatting_element_index);
-        if (formatting_element_index < bookmark) bookmark -= 1;
-        if (bookmark < c.active_formatting_elements.items.len) {
+        if (formatting_element_index < bookmark_in_formatting_elements_index) bookmark_in_formatting_elements_index -= 1;
+        if (bookmark_in_formatting_elements_index < c.active_formatting_elements.items.len) {
             try c.active_formatting_elements.insert(
                 c.allocator,
-                bookmark,
+                bookmark_in_formatting_elements_index,
                 .{ .element = new_element, .tag_attributes_ref = formatting_element.tag_attributes_ref },
             );
         } else {
-            assert(bookmark == c.active_formatting_elements.items.len);
+            assert(bookmark_in_formatting_elements_index == c.active_formatting_elements.items.len);
             try c.active_formatting_elements.append(
                 c.allocator,
                 .{ .element = new_element, .tag_attributes_ref = formatting_element.tag_attributes_ref },
@@ -3564,12 +3585,11 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, tag_name: []const u8, element_ty
         }
 
         // Step 4.19
-        removeFromStackOfOpenElements(c, formatting_element.element.?);
-        furthest_block_index = findInStackOfOpenElements(c, furthest_block).?;
-        if (furthest_block_index < c.open_elements.items.len - 1) {
-            try c.open_elements.insert(c.allocator, furthest_block_index + 1, new_element);
+        _ = c.open_elements.orderedRemove(formatting_element_in_open_elements_index);
+        furthest_block_in_open_elements_index = findInStackOfOpenElements(c, furthest_block).?;
+        if (furthest_block_in_open_elements_index < c.open_elements.items.len - 1) {
+            try c.open_elements.insert(c.allocator, furthest_block_in_open_elements_index + 1, new_element);
         } else {
-            assert(furthest_block_index == c.open_elements.items.len - 1);
             try c.open_elements.append(c.allocator, new_element);
         }
     }
