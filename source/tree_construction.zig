@@ -3333,26 +3333,26 @@ fn pushOntoListOfActiveFormattingElements(c: *TreeConstructor, element: *Element
 
 fn reconstructActiveFormattingElements(c: *TreeConstructor) !void {
     // Step 1
-    if (c.active_formatting_elements.items.len == 0) return;
+    // If the list of active formatting elements is empty, both loops will not execute and nothing will happen.
 
     // Step 2
-    const first_entry = c.active_formatting_elements.items[c.active_formatting_elements.items.len - 1];
-    if (first_entry.element == null or stackOfOpenElementsHasElement(c, first_entry.element.?)) return;
+    // If the list of active formatting elements has one element on it, the first loop will execute for that element and,
+    // if it satisfies the criteria of this step, the second loop will not execute and nothing will happen.
 
     // Steps 3-6
-    var i = c.active_formatting_elements.items.len;
-    while (i > 0) : (i -= 1) {
-        const entry = c.active_formatting_elements.items[i - 1];
+    var index = c.active_formatting_elements.items.len;
+    while (index > 0) : (index -= 1) {
+        const entry = c.active_formatting_elements.items[index - 1];
         if (entry.element == null or stackOfOpenElementsHasElement(c, entry.element.?)) {
             // Step 7
-            // By breaking, we don't decrement i, which is just like incrementing it.
+            // By breaking, we don't decrement index, which has the effect of moving to the next list item in the next while loop.
             break;
         }
     }
 
     // Steps 8-10
-    while (i < c.active_formatting_elements.items.len) : (i += 1) {
-        const entry = &c.active_formatting_elements.items[i];
+    while (index < c.active_formatting_elements.items.len) : (index += 1) {
+        const entry = &c.active_formatting_elements.items[index];
         const new_element = try insertHtmlElementForTheToken(
             c,
             TokenStartTag{
