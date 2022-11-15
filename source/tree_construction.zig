@@ -3270,13 +3270,14 @@ fn addToListOfActiveFormattingElementsWithoutMatch(c: *TreeConstructor, element:
     result.* = .{ .element = element, .tag_attributes_ref = tag_attributes_ref };
 }
 
-fn addToListOfActiveFormattingElementsWithMatch(c: *TreeConstructor, element: *Element, formatting_element: FormattingElement) !void {
+fn addToListOfActiveFormattingElementsWithMatch(c: *TreeConstructor, element: *Element, tag_attributes_ref: usize) !void {
     try c.active_formatting_elements.append(c.allocator, .{
         .element = element,
-        .tag_attributes_ref = formatting_element.tag_attributes_ref,
+        .tag_attributes_ref = tag_attributes_ref,
     });
 }
 
+// TODO: The way this function is used is dubious
 fn removeFromListOfActiveFormattingElements(c: *TreeConstructor, index: usize) void {
     const formatting_element = c.active_formatting_elements.orderedRemove(index);
     const tag_attributes_ref = formatting_element.tag_attributes_ref;
@@ -3315,15 +3316,19 @@ fn pushOntoListOfActiveFormattingElements(c: *TreeConstructor, element: *Element
         if (matching_element_count == 1) {
             first_matching_element_index = i;
         } else if (matching_element_count == 3) {
-            removeFromListOfActiveFormattingElements(c, first_matching_element_index);
             break;
         }
     }
 
-    if (matching_element_count > 0)
-        try addToListOfActiveFormattingElementsWithMatch(c, element, c.active_formatting_elements.items[first_matching_element_index])
-    else
+    if (matching_element_count > 0) {
+        const tag_attributes_ref = c.active_formatting_elements.items[first_matching_element_index].tag_attributes_ref;
+        if (matching_element_count == 3) {
+            removeFromListOfActiveFormattingElements(c, first_matching_element_index);
+        }
+        try addToListOfActiveFormattingElementsWithMatch(c, element, tag_attributes_ref);
+    } else {
         try addToListOfActiveFormattingElementsWithoutMatch(c, element);
+    }
 }
 
 fn reconstructActiveFormattingElements(c: *TreeConstructor) !void {
