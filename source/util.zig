@@ -33,7 +33,8 @@ pub fn freeStringHashMapConst(map: *StringHashMapUnmanaged([]const u8), allocato
     map.deinit(allocator);
 }
 
-pub fn eqlStringHashMaps(map1: StringHashMapUnmanaged([]u8), map2: StringHashMapUnmanaged([]u8)) bool {
+// `map1` and `map2` are of type std.[String]HashMap[Unmanaged]
+pub fn eqlStringHashMaps(map1: anytype, map2: @TypeOf(map1)) bool {
     if (map1.count() != map2.count()) return false;
     var iterator = map1.iterator();
     while (iterator.next()) |attr| {
@@ -149,11 +150,19 @@ pub fn printDocument(writer: anytype, document: *const Document, dom: *const Dom
                     element.localName(dom),
                     @tagName(element.namespace()),
                 });
-                if (element.attributes.count() > 0) {
+                const num_attributes = element.numAttributes();
+                if (num_attributes > 0) {
                     try writer.writeAll(" ");
-                    var attr_it = element.attributes.iterator();
-                    while (attr_it.next()) |attr| {
-                        try std.fmt.format(writer, "\"{s}\"=\"{s}\" ", .{ attr.key_ptr.*, attr.value_ptr.* });
+                    const attribute_slice = element.attributes.slice();
+                    var i: u32 = 0;
+                    while (i < num_attributes) : (i += 1) {
+                        const key = attribute_slice.items(.key)[i];
+                        const value = attribute_slice.items(.value)[i];
+                        if (key.prefix == .none) {
+                            try std.fmt.format(writer, "\"{s}\"=\"{s}\" ", .{ key.local_name, value });
+                        } else {
+                            try std.fmt.format(writer, "\"{s}:{s}\"=\"{s}\" ", .{ @tagName(key.prefix), key.local_name, value });
+                        }
                     }
                 }
                 try std.fmt.format(writer, "]\n", .{});

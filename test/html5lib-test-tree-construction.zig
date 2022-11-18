@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const panic = std.debug.panic;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 
@@ -18,6 +19,7 @@ const Document = rem.dom.Document;
 const DocumentType = rem.dom.DocumentType;
 const Element = rem.dom.Element;
 const ElementType = rem.dom.ElementType;
+const ElementAttributesKey = rem.dom.ElementAttributesKey;
 const CharacterData = rem.dom.CharacterData;
 
 const Tokenizer = rem.Tokenizer;
@@ -199,10 +201,6 @@ fn runTestFile(file_path: []const u8, scripting: bool) !void {
         defer count += 1;
         var the_test = createTest(&tests, allocator) catch |err| switch (err) {
             // TODO: Don't skip any tests.
-            error.AttributeNamespaces => {
-                std.debug.print("Test #{} (Skipped: Exptected DOM tree contains namespaced attributes)\n", .{count});
-                continue;
-            },
             error.TemplateContents => {
                 std.debug.print("Test #{} (Skipped: Exptected DOM tree contains templates)\n", .{count});
                 continue;
@@ -316,8 +314,8 @@ fn createTest(test_string: *[]const u8, allocator: Allocator) !Test {
         error.DomException => unreachable,
         else => |e| return e,
     };
-    //var stderr = std.io.getStdErr().writer();
-    //try printDom(dom, stderr, allocator);
+    // var stderr = std.io.getStdErr().writer();
+    // rem.util.printDocument(stderr, expected.document, &expected.dom, allocator) catch panic("", .{});
 
     return Test{
         .input = data,
@@ -336,7 +334,7 @@ fn parseDom(lines: *std.mem.SplitIterator(u8), context_element_type: ?ElementTyp
     errdefer dom.deinit();
     const document = try dom.makeDocument();
     const fragment_context = if (context_element_type) |ty| try dom.makeElement(ty) else null;
-    var possible_error: ?error{ AttributeNamespaces, TemplateContents } = null;
+    var possible_error: ?error{TemplateContents} = null;
 
     while (lines.next()) |line| {
         if (line.len == 0) {
@@ -403,12 +401,7 @@ fn parseDom(lines: *std.mem.SplitIterator(u8), context_element_type: ?ElementTyp
             // element
             if (data[data.len - 1] != '>') {
                 // nope, actually an attribute
-                parseAttribute(&dom, &stack, data, depth) catch |err| switch (err) {
-                    error.AttributeNamespaces => if (possible_error == null) {
-                        possible_error = error.AttributeNamespaces;
-                    },
-                    else => return err,
-                };
+                try parseAttribute(&dom, &stack, data, depth);
                 continue;
             }
             const tag_name = data[1 .. data.len - 1];
@@ -480,12 +473,7 @@ fn parseDom(lines: *std.mem.SplitIterator(u8), context_element_type: ?ElementTyp
             try stack.append(dummy_element);
         } else {
             // attribute
-            parseAttribute(&dom, &stack, data, depth) catch |err| switch (err) {
-                error.AttributeNamespaces => if (possible_error == null) {
-                    possible_error = error.AttributeNamespaces;
-                },
-                else => return err,
-            };
+            try parseAttribute(&dom, &stack, data, depth);
         }
     }
 
@@ -501,15 +489,22 @@ fn parseAttribute(dom: *Dom, stack: *ArrayList(*Element), data: []const u8, dept
     const attribute_name = data[0..eql_sign];
     const value = data[eql_sign + 2 .. data.len - 1];
 
+    var key: ElementAttributesKey = .{ .local_name = attribute_name, .prefix = undefined, .namespace = undefined };
     if (startsWith(attribute_name, "xlink ")) {
-        return error.AttributeNamespaces;
+        key.prefix = .xlink;
+        key.namespace = .xlink;
     } else if (startsWith(attribute_name, "xml ")) {
-        return error.AttributeNamespaces;
+        key.prefix = .xml;
+        key.namespace = .xml;
     } else if (startsWith(attribute_name, "xmlns ")) {
-        return error.AttributeNamespaces;
+        key.prefix = .xmlns;
+        key.namespace = .xmlns;
     } else {
-        try stack.items[stack.items.len - 1].addAttribute(dom.allocator, attribute_name, value);
+        key.prefix = .none;
+        key.namespace = .none;
     }
+
+    try stack.items[stack.items.len - 1].appendAttribute(dom.allocator, key, value);
 }
 
 fn runTest(t: Test, allocator: Allocator, scripting: bool) !void {
@@ -614,7 +609,19 @@ fn expectEqualDoctypes(d1: *const DocumentType, d2: *const DocumentType) !void {
 fn expectEqualElements(e1: *const Element, e2: *const Element) !void {
     // TODO: If the element type has an interface associated with it, check that for equality too.
     try expectEqual(e1.element_type, e2.element_type);
-    try expect(rem.util.eqlStringHashMaps(e1.attributes, e2.attributes));
+
+    const e1_slice = e1.attributes.slice();
+    const e2_slice = e2.attributes.slice();
+    try expectEqual(e1_slice.len, e2_slice.len);
+
+    var i: usize = 0;
+    while (i < e1_slice.len) : (i += 1) {
+        const key = e1_slice.items(.key)[i];
+        const e2_value = e2.getAttribute(key);
+        try expect(e2_value != null);
+        const e1_value = e1_slice.items(.value)[i];
+        try expectEqualStrings(e1_value, e2_value.?);
+    }
 }
 
 fn expectEqualCdatas(c1: *const CharacterData, c2: *const CharacterData) !void {

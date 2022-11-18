@@ -25,6 +25,7 @@ const Dom = rem.dom.Dom;
 const Document = rem.dom.Document;
 const Element = rem.dom.Element;
 const ElementType = rem.dom.ElementType;
+const ElementAttributesKey = rem.dom.ElementAttributesKey;
 const CharacterData = rem.dom.CharacterData;
 const CharacterDataInterface = rem.dom.CharacterDataInterface;
 
@@ -853,7 +854,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                         assert(body.element_type == .html_body);
                         var attr_it = start_tag.attributes.iterator();
                         while (attr_it.next()) |attr| {
-                            try body.addAttributeNoReplace(c.dom.allocator, attr.key_ptr.*, attr.value_ptr.*);
+                            try body.appendAttributeIfNotExists(c.dom.allocator, .{ .prefix = .none, .namespace = .none, .local_name = attr.key_ptr.* }, attr.value_ptr.*);
                         }
                     }
                 },
@@ -1476,7 +1477,7 @@ fn inBodyStartTagHtml(c: *TreeConstructor, start_tag: TokenStartTag) !void {
         const top_element = stackOfOpenElementsTop(c);
         var iterator = start_tag.attributes.iterator();
         while (iterator.next()) |attr| {
-            try top_element.addAttributeNoReplace(c.dom.allocator, attr.key_ptr.*, attr.value_ptr.*);
+            try top_element.appendAttributeIfNotExists(c.dom.allocator, .{ .prefix = .none, .namespace = .none, .local_name = attr.key_ptr.* }, attr.value_ptr.*);
         }
     }
 }
@@ -3051,7 +3052,7 @@ fn createAnElementForTheToken(
     // TODO: This should follow https://dom.spec.whatwg.org/#concept-element-attributes-append
     var attr_it = start_tag.attributes.iterator();
     switch (adjust_attributes) {
-        .dont_adjust => try elementAddAttributes(c.dom, element, &attr_it),
+        .dont_adjust => try elementAppendAttributes(c.dom, element, &attr_it),
         .adjust_mathml_attributes => try appendAttributesAdjustMathMlForeign(c.dom, element, &attr_it),
         .adjust_svg_attributes => try appendAttributesAdjustSvgForeign(c.dom, element, &attr_it),
     }
@@ -3061,24 +3062,24 @@ fn createAnElementForTheToken(
 
 const AdjustAttributes = enum { dont_adjust, adjust_mathml_attributes, adjust_svg_attributes };
 
-const adjust_foreign_attributes_map = ComptimeStringMap(void, .{
-    .{ "xlink:actuate", {} },
-    .{ "xlink:arcrole", {} },
-    .{ "xlink:href", {} },
-    .{ "xlink:role", {} },
-    .{ "xlink:show", {} },
-    .{ "xlink:title", {} },
-    .{ "xlink:type", {} },
-    .{ "xml:lang", {} },
-    .{ "xml:space", {} },
-    .{ "xmlns", {} },
-    .{ "xmlns:xlink", {} },
+const adjust_foreign_attributes_map = ComptimeStringMap(ElementAttributesKey, .{
+    .{ "xlink:actuate", .{ .prefix = .xlink, .local_name = "actuate", .namespace = .xlink } },
+    .{ "xlink:arcrole", .{ .prefix = .xlink, .local_name = "arcrole", .namespace = .xlink } },
+    .{ "xlink:href", .{ .prefix = .xlink, .local_name = "href", .namespace = .xlink } },
+    .{ "xlink:role", .{ .prefix = .xlink, .local_name = "role", .namespace = .xlink } },
+    .{ "xlink:show", .{ .prefix = .xlink, .local_name = "show", .namespace = .xlink } },
+    .{ "xlink:title", .{ .prefix = .xlink, .local_name = "title", .namespace = .xlink } },
+    .{ "xlink:type", .{ .prefix = .xlink, .local_name = "type", .namespace = .xlink } },
+    .{ "xml:lang", .{ .prefix = .xml, .local_name = "lang", .namespace = .xml } },
+    .{ "xml:space", .{ .prefix = .xml, .local_name = "space", .namespace = .xml } },
+    .{ "xmlns", .{ .prefix = .none, .local_name = "xmlns", .namespace = .xmlns } },
+    .{ "xmlns:xlink", .{ .prefix = .xmlns, .local_name = "xlink", .namespace = .xmlns } },
 });
 
 /// Appends the attributes from the token to the Element.
-fn elementAddAttributes(dom: *Dom, element: *Element, attributes: *TokenStartTag.Attributes.Iterator) !void {
+fn elementAppendAttributes(dom: *Dom, element: *Element, attributes: *TokenStartTag.Attributes.Iterator) !void {
     while (attributes.next()) |attr| {
-        try element.addAttributeNoReplace(dom.allocator, attr.key_ptr.*, attr.value_ptr.*);
+        try element.appendAttribute(dom.allocator, .{ .prefix = .none, .namespace = .none, .local_name = attr.key_ptr.* }, attr.value_ptr.*);
     }
 }
 
@@ -3086,15 +3087,14 @@ fn elementAddAttributes(dom: *Dom, element: *Element, attributes: *TokenStartTag
 /// "adjust MathML attributes" and "adjust foreign attributes" algorithms.
 fn appendAttributesAdjustMathMlForeign(dom: *Dom, element: *Element, attributes: *TokenStartTag.Attributes.Iterator) !void {
     while (attributes.next()) |attr| {
-        const key = attr.key_ptr.*;
+        const name = attr.key_ptr.*;
         const value = attr.value_ptr.*;
-        if (strEql(key, "definitionurl")) {
-            try element.addAttributeNoReplace(dom.allocator, "definitionURL", value);
-        } else if (adjust_foreign_attributes_map.get(key)) |_| {
-            // I haven't implemented namespaced attributes.
-            @panic("TODO Adjust foreign attributes for the token");
+        if (strEql(name, "definitionurl")) {
+            try element.appendAttribute(dom.allocator, .{ .prefix = .none, .namespace = .none, .local_name = "definitionURL" }, value);
+        } else if (adjust_foreign_attributes_map.get(name)) |key| {
+            try element.appendAttribute(dom.allocator, key, value);
         } else {
-            try element.addAttribute(dom.allocator, key, value);
+            try element.appendAttribute(dom.allocator, .{ .prefix = .none, .namespace = .none, .local_name = name }, value);
         }
     }
 }
@@ -3164,15 +3164,14 @@ fn appendAttributesAdjustSvgForeign(dom: *Dom, element: *Element, attributes: *T
     });
 
     while (attributes.next()) |attr| {
-        const key = attr.key_ptr.*;
+        const name = attr.key_ptr.*;
         const value = attr.value_ptr.*;
-        if (adjust_svg_attributes_map.get(key)) |new_key| {
-            try element.addAttributeNoReplace(dom.allocator, new_key, value);
-        } else if (adjust_foreign_attributes_map.get(key)) |_| {
-            // I haven't implemented namespaced attributes.
-            @panic("TODO Adjust foreign attributes for the token");
+        if (adjust_svg_attributes_map.get(name)) |new_key| {
+            try element.appendAttribute(dom.allocator, .{ .prefix = .none, .namespace = .none, .local_name = new_key }, value);
+        } else if (adjust_foreign_attributes_map.get(name)) |key| {
+            try element.appendAttribute(dom.allocator, key, value);
         } else {
-            try element.addAttribute(dom.allocator, key, value);
+            try element.appendAttribute(dom.allocator, .{ .prefix = .none, .namespace = .none, .local_name = name }, value);
         }
     }
 }
@@ -3280,11 +3279,14 @@ const FormattingElement = struct {
         const e = self.element orelse return false;
         if (e.element_type != element.element_type) return false;
         const tag_attributes = c.formatting_element_tag_attributes.items[self.tag_attributes_ref];
-        if (tag_attributes.count() != element.attributes.count()) return false;
-        var attr_it = element.attributes.iterator();
-        while (attr_it.next()) |attr| {
-            const tag_entry = tag_attributes.get(attr.key_ptr.*) orelse return false;
-            if (!strEql(attr.value_ptr.*, tag_entry)) return false;
+        if (tag_attributes.count() != element.attributes.len) return false;
+
+        const element_attributes_slice = element.attributes.slice();
+        for (element_attributes_slice.items(.key)) |key, index| {
+            // TODO: Need to compare namespaces too
+            const tag_entry = tag_attributes.get(key.local_name) orelse return false;
+            const value = element_attributes_slice.items(.value)[index];
+            if (!strEql(value, tag_entry)) return false;
         }
         return true;
     }
@@ -3296,13 +3298,14 @@ fn addFormattingElementTagAttributes(c: *TreeConstructor, element: *Element) !us
 
     attributes_copy.* = TokenStartTag.Attributes{};
     errdefer rem.util.freeStringHashMapConst(attributes_copy, c.allocator);
-    try attributes_copy.ensureTotalCapacity(c.allocator, element.attributes.count());
+    try attributes_copy.ensureTotalCapacity(c.allocator, element.numAttributes());
 
-    var iterator = element.attributes.iterator();
-    while (iterator.next()) |attr| {
-        const key = try c.allocator.dupe(u8, attr.key_ptr.*);
+    const slice = element.attributes.slice();
+    var index: usize = 0;
+    while (index < slice.len) : (index += 1) {
+        const key = try c.allocator.dupe(u8, slice.items(.key)[index].local_name);
         errdefer c.allocator.free(key);
-        const value = try c.allocator.dupe(u8, attr.value_ptr.*);
+        const value = try c.allocator.dupe(u8, slice.items(.value)[index]);
         errdefer c.allocator.free(value);
         attributes_copy.putAssumeCapacity(key, value);
     }

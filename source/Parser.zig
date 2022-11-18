@@ -218,7 +218,7 @@ pub fn initFragment(
     // Step 9
     const should_be_html_integration_point = if (context.element_type == .mathml_annotation_xml) blk: {
         const eql = rem.util.eqlIgnoreCase2;
-        const encoding = context.attributes.get("encoding") orelse break :blk false;
+        const encoding = context.getAttribute(.{ .prefix = .none, .namespace = .none, .local_name = "encoding" }) orelse break :blk false;
         break :blk eql(encoding, "text/html") or eql(encoding, "application/xhtml+xml");
     } else false;
     if (should_be_html_integration_point) try dom.registerHtmlIntegrationPoint(context);

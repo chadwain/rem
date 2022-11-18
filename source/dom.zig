@@ -8,6 +8,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const ComptimeStringMap = std.ComptimeStringMap;
+const MultiArrayList = std.MultiArrayList;
 const AutoHashMapUnmanaged = std.AutoHashMapUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
@@ -738,8 +739,43 @@ pub const ParentNode = union(enum) {
     document,
 };
 
+pub const AttributePrefix = enum {
+    none,
+    xlink,
+    xml,
+    xmlns,
+};
+
+pub const AttributeNamespace = enum {
+    none,
+    xlink,
+    xml,
+    xmlns,
+};
+
+pub const ElementAttributesKey = struct {
+    prefix: AttributePrefix,
+    namespace: AttributeNamespace,
+    local_name: []const u8,
+
+    pub fn eql(lhs: ElementAttributesKey, rhs: ElementAttributesKey) bool {
+        switch (lhs.prefix) {
+            .none, .xlink, .xml, .xmlns => if (lhs.prefix != rhs.prefix) return false,
+        }
+        switch (lhs.namespace) {
+            .none, .xlink, .xml, .xmlns => if (lhs.namespace != rhs.namespace) return false,
+        }
+        return std.mem.eql(u8, lhs.local_name, rhs.local_name);
+    }
+};
+
+pub const Attribute = struct {
+    key: ElementAttributesKey,
+    value: []const u8,
+};
+
 /// The type for the attributes of an Element node.
-pub const ElementAttributes = StringHashMapUnmanaged([]u8);
+pub const ElementAttributes = MultiArrayList(Attribute);
 
 pub const Element = struct {
     element_type: ElementType,
@@ -748,10 +784,11 @@ pub const Element = struct {
     children: ArrayListUnmanaged(ElementOrCharacterData),
 
     pub fn deinit(self: *Element, allocator: Allocator) void {
-        var attr_it = self.attributes.iterator();
-        while (attr_it.next()) |attr| {
-            allocator.free(attr.key_ptr.*);
-            allocator.free(attr.value_ptr.*);
+        const attr_slice = self.attributes.slice();
+        for (attr_slice.items(.key)) |key, index| {
+            const value = attr_slice.items(.value)[index];
+            allocator.free(key.local_name);
+            allocator.free(value);
         }
         self.attributes.deinit(allocator);
         self.children.deinit(allocator);
@@ -765,20 +802,33 @@ pub const Element = struct {
         return self.element_type.toLocalName() orelse dom.local_names.get(self) orelse unreachable;
     }
 
-    pub fn addAttribute(self: *Element, allocator: Allocator, key: []const u8, value: []const u8) !void {
-        // TOOD: This should implement https://dom.spec.whatwg.org/#concept-element-attributes-append
-        const key_copy = try allocator.dupe(u8, key);
-        errdefer allocator.free(key_copy);
-        const value_copy = try allocator.dupe(u8, value);
-        errdefer allocator.free(value_copy);
-        try self.attributes.putNoClobber(allocator, key_copy, value_copy);
+    pub fn numAttributes(self: Element) u32 {
+        return @intCast(u32, self.attributes.len);
     }
 
-    pub fn addAttributeNoReplace(self: *Element, allocator: Allocator, key: []const u8, value: []const u8) !void {
+    pub fn appendAttribute(self: *Element, allocator: Allocator, key: ElementAttributesKey, value: []const u8) !void {
         // TOOD: This should implement https://dom.spec.whatwg.org/#concept-element-attributes-append
-        if (!self.attributes.contains(key)) {
-            return self.addAttribute(allocator, key, value);
+        const key_local_name_copy = try allocator.dupe(u8, key.local_name);
+        errdefer allocator.free(key_local_name_copy);
+        const value_copy = try allocator.dupe(u8, value);
+        errdefer allocator.free(value_copy);
+        try self.attributes.append(allocator, .{ .key = .{ .prefix = key.prefix, .namespace = key.namespace, .local_name = key_local_name_copy }, .value = value_copy });
+    }
+
+    pub fn appendAttributeIfNotExists(self: *Element, allocator: Allocator, key: ElementAttributesKey, value: []const u8) !void {
+        if (self.getAttribute(key) == null) {
+            try self.appendAttribute(allocator, key, value);
         }
+    }
+
+    pub fn getAttribute(self: Element, key: ElementAttributesKey) ?[]const u8 {
+        const slice = self.attributes.slice();
+        for (slice.items(.key)) |k, index| {
+            if (key.eql(k)) {
+                return slice.items(.value)[index];
+            }
+        }
+        return null;
     }
 
     pub fn lastChild(self: *Element) ?ElementOrCharacterData {
