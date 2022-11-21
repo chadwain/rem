@@ -196,5 +196,5 @@ fn printCdata(writer: anytype, cdata: *const CharacterData) !void {
         .text => "Text",
         .comment => "Comment",
     };
-    try std.fmt.format(writer, "  {s}: {s}\n", .{ interface, cdata.data.items });
+    try std.fmt.format(writer, "{s}: \"{}\"\n", .{ interface, std.zig.fmtEscapes(cdata.data.items) });
 }
