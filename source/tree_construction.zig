@@ -638,9 +638,36 @@ fn inHeadStartTagNoframesStyle(c: *TreeConstructor, start_tag: TokenStartTag, el
 }
 
 fn inHeadStartTagScript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
-    _ = c;
-    _ = start_tag;
-    @panic("TODO InHead start tag script, scripting is enabled");
+    // Step 1
+    const adjusted_insertion_location = appropriateNodeInsertionLocation(c);
+
+    // Step 2
+    const intended_parent: ParentNode = switch (adjusted_insertion_location) {
+        .element_last_child => |e| .{ .element = e },
+        .parent_before_child => |s| .{ .element = s.parent },
+    };
+    const element = try createAnElementForTheToken(c, start_tag, .html_script, intended_parent, .dont_adjust);
+
+    if (c.scripting) {
+        @panic("TODO: In head start tag script, scripting is enabled");
+    }
+
+    // Step 6
+    switch (adjusted_insertion_location) {
+        // TODO: Check pre-insertion validity
+        .element_last_child => |e| try rem.dom.mutation.elementAppend(c.dom, e, .{ .element = element }, .Suppress),
+        .parent_before_child => |s| try rem.dom.mutation.elementInsert(c.dom, s.parent, .{ .element = s.child }, .{ .element = element }, .Suppress),
+    }
+
+    // Step 7
+    try c.open_elements.append(c.allocator, element);
+
+    // Step 8
+    setTokenizerState(c, .ScriptData);
+
+    // Step 9
+    // Step 10
+    changeToAndSetOriginalInsertionMode(c, .Text, c.insertion_mode);
 }
 
 fn inHeadStartTagTemplate(c: *TreeConstructor, start_tag: TokenStartTag) !void {
@@ -1535,14 +1562,18 @@ fn text(c: *TreeConstructor, token: Token) !void {
         .eof => {
             try parseError(c, .TreeConstructionError);
             const current_node = c.open_elements.pop();
-            if (current_node.element_type == .html_script) {
-                @panic("TODO Text eof, current node is a script");
+            if (current_node.element_type == .html_script and c.scripting) {
+                @panic("TODO Text eof, current node is a script, scripting is enabled");
             }
             reprocessInOriginalInsertionMode(c);
         },
         .end_tag => |end_tag| {
             if (strEql(end_tag.name, "script")) {
-                @panic("TODO Text end tag script");
+                if (c.scripting) {
+                    @panic("TODO Text end tag script, scripting is enabled");
+                }
+                assert(c.open_elements.pop().element_type == .html_script);
+                changeToOriginalInsertionMode(c);
             } else {
                 _ = c.open_elements.pop();
                 changeToOriginalInsertionMode(c);
@@ -2559,10 +2590,11 @@ fn processTokenForeignContent(c: *TreeConstructor, token: Token) !void {
             if (ElementType.fromStringHtml(end_tag.name)) |token_element_type| switch (token_element_type) {
                 .html_br, .html_p => try foreignContentEndTagBrP(c, token),
                 .html_script => {
-                    if (currentNode(c).element_type != .svg_script) {
-                        return foreignContentEndTagAnythingElse(c, end_tag);
+                    if (currentNode(c).element_type == .svg_script) {
+                        foreignContentEndTagScriptWithinSvgScript(c);
+                    } else {
+                        try foreignContentEndTagAnythingElse(c, end_tag);
                     }
-                    @panic("TODO: Foreign content end tag script, current node is SVG script");
                 },
                 else => try foreignContentEndTagAnythingElse(c, end_tag),
             } else {
@@ -2672,7 +2704,9 @@ fn foreignContentStartTagAnythingElse(c: *TreeConstructor, start_tag: TokenStart
 
 fn foreignContentEndTagScriptWithinSvgScript(c: *TreeConstructor) void {
     _ = c.open_elements.pop();
-    @panic("TODO Foreign content end tag script, current node is SVG script");
+    if (c.scripting) {
+        @panic("TODO Foreign content end tag script, current node is SVG script, scripting is enabled");
+    }
 }
 
 fn foreignContentEndTagAnythingElse(c: *TreeConstructor, end_tag: TokenEndTag) !void {
