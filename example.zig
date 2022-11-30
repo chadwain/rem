@@ -6,56 +6,34 @@
 const std = @import("std");
 const rem = @import("rem");
 
-pub fn main() !u8 {
+pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    defer std.debug.assert(!gpa.deinit());
     const allocator = gpa.allocator();
 
-    const stdin = std.io.getStdIn();
-    const stdout = std.io.getStdOut().writer();
-    const stderr = std.io.getStdErr().writer();
-
-    var byte_buffer: [1024]u8 = undefined;
-    var byte_buffer_len: usize = 0;
-    var decoded = std.ArrayListUnmanaged(u21){};
-    defer decoded.deinit(allocator);
-    while (b: {
-        byte_buffer_len += try stdin.read(byte_buffer[byte_buffer_len..]);
-        break :b byte_buffer_len != 0;
-    }) {
-        var byte_buffer_index: usize = 0;
-        while (byte_buffer_index < byte_buffer_len) {
-            const seq_len = std.unicode.utf8ByteSequenceLength(byte_buffer[byte_buffer_index]) catch |err| {
-                stderr.print("{s}\n", .{@errorName(err)}) catch {};
-                return 1;
-            };
-            if (byte_buffer_index + seq_len > byte_buffer_len) break;
-            const codepoint = std.unicode.utf8Decode(byte_buffer[byte_buffer_index..][0..seq_len]) catch |err| {
-                stderr.print("{s}\n", .{@errorName(err)}) catch {};
-                return 1;
-            };
-            byte_buffer_index += seq_len;
-            try decoded.append(allocator, codepoint);
-        }
-        const leftover = byte_buffer[byte_buffer_index..byte_buffer_len];
-        std.mem.copy(u8, byte_buffer[0..leftover.len], leftover);
-        byte_buffer_len = leftover.len;
-    }
+    // This is the text that will be read by the parser.
+    // Since the parser accepts Unicode codepoints, the text must be decoded before it can be used.
+    const input = "<!doctype html><html><h1 style=bold>Your text goes here!</h1>";
+    const decoded_input = &rem.util.utf8DecodeStringComptime(input);
 
     // Create the DOM in which the parsed Document will be created.
     var dom = rem.dom.Dom{ .allocator = allocator };
     defer dom.deinit();
 
-    var parser = try rem.Parser.init(&dom, decoded.items, allocator, .report, false);
+    // Create the HTML parser.
+    var parser = try rem.Parser.init(&dom, decoded_input, allocator, .report, false);
     defer parser.deinit();
+
+    // This causes the parser to read the input and produce a Document.
     try parser.run();
 
+    // `errors` returns the list of parse errors that were encountered while parsing.
+    // Since we know that our input was well-formed HTML, we expect there to be 0 parse errors.
     const errors = parser.errors();
-    for (errors) |e| {
-        try stderr.print("Parse error: {s}\n", .{@tagName(e)});
-    }
+    std.debug.assert(errors.len == 0);
 
+    // We can now print the resulting Document to the console.
+    const stdout = std.io.getStdOut().writer();
     const document = parser.getDocument();
     try rem.util.printDocument(stdout, document, &dom, allocator);
-    return 0;
 }

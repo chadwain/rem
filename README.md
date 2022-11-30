@@ -31,52 +31,58 @@ There is also a [GitLab mirror](https://gitlab.com/chwayne/rem).
 There are no dependencies other than a Zig compiler. You should use the latest version of Zig that is available.
 
 ## Use the code
-Here's an example of using the parser (you can also see the output of this program by running `zig build example`).
+Here's an example of using the parser. You can see the output of this program by running `zig build example`.
 
 ```zig
 const std = @import("std");
 const rem = @import("rem");
-const allocator = std.testing.allocator;
 
-pub fn main() !u8 {
-    const string = "<!doctype html><html><body>Click here to download more RAM!";
-    // The string must be decoded before it can be passed to the parser.
-    const input = &rem.util.utf8DecodeStringComptime(string);
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(!gpa.deinit());
+    const allocator = gpa.allocator();
+
+    // This is the text that will be read by the parser.
+    // Since the parser accepts Unicode codepoints, the text must be decoded before it can be used.
+    const input = "<!doctype html><html><h1 style=bold>Your text goes here!</h1>";
+    const decoded_input = &rem.util.utf8DecodeStringComptime(input);
 
     // Create the DOM in which the parsed Document will be created.
     var dom = rem.dom.Dom{ .allocator = allocator };
     defer dom.deinit();
 
-    var parser = try rem.Parser.init(&dom, input, allocator, .abort, false);
+    // Create the HTML parser.
+    var parser = try rem.Parser.init(&dom, decoded_input, allocator, .report, false);
     defer parser.deinit();
+
+    // This causes the parser to read the input and produce a Document.
     try parser.run();
 
+    // `errors` returns the list of parse errors that were encountered while parsing.
+    // Since we know that our input was well-formed HTML, we expect there to be 0 parse errors.
     const errors = parser.errors();
-    if (errors.len > 0) {
-        std.log.err("A parsing error occured!\n{s}\n", .{@tagName(errors[0])});
-        return 1;
-    }
+    std.debug.assert(errors.len == 0);
 
-    const writer = std.io.getStdOut().writer();
+    // We can now print the resulting Document to the console.
+    const stdout = std.io.getStdOut().writer();
     const document = parser.getDocument();
-    try rem.util.printDocument(writer, document, &dom, allocator);
-    return 0;
+    try rem.util.printDocument(stdout, document, &dom, allocator);
 }
 ```
 
 ## Test the code
-rem uses (a fork of) [html5lib-tests](https://github.com/html5lib/html5lib-tests) as a test suite. Specifically, it tests against the 'tokenizer' and 'tree-construction' tests from that suite. 
+rem uses [html5lib-tests](https://github.com/html5lib/html5lib-tests) as a test suite. Specifically, it tests against the 'tokenizer' and 'tree-construction' tests from that suite. 
 
 `zig build test-tokenizer` will run the 'tokenizer' tests.
-`zig build test-tree-construction` will run the 'tree-construction' tests in 2 ways: with scripting off, then with scripting on.
+`zig build test-tree-construction` will run the 'tree-construction' tests in 2 ways: with scripting disabled, then with scripting enabled.
 The expected results are as follows:
 - tokenizer: All tests pass.
-- tree-construction with scripting off: Some tests are skipped because they rely on HTML features that aren't yet implemented in this library (namely templates and namespaced element attributes). All other tests pass.
-- tree-construction with scripting on: Similar to testing with scripting off, but in addition, some entire test files are skipped because they would cause a crash.
+- tree-construction (scripting disabled): Some tests are skipped because they rely on HTML features that aren't yet implemented in this library (specifically, templates). All other tests pass.
+- tree-construction (scripting enabled): Similar to testing with scripting off, but in addition, some entire test files are skipped because they would cause panics.
 
 ## License
 ### GPL-3.0-only
-Copyright (C) 2021 Chadwain Holness
+Copyright (C) 2021-2022 Chadwain Holness
 
 rem is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 3.
 
