@@ -7,7 +7,7 @@ test "Tokenizer usage" {
     const allocator = std.testing.allocator;
 
     const string = "<!doctype><HTML>asdf</body hello=world>";
-    var input: []const u21 = &rem.util.utf8DecodeStringComptime(string);
+    const input: []const u21 = &rem.util.utf8DecodeStringComptime(string);
 
     var all_tokens = std.ArrayList(Token).init(allocator);
     defer {
@@ -18,10 +18,17 @@ test "Tokenizer usage" {
     var error_handler = ErrorHandler{ .report = ArrayList(ParseError).init(allocator) };
     defer error_handler.report.deinit();
 
-    var tokenizer = init(allocator, &all_tokens, &error_handler);
+    var tokenizer = init(input, allocator, &all_tokens, &error_handler);
     defer tokenizer.deinit();
 
-    while (try tokenizer.run(&input)) {}
+    var frame = async tokenizer.run();
+    while (true) switch (tokenizer.status) {
+        .Finished => try nosuspend await frame,
+        .WaitingForInput => {
+            tokenizer.input_stream = null;
+            resume frame;
+        },
+    };
 
     const expected_tokens = &[8]Token{
         .{ .doctype = .{ .name = null, .public_identifier = null, .system_identifier = null, .force_quirks = true } },
@@ -66,6 +73,17 @@ const debug = @import("builtin").mode == .Debug;
 const REPLACEMENT_CHARACTER = '\u{FFFD}';
 const TREAT_AS_ANYTHING_ELSE = '\u{FFFF}';
 
+pub const Status = enum {
+    /// The tokenizer has finished executing. The frame can be `nosuspend await`ed.
+    Finished,
+    /// The tokenizer has consumed all the characters in the input stream.
+    /// Set the value of the `input_stream` field appropriately, then resume the frame.
+    ///
+    /// * Setting `input_stream` to a non-null value will add characters to the input stream.
+    /// * Setting `input_stream` to null will signal that EOF has been reached.
+    WaitingForInput,
+};
+
 state: State = .Data,
 return_state: State = undefined,
 character_reference_code: u21 = 0,
@@ -87,10 +105,11 @@ current_comment_data: ArrayListUnmanaged(u8) = .{},
 temp_buffer: ArrayListUnmanaged(u21) = .{},
 adjusted_current_node_is_not_in_html_namespace: bool = false,
 
+input_stream: ?[]const u21,
+status: Status = undefined,
 reconsumed_input_char: ?u21 = undefined,
 should_reconsume: bool = false,
 previous_char_was_carriage_return: bool = false,
-reached_eof: bool = false,
 /// Stores codepoints that were read from the input stream but were not consumed.
 /// This buffer has a maximum length of 32, which is the length of the longest named character reference,
 /// ignoring the leading ampersand (namely '&CounterClockwiseContourIntegral;').
@@ -103,21 +122,24 @@ error_handler: *ErrorHandler,
 
 /// Create a new HTML5 tokenizer.
 pub fn init(
+    input_stream: ?[]const u21,
     allocator: Allocator,
     token_sink: *ArrayList(Token),
     error_handler: *ErrorHandler,
 ) Self {
-    return initState(allocator, .Data, token_sink, error_handler);
+    return initState(input_stream, allocator, .Data, token_sink, error_handler);
 }
 
 /// Create a new HTML5 tokenizer, and change to a particular state.
 pub fn initState(
+    input_stream: ?[]const u21,
     allocator: Allocator,
     state: State,
     token_sink: *ArrayList(Token),
     error_handler: *ErrorHandler,
 ) Self {
     return Self{
+        .input_stream = input_stream,
         .allocator = allocator,
         .state = state,
         .tokens = token_sink,
@@ -142,20 +164,28 @@ pub fn deinit(self: *Self) void {
     self.current_comment_data.deinit(self.allocator);
     self.temp_buffer.deinit(self.allocator);
 }
-/// Runs the tokenizer on the given input.
-/// The tokenizer will consume 1 or more characters from input.
-/// It will shrink input by the amount of characters consumed.
+/// Runs the tokenizer.
+/// Unless an error occurs, the tokenizer will consume all of the characters in the input stream.
 /// It will output 0 or more tokens to the token sink and 0 or more parse errors to the parse error sink.
 /// The memory taken up by these tokens and parse errors are owned by the user.
 ///
-/// Between every call to this function, the user must:
-///     1. Change the tokenizer's state via setState, if appropriate.
-///     2. Call setAdjustedCurrentNodeIsNotInHtmlNamespace with an appropriate value.
-///     3. Change the input stream, if appropriate.
-pub fn run(self: *Self, input: *[]const u21) !bool {
-    if (self.reached_eof) return false;
-    try processInput(self, input);
-    return true;
+/// When this function suspends, the user must:
+///     1. Check the `status` field
+///     2. Change the tokenizer's state via setState, if appropriate.
+///     3. Call setAdjustedCurrentNodeIsNotInHtmlNamespace with an appropriate value.
+pub fn run(self: *Self) !void {
+    while (self.state != .EOF) {
+        processInput(self) catch |err| {
+            suspend {
+                self.status = .Finished;
+            }
+            return err;
+        };
+    }
+
+    suspend {
+        self.status = .Finished;
+    }
 }
 
 pub fn setState(self: *Self, new_state: State) void {
@@ -167,6 +197,7 @@ pub fn setAdjustedCurrentNodeIsNotInHtmlNamespace(self: *Self, value: bool) void
 }
 
 pub const State = enum {
+    EOF,
     Data,
     RCDATA,
     RAWTEXT,
@@ -280,23 +311,31 @@ fn replayCharacters(self: *Self, codepoints: []const u21) void {
 /// Returns what would be the next input character in the input stream,
 /// taking into account that it could be a replayed character.
 /// A value of `null` represents the "EOF" character.
-fn nextInputStreamChar(self: *Self, input: *[]const u21, replayed_characters_index: *u6) ?u21 {
+fn nextInputStreamChar(self: *Self, replayed_characters_index: *u6) ?u21 {
     if (replayed_characters_index.* < self.replayed_characters_len) {
         const character = self.replayed_characters[replayed_characters_index.*];
         replayed_characters_index.* += 1;
         return character;
-    } else {
-        if (input.*.len == 0) return null;
-        const character = input.*[0];
-        input.* = input.*[1..];
+    } else while (self.input_stream) |input_stream| {
+        if (input_stream.len == 0) {
+            suspend {
+                self.status = .WaitingForInput;
+            }
+            self.status = undefined;
+            continue;
+        }
+        const character = input_stream[0];
+        self.input_stream = input_stream[1..];
         return character;
+    } else {
+        return null;
     }
 }
 
 /// Returns either the next input character in the input stream, or
 /// the previous input character to be reconsumed.
 /// Normalizes newlines according to §13.2.3.5 "Preprocessing the input stream" of the HTML standard.
-fn nextInputChar(self: *Self, input: *[]const u21) !?u21 {
+fn nextInputChar(self: *Self) !?u21 {
     if (self.should_reconsume) {
         self.should_reconsume = false;
         return self.reconsumed_input_char;
@@ -304,11 +343,11 @@ fn nextInputChar(self: *Self, input: *[]const u21) !?u21 {
         var replayed_characters_index: u6 = 0;
         defer self.consumeReplayedCharacters(replayed_characters_index);
 
-        var next_char = self.nextInputStreamChar(input, &replayed_characters_index);
+        var next_char = self.nextInputStreamChar(&replayed_characters_index);
 
         if (next_char) |character| {
             if (character == '\n' and self.previous_char_was_carriage_return) {
-                next_char = self.nextInputStreamChar(input, &replayed_characters_index);
+                next_char = self.nextInputStreamChar(&replayed_characters_index);
             }
         }
 
@@ -332,7 +371,7 @@ fn nextInputChar(self: *Self, input: *[]const u21) !?u21 {
 /// the previous input character to be reconsumed.
 /// Does not modify the state of the tokenizer.
 /// Normalizes newlines according to §13.2.3.5 "Preprocessing the input stream" of the HTML standard.
-fn peekInputChar(self: *Self, input: *[]const u21) ?u21 {
+fn peekInputChar(self: *Self) ?u21 {
     if (self.should_reconsume) {
         return self.reconsumed_input_char;
     } else {
@@ -340,11 +379,11 @@ fn peekInputChar(self: *Self, input: *[]const u21) ?u21 {
         var replayed: []const u21 = &[_]u21{};
         defer self.replayCharacters(replayed);
 
-        var next_char = self.nextInputStreamChar(input, &replayed_characters_index) orelse return null;
+        var next_char = self.nextInputStreamChar(&replayed_characters_index) orelse return null;
         replayed = &[1]u21{next_char};
 
         if (next_char == '\n' and self.previous_char_was_carriage_return) {
-            next_char = self.nextInputStreamChar(input, &replayed_characters_index) orelse return null;
+            next_char = self.nextInputStreamChar(&replayed_characters_index) orelse return null;
             replayed = &[2]u21{ '\n', next_char };
         }
 
@@ -359,31 +398,31 @@ fn peekInputChar(self: *Self, input: *[]const u21) ?u21 {
 /// Scans the next characters in the input stream to see if they are equal to `string`.
 /// If so, consumes those characters and returns `true`. Otherwise, adds any read characters
 /// to the list of replayed characters and returns `false`.
-fn consumeCharsIfEql(self: *Self, input: *[]const u21, comptime string: []const u8) bool {
+fn consumeCharsIfEql(self: *Self, comptime string: []const u8) bool {
     comptime assert(string.len <= 7);
     comptime assert(std.mem.indexOfScalar(u8, string, '\r') == null);
     const decoded_string = rem.util.utf8DecodeStringComptime(string);
-    return consumeCharsIfEqlGeneric(self, input, &decoded_string, caseSensitiveEql);
+    return consumeCharsIfEqlGeneric(self, &decoded_string, caseSensitiveEql);
 }
 
 /// Scans the next characters in the input stream to see if they are equal to `string` in
 /// a case-insensitive manner.
 /// If so, consumes those characters and returns `true`. Otherwise, adds any read characters
 /// to the list of replayed characters and returns `false`.
-fn consumeCharsIfCaseInsensitiveEql(self: *Self, input: *[]const u21, comptime string: []const u8) bool {
+fn consumeCharsIfCaseInsensitiveEql(self: *Self, comptime string: []const u8) bool {
     comptime assert(string.len <= 7);
     comptime assert(std.mem.indexOfScalar(u8, string, '\r') == null);
     const decoded_string = rem.util.utf8DecodeStringComptime(string);
-    return consumeCharsIfEqlGeneric(self, input, &decoded_string, caseInsensitiveEql);
+    return consumeCharsIfEqlGeneric(self, &decoded_string, caseInsensitiveEql);
 }
 
-fn consumeCharsIfEqlGeneric(self: *Self, input: *[]const u21, decoded_string: []const u21, comptime eqlFn: fn (u21, u21) bool) bool {
+fn consumeCharsIfEqlGeneric(self: *Self, decoded_string: []const u21, comptime eqlFn: fn (u21, u21) bool) bool {
     var read_characters: [7]u21 = undefined;
     var read_characters_len: u6 = 0;
 
     var replayed_characters_index: u6 = 0;
     for (decoded_string) |character| {
-        const next_char = self.nextInputStreamChar(input, &replayed_characters_index) orelse break;
+        const next_char = self.nextInputStreamChar(&replayed_characters_index) orelse break;
         read_characters[read_characters_len] = next_char;
         read_characters_len += 1;
         if (!eqlFn(next_char, character)) break;
@@ -655,7 +694,7 @@ fn emitComment(self: *Self) !void {
 }
 
 fn emitEOF(self: *Self) !void {
-    self.reached_eof = true;
+    self.setState(.EOF);
     try self.tokens.append(Token{ .eof = {} });
 }
 
@@ -711,13 +750,13 @@ fn flushCharacterReference(self: *Self) !void {
     }
 }
 
-fn findNamedCharacterReference(self: *Self, input: *[]const u21) !named_characters_data.Value {
+fn findNamedCharacterReference(self: *Self) !named_characters_data.Value {
     var node = named_characters_data.root;
     var replayed_characters_index: u6 = 0;
     var character_reference_consumed_codepoints_count: usize = 1;
     var last_matched_named_character_value = named_characters_data.Value{ null, null };
     while (true) {
-        const character = self.nextInputStreamChar(input, &replayed_characters_index) orelse break;
+        const character = self.nextInputStreamChar(&replayed_characters_index) orelse break;
         try self.appendTempBuffer(character);
         const key_index = node.find(character) orelse break;
 
@@ -775,10 +814,11 @@ fn adjustedCurrentNodeIsNotInHtmlNamespace(self: *Self) bool {
     return self.adjusted_current_node_is_not_in_html_namespace;
 }
 
-fn processInput(t: *Self, input: *[]const u21) !void {
+fn processInput(t: *Self) !void {
     switch (t.state) {
+        .EOF => unreachable,
         .Data => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '&' => t.toCharacterReferenceState(.Data),
                     '<' => t.setState(.TagOpen),
@@ -793,7 +833,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .RCDATA => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '&' => t.toCharacterReferenceState(.RCDATA),
                     '<' => t.setState(.RCDATALessThanSign),
@@ -808,7 +848,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .RAWTEXT => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '<' => t.setState(.RAWTEXTLessThanSign),
                     0x00 => {
@@ -822,7 +862,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptData => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '<' => t.setState(.ScriptDataLessThanSign),
                     0x00 => {
@@ -836,7 +876,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .PLAINTEXT => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     0x00 => {
                         try t.parseError(.UnexpectedNullCharacter);
@@ -849,7 +889,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .TagOpen => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '!' => t.setState(.MarkupDeclarationOpen),
                     '/' => t.setState(.EndTagOpen),
@@ -875,7 +915,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .EndTagOpen => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     'A'...'Z', 'a'...'z' => {
                         t.createEndTagToken();
@@ -898,7 +938,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .TagName => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => t.setState(.BeforeAttributeName),
                     '/' => t.setState(.SelfClosingStartTag),
@@ -919,7 +959,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .RCDATALessThanSign => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '/' => {
                     t.clearTempBuffer();
                     t.setState(.RCDATAEndTagOpen);
@@ -931,7 +971,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .RCDATAEndTagOpen => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 'A'...'Z', 'a'...'z' => {
                     t.createEndTagToken();
                     t.reconsume(.RCDATAEndTagName);
@@ -942,9 +982,9 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 },
             }
         },
-        .RCDATAEndTagName => try endTagName(t, input, .RCDATA),
+        .RCDATAEndTagName => try endTagName(t, .RCDATA),
         .RAWTEXTLessThanSign => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '/' => {
                     t.clearTempBuffer();
                     t.setState(.RAWTEXTEndTagOpen);
@@ -956,7 +996,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .RAWTEXTEndTagOpen => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 'A'...'Z', 'a'...'z' => {
                     t.createEndTagToken();
                     t.reconsume(.RAWTEXTEndTagName);
@@ -967,9 +1007,9 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 },
             }
         },
-        .RAWTEXTEndTagName => try endTagName(t, input, .RAWTEXT),
+        .RAWTEXTEndTagName => try endTagName(t, .RAWTEXT),
         .ScriptDataLessThanSign => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '/' => {
                     t.clearTempBuffer();
                     t.setState(.ScriptDataEndTagOpen);
@@ -985,7 +1025,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptDataEndTagOpen => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 'A'...'Z', 'a'...'z' => {
                     t.createEndTagToken();
                     t.reconsume(.ScriptDataEndTagName);
@@ -996,9 +1036,9 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 },
             }
         },
-        .ScriptDataEndTagName => try endTagName(t, input, .ScriptData),
+        .ScriptDataEndTagName => try endTagName(t, .ScriptData),
         .ScriptDataEscapeStart => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '-' => {
                     t.setState(.ScriptDataEscapeStartDash);
                     try t.emitCharacter('-');
@@ -1007,7 +1047,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptDataEscapeStartDash => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '-' => {
                     t.setState(.ScriptDataEscapedDashDash);
                     try t.emitCharacter('-');
@@ -1016,7 +1056,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptDataEscaped => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '-' => {
                         t.setState(.ScriptDataEscapedDash);
@@ -1035,7 +1075,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptDataEscapedDash => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '-' => {
                         t.setState(.ScriptDataEscapedDashDash);
@@ -1058,7 +1098,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptDataEscapedDashDash => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '-' => try t.emitCharacter('-'),
                     '<' => t.setState(.ScriptDataEscapedLessThanSign),
@@ -1082,7 +1122,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptDataEscapedLessThanSign => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '/' => {
                     t.clearTempBuffer();
                     t.setState(.ScriptDataEscapedEndTagOpen);
@@ -1099,7 +1139,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptDataEscapedEndTagOpen => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 'A'...'Z', 'a'...'z' => {
                     t.createEndTagToken();
                     t.reconsume(.ScriptDataEscapedEndTagName);
@@ -1110,9 +1150,9 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 },
             }
         },
-        .ScriptDataEscapedEndTagName => try endTagName(t, input, .ScriptDataEscaped),
+        .ScriptDataEscapedEndTagName => try endTagName(t, .ScriptDataEscaped),
         .ScriptDataDoubleEscapeStart => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '\t', '\n', 0x0C, ' ', '/', '>' => |c| {
                     t.setState(if (t.tempBufferEql("script")) .ScriptDataDoubleEscaped else .ScriptDataEscaped);
                     try t.emitCharacter(c);
@@ -1129,7 +1169,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptDataDoubleEscaped => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '-' => {
                         t.setState(.ScriptDataDoubleEscapedDash);
@@ -1151,7 +1191,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptDataDoubleEscapedDash => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '-' => {
                         t.setState(.ScriptDataDoubleEscapedDashDash);
@@ -1177,7 +1217,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptDataDoubleEscapedDashDash => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '-' => try t.emitCharacter('-'),
                     '<' => {
@@ -1204,7 +1244,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptDataDoubleEscapedLessThanSign => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '/' => {
                     t.clearTempBuffer();
                     t.setState(.ScriptDataDoubleEscapeEnd);
@@ -1215,7 +1255,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
         },
         // Nearly identical to ScriptDataDoubleEscapeStart.
         .ScriptDataDoubleEscapeEnd => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '\t', '\n', 0x0C, ' ', '/', '>' => |c| {
                     t.setState(if (t.tempBufferEql("script")) .ScriptDataEscaped else .ScriptDataDoubleEscaped);
                     try t.emitCharacter(c);
@@ -1233,7 +1273,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
         },
         .BeforeAttributeName => {
             // Make end-of-file (null) be handled the same as '>'
-            switch ((try t.nextInputChar(input)) orelse '>') {
+            switch ((try t.nextInputChar()) orelse '>') {
                 '\t', '\n', 0x0C, ' ' => {},
                 '/', '>' => t.reconsume(.AfterAttributeName),
                 '=' => {
@@ -1250,7 +1290,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
         },
         .AttributeName => {
             // Make end-of-file (null) be handled the same as '>'
-            switch ((try t.nextInputChar(input)) orelse '>') {
+            switch ((try t.nextInputChar()) orelse '>') {
                 '\t', '\n', 0x0C, ' ', '/', '>' => {
                     try t.finishAttributeName();
                     t.reconsume(.AfterAttributeName);
@@ -1274,7 +1314,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .AfterAttributeName => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => {},
                     '/' => t.setState(.SelfClosingStartTag),
@@ -1294,7 +1334,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .BeforeAttributeValue => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '\t', '\n', 0x0C, ' ' => {},
                 '"' => t.setState(.AttributeValueDoubleQuoted),
                 '\'' => t.setState(.AttributeValueSingleQuoted),
@@ -1307,7 +1347,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .AttributeValueDoubleQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '"' => {
                         try t.finishAttributeValue();
@@ -1327,7 +1367,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
         },
         // Nearly identical to AttributeValueDoubleQuoted.
         .AttributeValueSingleQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\'' => {
                         try t.finishAttributeValue();
@@ -1346,7 +1386,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .AttributeValueUnquoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => {
                         try t.finishAttributeValue();
@@ -1376,7 +1416,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .AfterAttributeValueQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => t.setState(.BeforeAttributeName),
                     '/' => t.setState(.SelfClosingStartTag),
@@ -1395,7 +1435,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .SelfClosingStartTag => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '>' => {
                         t.makeCurrentTagSelfClosing();
@@ -1413,7 +1453,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .BogusComment => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '>' => {
                         t.setState(.Data);
@@ -1431,12 +1471,12 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .MarkupDeclarationOpen => {
-            if (t.consumeCharsIfEql(input, "--")) {
+            if (t.consumeCharsIfEql("--")) {
                 t.createCommentToken();
                 t.setState(.CommentStart);
-            } else if (t.consumeCharsIfCaseInsensitiveEql(input, "DOCTYPE")) {
+            } else if (t.consumeCharsIfCaseInsensitiveEql("DOCTYPE")) {
                 t.setState(.DOCTYPE);
-            } else if (t.consumeCharsIfEql(input, "[CDATA[")) {
+            } else if (t.consumeCharsIfEql("[CDATA[")) {
                 if (t.adjustedCurrentNodeIsNotInHtmlNamespace()) {
                     t.setState(.CDATASection);
                 } else {
@@ -1452,7 +1492,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .CommentStart => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '-' => t.setState(.CommentStartDash),
                 '>' => {
                     try t.parseError(.AbruptClosingOfEmptyComment);
@@ -1463,7 +1503,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .CommentStartDash => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '-' => t.setState(.CommentEnd),
                     '>' => {
@@ -1483,7 +1523,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .Comment => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '<' => {
                         try t.appendComment('<');
@@ -1503,7 +1543,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .CommentLessThanSign => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '!' => {
                     try t.appendComment('!');
                     t.setState(.CommentLessThanSignBang);
@@ -1513,20 +1553,20 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .CommentLessThanSignBang => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '-' => t.setState(.CommentLessThanSignBangDash),
                 else => t.reconsume(.Comment),
             }
         },
         .CommentLessThanSignBangDash => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '-' => t.setState(.CommentLessThanSignBangDashDash),
                 else => t.reconsume(.CommentEndDash),
             }
         },
         .CommentLessThanSignBangDashDash => {
             // Make end-of-file (null) be handled the same as '>'
-            switch ((try t.nextInputChar(input)) orelse '>') {
+            switch ((try t.nextInputChar()) orelse '>') {
                 '>' => t.reconsume(.CommentEnd),
                 else => {
                     try t.parseError(.NestedComment);
@@ -1535,7 +1575,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .CommentEndDash => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '-' => t.setState(.CommentEnd),
                     else => {
@@ -1550,7 +1590,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .CommentEnd => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '>' => {
                         t.setState(.Data);
@@ -1571,7 +1611,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .CommentEndBang => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '-' => {
                         try t.appendComment('-');
@@ -1598,7 +1638,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .DOCTYPE => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => t.setState(.BeforeDOCTYPEName),
                     '>' => t.reconsume(.BeforeDOCTYPEName),
@@ -1616,7 +1656,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .BeforeDOCTYPEName => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => {},
                     'A'...'Z' => |c| {
@@ -1655,7 +1695,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .DOCTYPEName => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => t.setState(.AfterDOCTYPEName),
                     '>' => {
@@ -1677,7 +1717,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .AfterDOCTYPEName => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => {},
                     '>' => {
@@ -1685,9 +1725,9 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                         try t.emitDOCTYPE();
                     },
                     else => |c| {
-                        if (caseInsensitiveEql(c, 'P') and t.consumeCharsIfCaseInsensitiveEql(input, "UBLIC")) {
+                        if (caseInsensitiveEql(c, 'P') and t.consumeCharsIfCaseInsensitiveEql("UBLIC")) {
                             t.setState(.AfterDOCTYPEPublicKeyword);
-                        } else if (caseInsensitiveEql(c, 'S') and t.consumeCharsIfCaseInsensitiveEql(input, "YSTEM")) {
+                        } else if (caseInsensitiveEql(c, 'S') and t.consumeCharsIfCaseInsensitiveEql("YSTEM")) {
                             t.setState(.AfterDOCTYPESystemKeyword);
                         } else {
                             try t.parseError(.InvalidCharacterSequenceAfterDOCTYPEName);
@@ -1704,7 +1744,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .AfterDOCTYPEPublicKeyword => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => t.setState(.BeforeDOCTYPEPublicIdentifier),
                     '"' => {
@@ -1737,7 +1777,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .BeforeDOCTYPEPublicIdentifier => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => {},
                     '"' => {
@@ -1768,7 +1808,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .DOCTYPEPublicIdentifierDoubleQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '"' => t.setState(.AfterDOCTYPEPublicIdentifier),
                     0x00 => {
@@ -1792,7 +1832,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
         },
         // Nearly identical to DOCTYPEPublicIdentifierDoubleQuoted.
         .DOCTYPEPublicIdentifierSingleQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\'' => t.setState(.AfterDOCTYPEPublicIdentifier),
                     0x00 => {
@@ -1815,7 +1855,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .AfterDOCTYPEPublicIdentifier => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => t.setState(.BetweenDOCTYPEPublicAndSystemIdentifiers),
                     '>' => {
@@ -1846,7 +1886,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .BetweenDOCTYPEPublicAndSystemIdentifiers => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => {},
                     '>' => {
@@ -1875,7 +1915,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .AfterDOCTYPESystemKeyword => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => t.setState(.BeforeDOCTYPESystemIdentifier),
                     '"' => {
@@ -1908,7 +1948,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .BeforeDOCTYPESystemIdentifier => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => {},
                     '"' => {
@@ -1939,7 +1979,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .DOCTYPESystemIdentifierDoubleQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '"' => t.setState(.AfterDOCTYPESystemIdentifier),
                     0x00 => {
@@ -1963,7 +2003,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
         },
         // Nearly identical to DOCTYPESystemIdentifierDoubleQuoted
         .DOCTYPESystemIdentifierSingleQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\'' => t.setState(.AfterDOCTYPESystemIdentifier),
                     0x00 => {
@@ -1986,7 +2026,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .AfterDOCTYPESystemIdentifier => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '\t', '\n', 0x0C, ' ' => {},
                     '>' => {
@@ -2006,7 +2046,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .BogusDOCTYPE => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     '>' => {
                         t.setState(.Data);
@@ -2021,7 +2061,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .CDATASection => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            if (try t.nextInputChar()) |current_input_char| {
                 switch (current_input_char) {
                     ']' => t.setState(.CDATASectionBracket),
                     else => |c| try t.emitCharacter(c),
@@ -2032,7 +2072,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .CDATASectionBracket => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 ']' => t.setState(.CDATASectionEnd),
                 else => {
                     try t.emitCharacter(']');
@@ -2041,7 +2081,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .CDATASectionEnd => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 ']' => try t.emitCharacter(']'),
                 '>' => t.setState(.Data),
                 else => {
@@ -2054,29 +2094,29 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             // NOTE: This is not exactly as the spec says, but should yield the same results.
             t.clearTempBuffer();
             try t.appendTempBuffer('&');
-            switch (t.peekInputChar(input) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch (t.peekInputChar() orelse TREAT_AS_ANYTHING_ELSE) {
                 '0'...'9', 'A'...'Z', 'a'...'z' => {
                     t.setState(.NamedCharacterReference);
                 },
                 '#' => {
-                    _ = try t.nextInputChar(input);
+                    _ = try t.nextInputChar();
                     try t.appendTempBuffer('#');
                     t.setState(.NumericCharacterReference);
                 },
                 else => {
-                    _ = try t.nextInputChar(input);
+                    _ = try t.nextInputChar();
                     try t.flushCharacterReference();
                     t.reconsumeInReturnState();
                 },
             }
         },
         .NamedCharacterReference => {
-            const chars = try t.findNamedCharacterReference(input);
+            const chars = try t.findNamedCharacterReference();
             const match_found = chars[0] != null;
             if (match_found) {
                 const historical_reasons = t.isPartOfAnAttribute() and
                     t.tempBufferLast() != ';' and
-                    switch (t.peekInputChar(input) orelse TREAT_AS_ANYTHING_ELSE) {
+                    switch (t.peekInputChar() orelse TREAT_AS_ANYTHING_ELSE) {
                     '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
                     else => false,
                 };
@@ -2099,7 +2139,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .AmbiguousAmpersand => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '0'...'9', 'A'...'Z', 'a'...'z' => |c| if (t.isPartOfAnAttribute()) try t.appendCurrentAttributeValue(c) else try t.emitCharacter(c),
                 ';' => {
                     try t.parseError(.UnknownNamedCharacterReference);
@@ -2110,7 +2150,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
         },
         .NumericCharacterReference => {
             t.character_reference_code = 0;
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 'x', 'X' => |c| {
                     try t.appendTempBuffer(c);
                     t.setState(.HexadecimalCharacterReferenceStart);
@@ -2119,7 +2159,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .HexadecimalCharacterReferenceStart => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '0'...'9', 'A'...'F', 'a'...'f' => t.reconsume(.HexadecimalCharacterReference),
                 else => {
                     try t.parseError(.AbsenceOfDigitsInNumericCharacterReference);
@@ -2129,7 +2169,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .DecimalCharacterReferenceStart => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '0'...'9' => t.reconsume(.DecimalCharacterReference),
                 else => {
                     try t.parseError(.AbsenceOfDigitsInNumericCharacterReference);
@@ -2139,7 +2179,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .HexadecimalCharacterReference => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '0'...'9' => |c| t.characterReferenceCodeAddDigit(16, decimalCharToNumber(c)),
                 'A'...'F' => |c| t.characterReferenceCodeAddDigit(16, upperHexCharToNumber(c)),
                 'a'...'f' => |c| t.characterReferenceCodeAddDigit(16, lowerHexCharToNumber(c)),
@@ -2151,7 +2191,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .DecimalCharacterReference => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch ((try t.nextInputChar()) orelse TREAT_AS_ANYTHING_ELSE) {
                 '0'...'9' => |c| t.characterReferenceCodeAddDigit(10, decimalCharToNumber(c)),
                 ';' => t.setState(.NumericCharacterReferenceEnd),
                 else => {
@@ -2254,8 +2294,8 @@ fn processInput(t: *Self, input: *[]const u21) !void {
     }
 }
 
-fn endTagName(t: *Self, input: *[]const u21, next_state: State) !void {
-    if (try t.nextInputChar(input)) |current_input_char| {
+fn endTagName(t: *Self, next_state: State) !void {
+    if (try t.nextInputChar()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {
                 if (t.isAppropriateEndTag()) {
