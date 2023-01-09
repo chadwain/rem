@@ -610,13 +610,13 @@ fn clearTempBuffer(self: *Self) void {
 fn emitDOCTYPE(self: *Self) !void {
     const token = try self.tokens.addOne();
 
-    const name = self.current_doctype_name.toOwnedSlice(self.allocator);
+    const name = try self.current_doctype_name.toOwnedSlice(self.allocator);
     if (self.current_doctype_name_is_missing) assert(name.len == 0);
 
-    const public_identifier = self.current_doctype_public_identifier.toOwnedSlice(self.allocator);
+    const public_identifier = try self.current_doctype_public_identifier.toOwnedSlice(self.allocator);
     if (self.current_doctype_public_identifier_is_missing) assert(public_identifier.len == 0);
 
-    const system_identifier = self.current_doctype_system_identifier.toOwnedSlice(self.allocator);
+    const system_identifier = try self.current_doctype_system_identifier.toOwnedSlice(self.allocator);
     if (self.current_doctype_system_identifier_is_missing) assert(system_identifier.len == 0);
 
     token.* = Token{ .doctype = .{
@@ -649,7 +649,7 @@ fn emitTempBufferCharacters(self: *Self) !void {
 }
 
 fn emitComment(self: *Self) !void {
-    const data = self.current_comment_data.toOwnedSlice(self.allocator);
+    const data = try self.current_comment_data.toOwnedSlice(self.allocator);
     errdefer self.allocator.free(data);
     try self.tokens.append(Token{ .comment = .{ .data = data } });
 }
@@ -660,7 +660,7 @@ fn emitEOF(self: *Self) !void {
 }
 
 fn emitCurrentTag(self: *Self) !void {
-    const name = self.current_tag_name.toOwnedSlice(self.allocator);
+    const name = try self.current_tag_name.toOwnedSlice(self.allocator);
     errdefer self.allocator.free(name);
     switch (self.current_tag_type) {
         .Start => {
