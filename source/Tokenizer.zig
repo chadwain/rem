@@ -1308,45 +1308,8 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 else => t.reconsume(.AttributeValueUnquoted),
             }
         },
-        .AttributeValueDoubleQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '"' => {
-                        try t.finishAttributeValue();
-                        t.setState(.AfterAttributeValueQuoted);
-                    },
-                    '&' => t.toCharacterReferenceState(.AttributeValueDoubleQuoted),
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
-                    },
-                    else => |c| try t.appendCurrentAttributeValue(c),
-                }
-            } else {
-                try t.parseError(.EOFInTag);
-                try t.emitEOF();
-            }
-        },
-        // Nearly identical to AttributeValueDoubleQuoted.
-        .AttributeValueSingleQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\'' => {
-                        try t.finishAttributeValue();
-                        t.setState(.AfterAttributeValueQuoted);
-                    },
-                    '&' => t.toCharacterReferenceState(.AttributeValueSingleQuoted),
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
-                    },
-                    else => |c| try t.appendCurrentAttributeValue(c),
-                }
-            } else {
-                try t.parseError(.EOFInTag);
-                try t.emitEOF();
-            }
-        },
+        .AttributeValueDoubleQuoted => try attributeValueQuoted(t, input, .AttributeValueDoubleQuoted),
+        .AttributeValueSingleQuoted => try attributeValueQuoted(t, input, .AttributeValueSingleQuoted),
         .AttributeValueUnquoted => {
             if (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
@@ -2297,6 +2260,36 @@ fn endTagName(t: *Self, input: *[]const u21, next_state: State) !void {
     try t.emitString("</");
     try t.emitTempBufferCharacters();
     t.reconsume(next_state);
+}
+
+fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime return_state: State) !void {
+    const quote = switch (return_state) {
+        .AttributeValueSingleQuoted => '\'',
+        .AttributeValueDoubleQuoted => '"',
+        else => unreachable,
+    };
+
+    while (try t.nextInputChar(input)) |current_input_char| {
+        switch (current_input_char) {
+            quote => {
+                try t.finishAttributeValue();
+                t.setState(.AfterAttributeValueQuoted);
+                return;
+            },
+            '&' => {
+                t.toCharacterReferenceState(return_state);
+                return;
+            },
+            0x00 => {
+                try t.parseError(.UnexpectedNullCharacter);
+                try t.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
+            },
+            else => |c| try t.appendCurrentAttributeValue(c),
+        }
+    } else {
+        try t.parseError(.EOFInTag);
+        try t.emitEOF();
+    }
 }
 
 fn toLowercase(character: u21) u21 {
