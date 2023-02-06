@@ -181,7 +181,6 @@ pub const State = enum {
     RAWTEXTLessThanSign,
     RAWTEXTEndTagOpen,
     RAWTEXTEndTagName,
-    ScriptDataEndTagName,
     ScriptDataEscapeStart,
     ScriptDataEscapeStartDash,
     ScriptDataEscaped,
@@ -954,56 +953,52 @@ fn processInput(t: *Self, input: *[]const u21) !void {
         .RAWTEXTEndTagName => try endTagName(t, input, .RAWTEXT),
         .ScriptData => {
             var current_input_char = try t.nextInputChar(input);
-            while (current_input_char) |char| {
-                switch (char) {
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.emitCharacter(REPLACEMENT_CHARACTER);
-                        current_input_char = try t.nextInputChar(input);
-                    },
-                    else => {
-                        try t.emitCharacter(char);
-                        current_input_char = try t.nextInputChar(input);
-                    },
-                    '<' => {
-                        // t.setState(.ScriptDataLessThanSign)
-                        current_input_char = try t.nextInputChar(input);
-                        switch (current_input_char orelse TREAT_AS_ANYTHING_ELSE) {
-                            else => {
-                                try t.emitCharacter('<');
-                                continue;
-                            },
-                            '/' => {
-                                t.clearTempBuffer();
-                                // t.setState(.ScriptDataEndTagOpen);
-                                current_input_char = try t.nextInputChar(input);
-                                switch (current_input_char orelse TREAT_AS_ANYTHING_ELSE) {
-                                    'A'...'Z', 'a'...'z' => {
-                                        t.createEndTagToken();
-                                        t.reconsume(.ScriptDataEndTagName);
-                                        return;
-                                        // ScriptDataEndTagName
-                                        //try endTagName(t, input, .ScriptData);
-                                        //current_input_char = try t.nextInputChar(input);
-                                    },
-                                    else => {
-                                        try t.emitString("</");
-                                    },
-                                }
-                            },
-                            '!' => {
-                                try t.emitString("<!");
-                                t.setState(.ScriptDataEscapeStart);
-                                return;
-                            },
-                        }
-                    },
-                }
+            while (current_input_char) |char| switch (char) {
+                0x00 => {
+                    try t.parseError(.UnexpectedNullCharacter);
+                    try t.emitCharacter(REPLACEMENT_CHARACTER);
+                    current_input_char = try t.nextInputChar(input);
+                },
+                else => {
+                    try t.emitCharacter(char);
+                    current_input_char = try t.nextInputChar(input);
+                },
+                '<' => {
+                    // t.setState(.ScriptDataLessThanSign)
+                    current_input_char = try t.nextInputChar(input);
+                    switch (current_input_char orelse TREAT_AS_ANYTHING_ELSE) {
+                        else => {
+                            try t.emitCharacter('<');
+                            continue;
+                        },
+                        '/' => {
+                            t.clearTempBuffer();
+                            // t.setState(.ScriptDataEndTagOpen);
+                            current_input_char = try t.nextInputChar(input);
+                            switch (current_input_char orelse TREAT_AS_ANYTHING_ELSE) {
+                                'A'...'Z', 'a'...'z' => {
+                                    t.createEndTagToken();
+                                    // ScriptDataEndTagName
+                                    t.reconsume(.ScriptData);
+                                    try endTagName(t, input, .ScriptData);
+                                    return;
+                                },
+                                else => {
+                                    try t.emitString("</");
+                                },
+                            }
+                        },
+                        '!' => {
+                            try t.emitString("<!");
+                            t.setState(.ScriptDataEscapeStart);
+                            return;
+                        },
+                    }
+                },
             } else {
                 try t.emitEOF();
             }
         },
-        .ScriptDataEndTagName => try endTagName(t, input, .ScriptData),
         .ScriptDataEscapeStart => {
             switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
                 '-' => {
@@ -2262,19 +2257,21 @@ fn processInput(t: *Self, input: *[]const u21) !void {
 }
 
 fn endTagName(t: *Self, input: *[]const u21, next_state: State) !void {
-    if (try t.nextInputChar(input)) |current_input_char| {
+    while (try t.nextInputChar(input)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {
                 if (t.isAppropriateEndTag()) {
                     t.setState(.BeforeAttributeName);
                     return;
                 }
+                break;
             },
             '/' => {
                 if (t.isAppropriateEndTag()) {
                     t.setState(.SelfClosingStartTag);
                     return;
                 }
+                break;
             },
             '>' => {
                 if (t.isAppropriateEndTag()) {
@@ -2282,19 +2279,17 @@ fn endTagName(t: *Self, input: *[]const u21, next_state: State) !void {
                     try t.emitCurrentTag();
                     return;
                 }
+                break;
             },
-            // These 2 prongs don't switch state (this could be in a loop)
             'A'...'Z' => |c| {
                 try t.appendCurrentTagName(toLowercase(c));
                 try t.appendTempBuffer(c);
-                return;
             },
             'a'...'z' => |c| {
                 try t.appendCurrentTagName(c);
                 try t.appendTempBuffer(c);
-                return;
             },
-            else => {},
+            else => break,
         }
     }
 
