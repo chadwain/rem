@@ -201,7 +201,6 @@ pub const State = enum {
     AttributeValueDoubleQuoted,
     AttributeValueSingleQuoted,
     AttributeValueUnquoted,
-    AfterAttributeValueQuoted,
     SelfClosingStartTag,
     BogusComment,
     MarkupDeclarationOpen,
@@ -541,16 +540,14 @@ fn appendCurrentAttributeValue(self: *Self, character: u21) !void {
 }
 
 fn finishAttributeName(self: *Self) !void {
-    const name = try self.allocator.dupe(u8, self.generic_buffer.items);
-    self.generic_buffer.clearRetainingCapacity();
-    const get_result = self.current_tag_attributes.getOrPut(self.allocator, name) catch |err| {
-        self.allocator.free(name);
-        return err;
-    };
+    const get_result = try self.current_tag_attributes.getOrPut(self.allocator, self.generic_buffer.items);
+    errdefer if (!get_result.found_existing) self.current_tag_attributes.removeByPtr(get_result.key_ptr);
+
+    defer self.generic_buffer.clearRetainingCapacity();
     if (get_result.found_existing) {
-        self.allocator.free(name);
         try self.parseError(.DuplicateAttribute);
     } else {
+        get_result.key_ptr.* = try self.allocator.dupe(u8, self.generic_buffer.items);
         get_result.value_ptr.* = "";
         self.current_attribute_value_result_location = get_result.value_ptr;
     }
@@ -1345,25 +1342,6 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                             else => {},
                         }
                         try t.appendCurrentAttributeValue(c);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInTag);
-                try t.emitEOF();
-            }
-        },
-        .AfterAttributeValueQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => t.setState(.BeforeAttributeName),
-                    '/' => t.setState(.SelfClosingStartTag),
-                    '>' => {
-                        t.setState(.Data);
-                        try t.emitCurrentTag();
-                    },
-                    else => {
-                        try t.parseError(.MissingWhitespaceBetweenAttributes);
-                        t.reconsume(.BeforeAttributeName);
                     },
                 }
             } else {
@@ -2285,8 +2263,7 @@ fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime return_state: St
         switch (current_input_char) {
             quote => {
                 try t.finishAttributeValue();
-                t.setState(.AfterAttributeValueQuoted);
-                return;
+                break;
             },
             '&' => {
                 t.toCharacterReferenceState(return_state);
@@ -2301,6 +2278,27 @@ fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime return_state: St
     } else {
         try t.parseError(.EOFInTag);
         try t.emitEOF();
+        return;
+    }
+
+    // AfterAttributeValueQuoted
+    if (try t.nextInputChar(input)) |current_input_char| {
+        switch (current_input_char) {
+            '\t', '\n', 0x0C, ' ' => return t.setState(.BeforeAttributeName),
+            '/' => return t.setState(.SelfClosingStartTag),
+            '>' => {
+                try t.emitCurrentTag();
+                return t.setState(.Data);
+            },
+            else => {
+                try t.parseError(.MissingWhitespaceBetweenAttributes);
+                return t.reconsume(.BeforeAttributeName);
+            },
+        }
+    } else {
+        try t.parseError(.EOFInTag);
+        try t.emitEOF();
+        return;
     }
 }
 
