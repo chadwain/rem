@@ -219,15 +219,9 @@ pub const State = enum {
     DOCTYPEName,
     AfterDOCTYPEName,
     AfterDOCTYPEPublicKeyword,
-    BeforeDOCTYPEPublicIdentifier,
-    DOCTYPEPublicIdentifierDoubleQuoted,
-    DOCTYPEPublicIdentifierSingleQuoted,
     AfterDOCTYPEPublicIdentifier,
     BetweenDOCTYPEPublicAndSystemIdentifiers,
     AfterDOCTYPESystemKeyword,
-    BeforeDOCTYPESystemIdentifier,
-    DOCTYPESystemIdentifierDoubleQuoted,
-    DOCTYPESystemIdentifierSingleQuoted,
     AfterDOCTYPESystemIdentifier,
     BogusDOCTYPE,
     CDATASection,
@@ -1658,117 +1652,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 try t.emitEOF();
             }
         },
-        .AfterDOCTYPEPublicKeyword => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => t.setState(.BeforeDOCTYPEPublicIdentifier),
-                    '"' => {
-                        try t.parseError(.MissingWhitespaceAfterDOCTYPEPublicKeyword);
-                        t.markCurrentDOCTYPEPublicIdentifierNotMissing();
-                        t.setState(.DOCTYPEPublicIdentifierDoubleQuoted);
-                    },
-                    '\'' => {
-                        try t.parseError(.MissingWhitespaceAfterDOCTYPEPublicKeyword);
-                        t.markCurrentDOCTYPEPublicIdentifierNotMissing();
-                        t.setState(.DOCTYPEPublicIdentifierSingleQuoted);
-                    },
-                    '>' => {
-                        try t.parseError(.MissingDOCTYPEPublicIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    else => {
-                        try t.parseError(.MissingQuoteBeforeDOCTYPEPublicIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.reconsume(.BogusDOCTYPE);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
-        .BeforeDOCTYPEPublicIdentifier => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => {},
-                    '"' => {
-                        t.markCurrentDOCTYPEPublicIdentifierNotMissing();
-                        t.setState(.DOCTYPEPublicIdentifierDoubleQuoted);
-                    },
-                    '\'' => {
-                        t.markCurrentDOCTYPEPublicIdentifierNotMissing();
-                        t.setState(.DOCTYPEPublicIdentifierSingleQuoted);
-                    },
-                    '>' => {
-                        try t.parseError(.MissingDOCTYPEPublicIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    else => {
-                        try t.parseError(.MissingQuoteBeforeDOCTYPEPublicIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.reconsume(.BogusDOCTYPE);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
-        .DOCTYPEPublicIdentifierDoubleQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '"' => t.setState(.AfterDOCTYPEPublicIdentifier),
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.appendDOCTYPEPublicIdentifier(REPLACEMENT_CHARACTER);
-                    },
-                    '>' => {
-                        try t.parseError(.AbruptDOCTYPEPublicIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    else => |c| try t.appendDOCTYPEPublicIdentifier(c),
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
-        // Nearly identical to DOCTYPEPublicIdentifierDoubleQuoted.
-        .DOCTYPEPublicIdentifierSingleQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\'' => t.setState(.AfterDOCTYPEPublicIdentifier),
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.appendDOCTYPEPublicIdentifier(REPLACEMENT_CHARACTER);
-                    },
-                    '>' => {
-                        try t.parseError(.AbruptDOCTYPEPublicIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    else => |c| try t.appendDOCTYPEPublicIdentifier(c),
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
+        .AfterDOCTYPEPublicKeyword => try afterDOCTYPEPublicOrSystemKeyword(t, input, .public),
         .AfterDOCTYPEPublicIdentifier => {
             if (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
@@ -1777,15 +1661,9 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                         t.setState(.Data);
                         try t.emitDOCTYPE();
                     },
-                    '"' => {
+                    '"', '\'' => |quote| {
                         try t.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
-                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                        t.setState(.DOCTYPESystemIdentifierDoubleQuoted);
-                    },
-                    '\'' => {
-                        try t.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
-                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                        t.setState(.DOCTYPESystemIdentifierSingleQuoted);
+                        try doctypePublicOrSystemIdentifier(t, input, .system, quote);
                     },
                     else => {
                         try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
@@ -1808,13 +1686,8 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                         t.setState(.Data);
                         try t.emitDOCTYPE();
                     },
-                    '"' => {
-                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                        t.setState(.DOCTYPESystemIdentifierDoubleQuoted);
-                    },
-                    '\'' => {
-                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                        t.setState(.DOCTYPESystemIdentifierSingleQuoted);
+                    '"', '\'' => |quote| {
+                        try doctypePublicOrSystemIdentifier(t, input, .system, quote);
                     },
                     else => {
                         try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
@@ -1829,117 +1702,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 try t.emitEOF();
             }
         },
-        .AfterDOCTYPESystemKeyword => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => t.setState(.BeforeDOCTYPESystemIdentifier),
-                    '"' => {
-                        try t.parseError(.MissingWhitespaceAfterDOCTYPESystemKeyword);
-                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                        t.setState(.DOCTYPESystemIdentifierDoubleQuoted);
-                    },
-                    '\'' => {
-                        try t.parseError(.MissingWhitespaceAfterDOCTYPESystemKeyword);
-                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                        t.setState(.DOCTYPESystemIdentifierSingleQuoted);
-                    },
-                    '>' => {
-                        try t.parseError(.MissingDOCTYPESystemIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    else => {
-                        try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.reconsume(.BogusDOCTYPE);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
-        .BeforeDOCTYPESystemIdentifier => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => {},
-                    '"' => {
-                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                        t.setState(.DOCTYPESystemIdentifierDoubleQuoted);
-                    },
-                    '\'' => {
-                        t.markCurrentDOCTYPESystemIdentifierNotMissing();
-                        t.setState(.DOCTYPESystemIdentifierSingleQuoted);
-                    },
-                    '>' => {
-                        try t.parseError(.MissingDOCTYPESystemIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    else => {
-                        try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.reconsume(.BogusDOCTYPE);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
-        .DOCTYPESystemIdentifierDoubleQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '"' => t.setState(.AfterDOCTYPESystemIdentifier),
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.appendDOCTYPESystemIdentifier(REPLACEMENT_CHARACTER);
-                    },
-                    '>' => {
-                        try t.parseError(.AbruptDOCTYPESystemIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    else => |c| try t.appendDOCTYPESystemIdentifier(c),
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
-        // Nearly identical to DOCTYPESystemIdentifierDoubleQuoted
-        .DOCTYPESystemIdentifierSingleQuoted => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\'' => t.setState(.AfterDOCTYPESystemIdentifier),
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.appendDOCTYPESystemIdentifier(REPLACEMENT_CHARACTER);
-                    },
-                    '>' => {
-                        try t.parseError(.AbruptDOCTYPESystemIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    else => |c| try t.appendDOCTYPESystemIdentifier(c),
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
+        .AfterDOCTYPESystemKeyword => try afterDOCTYPEPublicOrSystemKeyword(t, input, .system),
         .AfterDOCTYPESystemIdentifier => {
             if (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
@@ -2209,6 +1972,13 @@ fn processInput(t: *Self, input: *[]const u21) !void {
     }
 }
 
+fn skipHtmlWhitespace(t: *Self, input: *[]const u21) !void {
+    while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+        '\t', '\n', 0x0C, ' ' => {},
+        else => return t.reconsume(t.state),
+    };
+}
+
 fn endTagName(t: *Self, input: *[]const u21, next_state: State) !void {
     while (try t.nextInputChar(input)) |current_input_char| {
         switch (current_input_char) {
@@ -2299,6 +2069,128 @@ fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime return_state: St
         try t.parseError(.EOFInTag);
         try t.emitEOF();
         return;
+    }
+}
+
+fn eofInDoctype(t: *Self) !void {
+    try t.parseError(.EOFInDOCTYPE);
+    t.currentDOCTYPETokenForceQuirks();
+    try t.emitDOCTYPE();
+    try t.emitEOF();
+}
+
+const PublicOrSystem = enum { public, system };
+
+fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_system: PublicOrSystem) !void {
+    // AfterDOCTYPEPublicKeyword
+    // AfterDOCTYPESystemKeyword
+    if (try t.nextInputChar(input)) |current_input_char| {
+        switch (current_input_char) {
+            '\t', '\n', 0x0C, ' ' => {},
+            '"', '\'' => |quote| {
+                const err: ParseError = switch (public_or_system) {
+                    .public => .MissingWhitespaceAfterDOCTYPEPublicKeyword,
+                    .system => .MissingWhitespaceAfterDOCTYPESystemKeyword,
+                };
+                try t.parseError(err);
+                return doctypePublicOrSystemIdentifier(t, input, public_or_system, quote);
+            },
+            '>' => {
+                const err: ParseError = switch (public_or_system) {
+                    .public => .MissingDOCTYPEPublicIdentifier,
+                    .system => .MissingDOCTYPESystemIdentifier,
+                };
+                try t.parseError(err);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                return t.setState(.Data);
+            },
+            else => {
+                const err: ParseError = switch (public_or_system) {
+                    .public => .MissingQuoteBeforeDOCTYPEPublicIdentifier,
+                    .system => .MissingQuoteBeforeDOCTYPESystemIdentifier,
+                };
+                try t.parseError(err);
+                t.currentDOCTYPETokenForceQuirks();
+                return t.reconsume(.BogusDOCTYPE);
+            },
+        }
+    } else {
+        return eofInDoctype(t);
+    }
+
+    // BeforeDOCTYPEPublicIdentifier
+    // BeforeDOCTYPESystemIdentifier
+    try skipHtmlWhitespace(t, input);
+    if (try t.nextInputChar(input)) |current_input_char| {
+        switch (current_input_char) {
+            '\t', '\n', 0x0C, ' ' => unreachable,
+            '"', '\'' => |quote| return doctypePublicOrSystemIdentifier(t, input, public_or_system, quote),
+            '>' => {
+                const err: ParseError = switch (public_or_system) {
+                    .public => .MissingDOCTYPEPublicIdentifier,
+                    .system => .MissingDOCTYPESystemIdentifier,
+                };
+                try t.parseError(err);
+                t.currentDOCTYPETokenForceQuirks();
+                try t.emitDOCTYPE();
+                return t.setState(.Data);
+            },
+            else => {
+                const err: ParseError = switch (public_or_system) {
+                    .public => .MissingQuoteBeforeDOCTYPEPublicIdentifier,
+                    .system => .MissingQuoteBeforeDOCTYPESystemIdentifier,
+                };
+                try t.parseError(err);
+                t.currentDOCTYPETokenForceQuirks();
+                return t.reconsume(.BogusDOCTYPE);
+            },
+        }
+    } else {
+        return eofInDoctype(t);
+    }
+}
+
+fn doctypePublicOrSystemIdentifier(t: *Self, input: *[]const u21, public_or_system: PublicOrSystem, quote: u21) !void {
+    // DOCTYPEPublicIdentifierDoubleQuoted
+    // DOCTYPEPublicIdentifierSingleQuoted
+    // DOCTYPESystemIdentifierDoubleQuoted
+    // DOCTYPESystemIdentifierSingleQuoted
+
+    const markNotMissing = switch (public_or_system) {
+        .public => markCurrentDOCTYPEPublicIdentifierNotMissing,
+        .system => markCurrentDOCTYPESystemIdentifierNotMissing,
+    };
+    markNotMissing(t);
+
+    const append = switch (public_or_system) {
+        .public => appendDOCTYPEPublicIdentifier,
+        .system => appendDOCTYPESystemIdentifier,
+    };
+    while (try t.nextInputChar(input)) |current_input_char| {
+        if (current_input_char == quote) {
+            const next_state: State = switch (public_or_system) {
+                .public => .AfterDOCTYPEPublicIdentifier,
+                .system => .AfterDOCTYPESystemIdentifier,
+            };
+            return t.setState(next_state);
+        } else if (current_input_char == 0x00) {
+            try t.parseError(.UnexpectedNullCharacter);
+            try append(t, REPLACEMENT_CHARACTER);
+        } else if (current_input_char == '>') {
+            const err: ParseError = switch (public_or_system) {
+                .public => .AbruptDOCTYPEPublicIdentifier,
+                .system => .AbruptDOCTYPESystemIdentifier,
+            };
+            try t.parseError(err);
+            t.currentDOCTYPETokenForceQuirks();
+            try t.emitDOCTYPE();
+            return t.setState(.Data);
+        } else {
+            try append(t, current_input_char);
+        }
+    } else {
+        return eofInDoctype(t);
     }
 }
 
