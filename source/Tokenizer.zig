@@ -183,9 +183,6 @@ pub const State = enum {
     TagOpen,
     EndTagOpen,
     TagName,
-    RCDATALessThanSign,
-    RCDATAEndTagOpen,
-    RCDATAEndTagName,
     RAWTEXTLessThanSign,
     RAWTEXTEndTagOpen,
     RAWTEXTEndTagName,
@@ -784,21 +781,6 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 try t.emitEOF();
             }
         },
-        .RCDATA => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '&' => t.toCharacterReferenceState(.RCDATA),
-                    '<' => t.setState(.RCDATALessThanSign),
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.emitCharacter(REPLACEMENT_CHARACTER);
-                    },
-                    else => |c| try t.emitCharacter(c),
-                }
-            } else {
-                try t.emitEOF();
-            }
-        },
         .RAWTEXT => {
             if (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
@@ -814,7 +796,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .PLAINTEXT => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            while (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
                     0x00 => {
                         try t.parseError(.UnexpectedNullCharacter);
@@ -823,7 +805,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                     else => |c| try t.emitCharacter(c),
                 }
             } else {
-                try t.emitEOF();
+                return t.emitEOF();
             }
         },
         .TagOpen => {
@@ -896,31 +878,43 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 try t.emitEOF();
             }
         },
-        .RCDATALessThanSign => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '/' => {
-                    t.clearTempBuffer();
-                    t.setState(.RCDATAEndTagOpen);
-                },
-                else => {
-                    try t.emitCharacter('<');
-                    t.reconsume(.RCDATA);
-                },
+        .RCDATA => {
+            while (try t.nextInputChar(input)) |current_input_char| {
+                switch (current_input_char) {
+                    '&' => return t.toCharacterReferenceState(.RCDATA),
+                    0x00 => {
+                        try t.parseError(.UnexpectedNullCharacter);
+                        try t.emitCharacter(REPLACEMENT_CHARACTER);
+                    },
+                    else => |c| try t.emitCharacter(c),
+                    '<' => {
+                        // RCDATALessThanSign
+                        if ((try t.nextInputChar(input)) != @as(u21, '/')) {
+                            try t.emitCharacter('<');
+                            t.reconsume(.RCDATA);
+                            continue;
+                        }
+
+                        // RCDATAEndTagOpen
+                        t.clearTempBuffer();
+                        switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+                            'A'...'Z', 'a'...'z' => {
+                                t.createEndTagToken();
+                                t.reconsume(.RCDATA);
+                                // RCDATAEndTagName
+                                return endTagName(t, input, .RCDATA);
+                            },
+                            else => {
+                                try t.emitString("</");
+                                t.reconsume(.RCDATA);
+                            },
+                        }
+                    },
+                }
+            } else {
+                return t.emitEOF();
             }
         },
-        .RCDATAEndTagOpen => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                'A'...'Z', 'a'...'z' => {
-                    t.createEndTagToken();
-                    t.reconsume(.RCDATAEndTagName);
-                },
-                else => {
-                    try t.emitString("</");
-                    t.reconsume(.RCDATA);
-                },
-            }
-        },
-        .RCDATAEndTagName => try endTagName(t, input, .RCDATA),
         .RAWTEXTLessThanSign => {
             switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
                 '/' => {
