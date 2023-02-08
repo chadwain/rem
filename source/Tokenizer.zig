@@ -142,6 +142,7 @@ pub fn deinit(self: *Self) void {
     self.current_comment_data.deinit(self.allocator);
     self.temp_buffer.deinit(self.allocator);
 }
+
 /// Runs the tokenizer on the given input.
 /// The tokenizer will consume 1 or more characters from input.
 /// It will shrink input by the amount of characters consumed.
@@ -165,6 +166,13 @@ pub fn setState(self: *Self, new_state: State) void {
 pub fn setAdjustedCurrentNodeIsNotInHtmlNamespace(self: *Self, value: bool) void {
     self.adjusted_current_node_is_not_in_html_namespace = value;
 }
+
+pub const Error = error{
+    OutOfMemory,
+    AbortParsing,
+    Utf8CannotEncodeSurrogateHalf,
+    CodepointTooLarge,
+};
 
 pub const State = enum {
     Data,
@@ -219,10 +227,7 @@ pub const State = enum {
     DOCTYPEName,
     AfterDOCTYPEName,
     AfterDOCTYPEPublicKeyword,
-    AfterDOCTYPEPublicIdentifier,
-    BetweenDOCTYPEPublicAndSystemIdentifiers,
     AfterDOCTYPESystemKeyword,
-    AfterDOCTYPESystemIdentifier,
     BogusDOCTYPE,
     CDATASection,
     CDATASectionBracket,
@@ -1653,76 +1658,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .AfterDOCTYPEPublicKeyword => try afterDOCTYPEPublicOrSystemKeyword(t, input, .public),
-        .AfterDOCTYPEPublicIdentifier => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => t.setState(.BetweenDOCTYPEPublicAndSystemIdentifiers),
-                    '>' => {
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    '"', '\'' => |quote| {
-                        try t.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
-                        try doctypePublicOrSystemIdentifier(t, input, .system, quote);
-                    },
-                    else => {
-                        try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.reconsume(.BogusDOCTYPE);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
-        .BetweenDOCTYPEPublicAndSystemIdentifiers => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => {},
-                    '>' => {
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    '"', '\'' => |quote| {
-                        try doctypePublicOrSystemIdentifier(t, input, .system, quote);
-                    },
-                    else => {
-                        try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.reconsume(.BogusDOCTYPE);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
         .AfterDOCTYPESystemKeyword => try afterDOCTYPEPublicOrSystemKeyword(t, input, .system),
-        .AfterDOCTYPESystemIdentifier => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => {},
-                    '>' => {
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    else => {
-                        try t.parseError(.UnexpectedCharacterAfterDOCTYPESystemIdentifier);
-                        t.reconsume(.BogusDOCTYPE);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
         .BogusDOCTYPE => {
             if (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
@@ -2151,7 +2087,7 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_sy
     }
 }
 
-fn doctypePublicOrSystemIdentifier(t: *Self, input: *[]const u21, public_or_system: PublicOrSystem, quote: u21) !void {
+fn doctypePublicOrSystemIdentifier(t: *Self, input: *[]const u21, public_or_system: PublicOrSystem, quote: u21) Error!void {
     // DOCTYPEPublicIdentifierDoubleQuoted
     // DOCTYPEPublicIdentifierSingleQuoted
     // DOCTYPESystemIdentifierDoubleQuoted
@@ -2169,11 +2105,11 @@ fn doctypePublicOrSystemIdentifier(t: *Self, input: *[]const u21, public_or_syst
     };
     while (try t.nextInputChar(input)) |current_input_char| {
         if (current_input_char == quote) {
-            const next_state: State = switch (public_or_system) {
-                .public => .AfterDOCTYPEPublicIdentifier,
-                .system => .AfterDOCTYPESystemIdentifier,
+            const afterIdentifier = switch (public_or_system) {
+                .public => afterDOCTYPEPublicIdentifier,
+                .system => afterDOCTYPESystemIdentifier,
             };
-            return t.setState(next_state);
+            return afterIdentifier(t, input);
         } else if (current_input_char == 0x00) {
             try t.parseError(.UnexpectedNullCharacter);
             try append(t, REPLACEMENT_CHARACTER);
@@ -2188,6 +2124,70 @@ fn doctypePublicOrSystemIdentifier(t: *Self, input: *[]const u21, public_or_syst
             return t.setState(.Data);
         } else {
             try append(t, current_input_char);
+        }
+    } else {
+        return eofInDoctype(t);
+    }
+}
+
+fn afterDOCTYPEPublicIdentifier(t: *Self, input: *[]const u21) !void {
+    if (try t.nextInputChar(input)) |current_input_char| {
+        switch (current_input_char) {
+            '\t', '\n', 0x0C, ' ' => {},
+            '>' => {
+                try t.emitDOCTYPE();
+                return t.setState(.Data);
+            },
+            '"', '\'' => |quote| {
+                try t.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
+                return doctypePublicOrSystemIdentifier(t, input, .system, quote);
+            },
+            else => {
+                try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
+                t.currentDOCTYPETokenForceQuirks();
+                return t.reconsume(.BogusDOCTYPE);
+            },
+        }
+    } else {
+        return eofInDoctype(t);
+    }
+
+    // BetweenDOCTYPEPublicAndSystemIdentifiers
+    try skipHtmlWhitespace(t, input);
+    if (try t.nextInputChar(input)) |current_input_char| {
+        switch (current_input_char) {
+            '\t', '\n', 0x0C, ' ' => unreachable,
+            '>' => {
+                try t.emitDOCTYPE();
+                return t.setState(.Data);
+            },
+            '"', '\'' => |quote| {
+                return doctypePublicOrSystemIdentifier(t, input, .system, quote);
+            },
+            else => {
+                try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
+                t.currentDOCTYPETokenForceQuirks();
+                return t.reconsume(.BogusDOCTYPE);
+            },
+        }
+    } else {
+        return eofInDoctype(t);
+    }
+}
+
+fn afterDOCTYPESystemIdentifier(t: *Self, input: *[]const u21) !void {
+    try skipHtmlWhitespace(t, input);
+    if (try t.nextInputChar(input)) |current_input_char| {
+        switch (current_input_char) {
+            '\t', '\n', 0x0C, ' ' => unreachable,
+            '>' => {
+                try t.emitDOCTYPE();
+                return t.setState(.Data);
+            },
+            else => {
+                try t.parseError(.UnexpectedCharacterAfterDOCTYPESystemIdentifier);
+                return t.reconsume(.BogusDOCTYPE);
+            },
         }
     } else {
         return eofInDoctype(t);
