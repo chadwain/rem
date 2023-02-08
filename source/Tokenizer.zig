@@ -220,8 +220,6 @@ pub const State = enum {
     AfterDOCTYPESystemKeyword,
     BogusDOCTYPE,
     CDATASection,
-    CDATASectionBracket,
-    CDATASectionEnd,
     CharacterReference,
     NamedCharacterReference,
     AmbiguousAmpersand,
@@ -1565,33 +1563,33 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .CDATASection => {
-            if (try t.nextInputChar(input)) |current_input_char| {
+            while (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
-                    ']' => t.setState(.CDATASectionBracket),
+                    ']' => {
+                        // CDATASectionBracket
+                        if ((try t.nextInputChar(input)) != @as(u21, ']')) {
+                            try t.emitCharacter(']');
+                            t.reconsume(.CDATASection);
+                            continue;
+                        }
+
+                        // CDATASectionEnd
+                        while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+                            ']' => try t.emitCharacter(']'),
+                            '>' => return t.setState(.Data),
+                            else => {
+                                try t.emitString("]]");
+                                t.reconsume(.CDATASection);
+                                break;
+                            },
+                        };
+                    },
                     else => |c| try t.emitCharacter(c),
                 }
             } else {
                 try t.parseError(.EOFInCDATA);
                 try t.emitEOF();
-            }
-        },
-        .CDATASectionBracket => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                ']' => t.setState(.CDATASectionEnd),
-                else => {
-                    try t.emitCharacter(']');
-                    t.reconsume(.CDATASection);
-                },
-            }
-        },
-        .CDATASectionEnd => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                ']' => try t.emitCharacter(']'),
-                '>' => t.setState(.Data),
-                else => {
-                    try t.emitString("]]");
-                    t.reconsume(.CDATASection);
-                },
+                return;
             }
         },
         .CharacterReference => {
