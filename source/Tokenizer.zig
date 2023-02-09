@@ -184,7 +184,6 @@ pub const State = enum {
     EndTagOpen,
     TagName,
     ScriptDataEscaped,
-    ScriptDataEscapedDashDash,
     ScriptDataDoubleEscapeStart,
     ScriptDataDoubleEscaped,
     ScriptDataDoubleEscapedDash,
@@ -928,7 +927,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                                 continue;
                             }
                             try t.emitCharacter('-');
-                            return t.setState(.ScriptDataEscapedDashDash);
+                            return scriptDataEscapedDashDash(t, input);
                         },
                     }
                 },
@@ -947,7 +946,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                             return t.reconsume(.ScriptDataEscaped);
                         }
                         try t.emitCharacter('-');
-                        t.setState(.ScriptDataEscapedDashDash);
+                        return scriptDataEscapedDashDash(t, input);
                     },
                     '<' => return scriptDataEscapedLessThanSign(t, input),
                     0x00 => {
@@ -955,30 +954,6 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                         try t.emitCharacter(REPLACEMENT_CHARACTER);
                     },
                     else => |c| try t.emitCharacter(c),
-                }
-            } else {
-                try t.parseError(.EOFInScriptHtmlCommentLikeText);
-                try t.emitEOF();
-            }
-        },
-        .ScriptDataEscapedDashDash => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '-' => try t.emitCharacter('-'),
-                    '<' => return scriptDataEscapedLessThanSign(t, input),
-                    '>' => {
-                        t.setState(.ScriptData);
-                        try t.emitCharacter('>');
-                    },
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        t.setState(.ScriptDataEscaped);
-                        try t.emitCharacter(REPLACEMENT_CHARACTER);
-                    },
-                    else => |c| {
-                        t.setState(.ScriptDataEscaped);
-                        try t.emitCharacter(c);
-                    },
                 }
             } else {
                 try t.parseError(.EOFInScriptHtmlCommentLikeText);
@@ -2099,6 +2074,17 @@ fn scriptDataEscapedLessThanSign(t: *Self, input: *[]const u21) !void {
             t.reconsume(.ScriptDataEscaped);
         },
     }
+}
+
+fn scriptDataEscapedDashDash(t: *Self, input: *[]const u21) !void {
+    while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+        '-' => try t.emitCharacter('-'),
+        '>' => {
+            try t.emitCharacter('>');
+            return t.setState(.ScriptData);
+        },
+        else => return t.reconsume(.ScriptDataEscaped),
+    };
 }
 
 fn toLowercase(character: u21) u21 {
