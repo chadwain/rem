@@ -183,8 +183,6 @@ pub const State = enum {
     TagOpen,
     EndTagOpen,
     TagName,
-    ScriptDataEscapeStart,
-    ScriptDataEscapeStartDash,
     ScriptDataEscaped,
     ScriptDataEscapedDashDash,
     ScriptDataDoubleEscapeStart,
@@ -920,31 +918,22 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                         '/' => return nonDataEndTagOpen(t, input),
                         '!' => {
                             try t.emitString("<!");
-                            t.setState(.ScriptDataEscapeStart);
-                            return;
+                            if ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE != '-') {
+                                t.reconsume(.ScriptData);
+                                continue;
+                            }
+                            try t.emitCharacter('-');
+                            if ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE != '-') {
+                                t.reconsume(.ScriptData);
+                                continue;
+                            }
+                            try t.emitCharacter('-');
+                            return t.setState(.ScriptDataEscapedDashDash);
                         },
                     }
                 },
             } else {
                 try t.emitEOF();
-            }
-        },
-        .ScriptDataEscapeStart => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '-' => {
-                    t.setState(.ScriptDataEscapeStartDash);
-                    try t.emitCharacter('-');
-                },
-                else => t.reconsume(.ScriptData),
-            }
-        },
-        .ScriptDataEscapeStartDash => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '-' => {
-                    t.setState(.ScriptDataEscapedDashDash);
-                    try t.emitCharacter('-');
-                },
-                else => t.reconsume(.ScriptData),
             }
         },
         .ScriptDataEscaped => {
@@ -994,23 +983,6 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             } else {
                 try t.parseError(.EOFInScriptHtmlCommentLikeText);
                 try t.emitEOF();
-            }
-        },
-        .ScriptDataDoubleEscapeStart => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '\t', '\n', 0x0C, ' ', '/', '>' => |c| {
-                    t.setState(if (t.tempBufferEql("script")) .ScriptDataDoubleEscaped else .ScriptDataEscaped);
-                    try t.emitCharacter(c);
-                },
-                'A'...'Z' => |c| {
-                    try t.appendTempBuffer(toLowercase(c));
-                    try t.emitCharacter(c);
-                },
-                'a'...'z' => |c| {
-                    try t.appendTempBuffer(c);
-                    try t.emitCharacter(c);
-                },
-                else => t.reconsume(.ScriptDataEscaped),
             }
         },
         .ScriptDataDoubleEscaped => {
@@ -1096,6 +1068,23 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                     try t.emitCharacter('/');
                 },
                 else => t.reconsume(.ScriptDataDoubleEscaped),
+            }
+        },
+        .ScriptDataDoubleEscapeStart => {
+            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+                '\t', '\n', 0x0C, ' ', '/', '>' => |c| {
+                    t.setState(if (t.tempBufferEql("script")) .ScriptDataDoubleEscaped else .ScriptDataEscaped);
+                    try t.emitCharacter(c);
+                },
+                'A'...'Z' => |c| {
+                    try t.appendTempBuffer(toLowercase(c));
+                    try t.emitCharacter(c);
+                },
+                'a'...'z' => |c| {
+                    try t.appendTempBuffer(c);
+                    try t.emitCharacter(c);
+                },
+                else => t.reconsume(.ScriptDataEscaped),
             }
         },
         // Nearly identical to ScriptDataDoubleEscapeStart.
