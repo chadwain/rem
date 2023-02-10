@@ -183,6 +183,7 @@ pub const State = enum {
     TagName,
     BeforeAttributeName,
     AttributeName,
+    AfterAttributeName,
     BeforeAttributeValue,
     AttributeValueDoubleQuoted,
     AttributeValueSingleQuoted,
@@ -767,29 +768,21 @@ fn processInput(t: *Self, input: *[]const u21) !void {
         },
         .ScriptData => return scriptData(t, input),
         .BeforeAttributeName => {
-            // Handle '/', '>', and EOF using the rules for AfterAttributeName
-            if (try t.nextInputChar(input)) |current_input_char| switch (current_input_char) {
+            // Make end-of-file (null) be handled the same as '>'
+            while (true) switch ((try t.nextInputChar(input)) orelse '>') {
                 '\t', '\n', 0x0C, ' ' => {},
-                '/' => t.setState(.SelfClosingStartTag),
-                '>' => {
-                    try t.emitCurrentTag();
-                    t.setState(.Data);
-                },
+                '/', '>' => return t.reconsume(.AfterAttributeName),
                 '=' => {
                     try t.parseError(.UnexpectedEqualsSignBeforeAttributeName);
                     t.createAttribute();
                     try t.appendCurrentAttributeName('=');
-                    t.setState(.AttributeName);
+                    return t.setState(.AttributeName);
                 },
                 else => {
                     t.createAttribute();
-                    t.reconsume(.AttributeName);
+                    return t.reconsume(.AttributeName);
                 },
-            } else {
-                try t.parseError(.EOFInTag);
-                try t.emitEOF();
-                return;
-            }
+            };
         },
         .AttributeName => {
             // Make end-of-file (null) be handled the same as '>'
@@ -797,8 +790,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 switch ((try t.nextInputChar(input)) orelse '>') {
                     '\t', '\n', 0x0C, ' ', '/', '>' => {
                         try t.finishAttributeName();
-                        t.reconsume(.AttributeName);
-                        break;
+                        return t.reconsume(.AfterAttributeName);
                     },
                     '=' => {
                         try t.finishAttributeName();
@@ -816,29 +808,27 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                     else => |c| try t.appendCurrentAttributeName(c),
                 }
             }
-
-            // AfterAttributeName
-            while (true) {
-                if (try t.nextInputChar(input)) |current_input_char| {
-                    switch (current_input_char) {
-                        '\t', '\n', 0x0C, ' ' => {},
-                        '/' => return t.setState(.SelfClosingStartTag),
-                        '=' => return t.setState(.BeforeAttributeValue),
-                        '>' => {
-                            t.setState(.Data);
-                            try t.emitCurrentTag();
-                            return;
-                        },
-                        else => {
-                            t.createAttribute();
-                            return t.reconsume(.AttributeName);
-                        },
-                    }
-                } else {
-                    try t.parseError(.EOFInTag);
-                    try t.emitEOF();
-                    return;
+        },
+        .AfterAttributeName => while (true) {
+            if (try t.nextInputChar(input)) |current_input_char| {
+                switch (current_input_char) {
+                    '\t', '\n', 0x0C, ' ' => {},
+                    '/' => return t.setState(.SelfClosingStartTag),
+                    '=' => return t.setState(.BeforeAttributeValue),
+                    '>' => {
+                        t.setState(.Data);
+                        try t.emitCurrentTag();
+                        return;
+                    },
+                    else => {
+                        t.createAttribute();
+                        return t.reconsume(.AttributeName);
+                    },
                 }
+            } else {
+                try t.parseError(.EOFInTag);
+                try t.emitEOF();
+                return;
             }
         },
         .BeforeAttributeValue => {
