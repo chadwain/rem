@@ -121,8 +121,6 @@ fn runTestFile(file_path: []const u8) !void {
     for (tests.items) |test_obj| {
         const description = test_obj.Object.get("description").?.String;
 
-        if (!std.mem.eql(u8, description, "</script> in script HTML comment - double escaped")) continue;
-
         var states: [6]TokenizerState = undefined;
         var num_states: usize = 0;
         if (test_obj.Object.get("initialStates")) |initial_states_obj| {
