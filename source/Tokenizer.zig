@@ -67,7 +67,6 @@ const REPLACEMENT_CHARACTER = '\u{FFFD}';
 const TREAT_AS_ANYTHING_ELSE = '\u{FFFF}';
 
 state: State = .Data,
-return_state: State = undefined,
 current_tag_name: ArrayListUnmanaged(u8) = .{},
 current_tag_attributes: Attributes = .{},
 current_tag_self_closing: bool = false,
@@ -197,9 +196,6 @@ pub const State = enum {
     AfterDOCTYPEPublicKeyword,
     AfterDOCTYPESystemKeyword,
     BogusDOCTYPE,
-    CharacterReference,
-    NamedCharacterReference,
-    AmbiguousAmpersand,
 };
 
 fn consumeReplayedCharacters(self: *Self, count: u6) void {
@@ -404,20 +400,6 @@ fn checkInputCharacterForErrors(self: *Self, character: u21) !void {
 fn reconsume(self: *Self, new_state: State) void {
     self.should_reconsume = true;
     self.state = new_state;
-}
-
-fn switchToReturnState(self: *Self) void {
-    self.state = self.return_state;
-    self.return_state = undefined;
-}
-
-fn reconsumeInReturnState(self: *Self) void {
-    self.reconsume(self.return_state);
-}
-
-fn toCharacterReferenceState(self: *Self, return_state: State) void {
-    self.state = .CharacterReference;
-    self.return_state = return_state;
 }
 
 fn createDOCTYPEToken(self: *Self) void {
@@ -648,54 +630,6 @@ fn emitCurrentTag(self: *Self) !void {
     self.current_tag_type = undefined;
 }
 
-fn flushCharacterReference(self: *Self) !void {
-    if (self.isPartOfAnAttribute()) {
-        for (self.temp_buffer.items) |character| {
-            var code_units: [4]u8 = undefined;
-            const len = try std.unicode.utf8Encode(character, &code_units);
-            try self.generic_buffer.appendSlice(self.allocator, code_units[0..len]);
-        }
-    } else {
-        for (self.temp_buffer.items) |character| {
-            try self.emitCharacter(character);
-        }
-    }
-}
-
-fn findNamedCharacterReference(self: *Self, input: *[]const u21) !named_characters_data.Value {
-    var node = named_characters_data.root;
-    var replayed_characters_index: u6 = 0;
-    var character_reference_consumed_codepoints_count: usize = 1;
-    var last_matched_named_character_value = named_characters_data.Value{ null, null };
-    while (true) {
-        const character = self.nextInputStreamChar(input, &replayed_characters_index) orelse break;
-        try self.appendTempBuffer(character);
-        const key_index = node.find(character) orelse break;
-
-        if (node.child(key_index)) |c_node| {
-            const new_value = node.value(key_index);
-            if (new_value[0] != null) {
-                // Partial match found.
-                character_reference_consumed_codepoints_count = self.temp_buffer.items.len;
-                last_matched_named_character_value = new_value;
-            }
-            node = c_node;
-        } else {
-            // Complete match found.
-            character_reference_consumed_codepoints_count = self.temp_buffer.items.len;
-            last_matched_named_character_value = node.value(key_index);
-            break;
-        }
-    }
-
-    self.consumeReplayedCharacters(std.math.min(replayed_characters_index, character_reference_consumed_codepoints_count));
-    self.replayCharacters(self.temp_buffer.items[character_reference_consumed_codepoints_count..]);
-    self.temp_buffer.shrinkRetainingCapacity(character_reference_consumed_codepoints_count);
-    // There is no need to check the consumed characters for errors (controls, surrogates, noncharacters)
-    // beacuse we've just determined that they form a valid character reference.
-    return last_matched_named_character_value;
-}
-
 fn parseError(self: *Self, err: ParseError) !void {
     try self.error_handler.sendError(err);
 }
@@ -708,16 +642,6 @@ fn tempBufferLast(self: *Self) u21 {
     return self.temp_buffer.items[self.temp_buffer.items.len - 1];
 }
 
-fn isPartOfAnAttribute(self: *Self) bool {
-    return switch (self.return_state) {
-        .AttributeValueDoubleQuoted,
-        .AttributeValueSingleQuoted,
-        .AttributeValueUnquoted,
-        => true,
-        else => false,
-    };
-}
-
 fn adjustedCurrentNodeIsNotInHtmlNamespace(self: *Self) bool {
     return self.adjusted_current_node_is_not_in_html_namespace;
 }
@@ -727,7 +651,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
         .Data => {
             if (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
-                    '&' => t.toCharacterReferenceState(.Data),
+                    '&' => try characterReference(t, input, IsPartOfAnAttribute.No),
                     '<' => return tagOpen(t, input),
                     0x00 => {
                         try t.parseError(.UnexpectedNullCharacter);
@@ -820,7 +744,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
         .RCDATA => {
             while (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
-                    '&' => return t.toCharacterReferenceState(.RCDATA),
+                    '&' => try characterReference(t, input, IsPartOfAnAttribute.No),
                     0x00 => {
                         try t.parseError(.UnexpectedNullCharacter);
                         try t.emitCharacter(REPLACEMENT_CHARACTER);
@@ -930,8 +854,8 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 else => t.reconsume(.AttributeValueUnquoted),
             }
         },
-        .AttributeValueDoubleQuoted => try attributeValueQuoted(t, input, .AttributeValueDoubleQuoted),
-        .AttributeValueSingleQuoted => try attributeValueQuoted(t, input, .AttributeValueSingleQuoted),
+        .AttributeValueDoubleQuoted => try attributeValueQuoted(t, input, .Double),
+        .AttributeValueSingleQuoted => try attributeValueQuoted(t, input, .Single),
         .AttributeValueUnquoted => {
             if (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
@@ -939,7 +863,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                         try t.finishAttributeValue();
                         t.setState(.BeforeAttributeName);
                     },
-                    '&' => t.toCharacterReferenceState(.AttributeValueUnquoted),
+                    '&' => try characterReference(t, input, IsPartOfAnAttribute.Yes),
                     '>' => {
                         try t.finishAttributeValue();
                         t.setState(.Data);
@@ -1151,64 +1075,6 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 return;
             }
         },
-        .CharacterReference => {
-            // NOTE: This is not exactly as the spec says, but should yield the same results.
-            t.clearTempBuffer();
-            try t.appendTempBuffer('&');
-            switch (t.peekInputChar(input) orelse TREAT_AS_ANYTHING_ELSE) {
-                '0'...'9', 'A'...'Z', 'a'...'z' => {
-                    t.setState(.NamedCharacterReference);
-                },
-                '#' => {
-                    _ = try t.nextInputChar(input);
-                    try t.appendTempBuffer('#');
-                    return numericCharacterReference(t, input);
-                },
-                else => {
-                    _ = try t.nextInputChar(input);
-                    try t.flushCharacterReference();
-                    t.reconsumeInReturnState();
-                },
-            }
-        },
-        .NamedCharacterReference => {
-            const chars = try t.findNamedCharacterReference(input);
-            const match_found = chars[0] != null;
-            if (match_found) {
-                const historical_reasons = t.isPartOfAnAttribute() and
-                    t.tempBufferLast() != ';' and
-                    switch (t.peekInputChar(input) orelse TREAT_AS_ANYTHING_ELSE) {
-                    '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
-                    else => false,
-                };
-                if (historical_reasons) {
-                    try t.flushCharacterReference();
-                    t.switchToReturnState();
-                } else {
-                    if (t.tempBufferLast() != ';') {
-                        try t.parseError(.MissingSemicolonAfterCharacterReference);
-                    }
-                    t.clearTempBuffer();
-                    try t.appendTempBuffer(chars[0].?);
-                    if (chars[1]) |c| try t.appendTempBuffer(c);
-                    try t.flushCharacterReference();
-                    t.switchToReturnState();
-                }
-            } else {
-                try t.flushCharacterReference();
-                t.setState(.AmbiguousAmpersand);
-            }
-        },
-        .AmbiguousAmpersand => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '0'...'9', 'A'...'Z', 'a'...'z' => |c| if (t.isPartOfAnAttribute()) try t.appendCurrentAttributeValue(c) else try t.emitCharacter(c),
-                ';' => {
-                    try t.parseError(.UnknownNamedCharacterReference);
-                    t.reconsumeInReturnState();
-                },
-                else => t.reconsumeInReturnState(),
-            }
-        },
     }
 }
 
@@ -1219,7 +1085,101 @@ fn skipHtmlWhitespace(t: *Self, input: *[]const u21) !void {
     };
 }
 
-fn numericCharacterReference(t: *Self, input: *[]const u21) !void {
+const IsPartOfAnAttribute = enum { Yes, No };
+
+fn characterReference(t: *Self, input: *[]const u21, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
+    // NOTE: This is not exactly as the spec says, but should yield the same results.
+    t.clearTempBuffer();
+    try t.appendTempBuffer('&');
+    switch (t.peekInputChar(input) orelse TREAT_AS_ANYTHING_ELSE) {
+        '0'...'9', 'A'...'Z', 'a'...'z' => {
+            return namedCharacterReference(t, input, is_part_of_an_attribute);
+        },
+        '#' => {
+            _ = try t.nextInputChar(input);
+            try t.appendTempBuffer('#');
+            return numericCharacterReference(t, input, is_part_of_an_attribute);
+        },
+        else => try t.flushCharacterReference(is_part_of_an_attribute),
+    }
+}
+
+fn namedCharacterReference(t: *Self, input: *[]const u21, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
+    const chars = try t.findNamedCharacterReference(input);
+    const match_found = chars[0] != null;
+    if (match_found) {
+        const historical_reasons = is_part_of_an_attribute == .Yes and
+            t.tempBufferLast() != ';' and
+            switch (t.peekInputChar(input) orelse TREAT_AS_ANYTHING_ELSE) {
+            '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
+            else => false,
+        };
+        if (historical_reasons) {
+            try t.flushCharacterReference(is_part_of_an_attribute);
+        } else {
+            if (t.tempBufferLast() != ';') {
+                try t.parseError(.MissingSemicolonAfterCharacterReference);
+            }
+            t.clearTempBuffer();
+            try t.appendTempBuffer(chars[0].?);
+            if (chars[1]) |c| try t.appendTempBuffer(c);
+            try t.flushCharacterReference(is_part_of_an_attribute);
+        }
+    } else {
+        try t.flushCharacterReference(is_part_of_an_attribute);
+        return ambiguousAmpersand(t, input, is_part_of_an_attribute);
+    }
+}
+
+fn findNamedCharacterReference(self: *Self, input: *[]const u21) !named_characters_data.Value {
+    var node = named_characters_data.root;
+    var replayed_characters_index: u6 = 0;
+    var character_reference_consumed_codepoints_count: usize = 1;
+    var last_matched_named_character_value = named_characters_data.Value{ null, null };
+    while (true) {
+        const character = self.nextInputStreamChar(input, &replayed_characters_index) orelse break;
+        try self.appendTempBuffer(character);
+        const key_index = node.find(character) orelse break;
+
+        if (node.child(key_index)) |c_node| {
+            const new_value = node.value(key_index);
+            if (new_value[0] != null) {
+                // Partial match found.
+                character_reference_consumed_codepoints_count = self.temp_buffer.items.len;
+                last_matched_named_character_value = new_value;
+            }
+            node = c_node;
+        } else {
+            // Complete match found.
+            character_reference_consumed_codepoints_count = self.temp_buffer.items.len;
+            last_matched_named_character_value = node.value(key_index);
+            break;
+        }
+    }
+
+    self.consumeReplayedCharacters(std.math.min(replayed_characters_index, character_reference_consumed_codepoints_count));
+    self.replayCharacters(self.temp_buffer.items[character_reference_consumed_codepoints_count..]);
+    self.temp_buffer.shrinkRetainingCapacity(character_reference_consumed_codepoints_count);
+    // There is no need to check the consumed characters for errors (controls, surrogates, noncharacters)
+    // beacuse we've just determined that they form a valid character reference.
+    return last_matched_named_character_value;
+}
+
+fn ambiguousAmpersand(t: *Self, input: *[]const u21, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
+    while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+        '0'...'9', 'A'...'Z', 'a'...'z' => |c| switch (is_part_of_an_attribute) {
+            .Yes => try t.appendCurrentAttributeValue(c),
+            .No => try t.emitCharacter(c),
+        },
+        ';' => {
+            try t.parseError(.UnknownNamedCharacterReference);
+            return t.reconsume(t.state);
+        },
+        else => return t.reconsume(t.state),
+    };
+}
+
+fn numericCharacterReference(t: *Self, input: *[]const u21, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
     var character_reference_code: u21 = 0;
     switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
         'x', 'X' => |x| {
@@ -1242,7 +1202,7 @@ fn numericCharacterReference(t: *Self, input: *[]const u21) !void {
                         },
                     };
                 },
-                else => return noDigitsInNumericCharacterReference(t),
+                else => return noDigitsInNumericCharacterReference(t, is_part_of_an_attribute),
             }
         },
         // DecimalCharacterReferenceStart
@@ -1259,7 +1219,7 @@ fn numericCharacterReference(t: *Self, input: *[]const u21) !void {
                 },
             };
         },
-        else => return noDigitsInNumericCharacterReference(t),
+        else => return noDigitsInNumericCharacterReference(t, is_part_of_an_attribute),
     }
 
     // NumericCharacterReferenceEnd
@@ -1350,18 +1310,30 @@ fn numericCharacterReference(t: *Self, input: *[]const u21) !void {
     }
     t.clearTempBuffer();
     try t.appendTempBuffer(character_reference_code);
-    try t.flushCharacterReference();
-    t.switchToReturnState();
+    try t.flushCharacterReference(is_part_of_an_attribute);
 }
 
 fn characterReferenceCodeAddDigit(character_reference_code: *u21, comptime base: comptime_int, digit: u21) void {
     character_reference_code.* = character_reference_code.* *| base +| digit;
 }
 
-fn noDigitsInNumericCharacterReference(t: *Self) !void {
+fn noDigitsInNumericCharacterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
     try t.parseError(.AbsenceOfDigitsInNumericCharacterReference);
-    try t.flushCharacterReference();
-    t.reconsumeInReturnState();
+    try t.flushCharacterReference(is_part_of_an_attribute);
+    t.reconsume(t.state);
+}
+
+fn flushCharacterReference(self: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
+    switch (is_part_of_an_attribute) {
+        .Yes => for (self.temp_buffer.items) |character| {
+            var code_units: [4]u8 = undefined;
+            const len = try std.unicode.utf8Encode(character, &code_units);
+            try self.generic_buffer.appendSlice(self.allocator, code_units[0..len]);
+        },
+        .No => for (self.temp_buffer.items) |character| {
+            try self.emitCharacter(character);
+        },
+    }
 }
 
 fn tagOpen(t: *Self, input: *[]const u21) !void {
@@ -1471,11 +1443,12 @@ fn endTagName(t: *Self, input: *[]const u21) !void {
     t.reconsume(t.state);
 }
 
-fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime return_state: State) !void {
-    const quote = switch (return_state) {
-        .AttributeValueSingleQuoted => '\'',
-        .AttributeValueDoubleQuoted => '"',
-        else => unreachable,
+const QuoteStyle = enum { Single, Double };
+
+fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime quote_style: QuoteStyle) !void {
+    const quote = switch (quote_style) {
+        .Single => '\'',
+        .Double => '"',
     };
 
     while (try t.nextInputChar(input)) |current_input_char| {
@@ -1484,10 +1457,7 @@ fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime return_state: St
                 try t.finishAttributeValue();
                 break;
             },
-            '&' => {
-                t.toCharacterReferenceState(return_state);
-                return;
-            },
+            '&' => try characterReference(t, input, IsPartOfAnAttribute.Yes),
             0x00 => {
                 try t.parseError(.UnexpectedNullCharacter);
                 try t.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
