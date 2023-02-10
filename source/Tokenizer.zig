@@ -184,12 +184,7 @@ pub const State = enum {
     EndTagOpen,
     TagName,
     ScriptDataEscaped,
-    ScriptDataDoubleEscapeStart,
     ScriptDataDoubleEscaped,
-    ScriptDataDoubleEscapedDash,
-    ScriptDataDoubleEscapedDashDash,
-    ScriptDataDoubleEscapedLessThanSign,
-    ScriptDataDoubleEscapeEnd,
     BeforeAttributeName,
     AttributeName,
     BeforeAttributeValue,
@@ -964,12 +959,36 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             if (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
                     '-' => {
-                        t.setState(.ScriptDataDoubleEscapedDash);
                         try t.emitCharacter('-');
+
+                        // ScriptDataDoubleEscapedDash
+                        if ((try t.nextInputChar(input)) != @as(u21, '-')) {
+                            return t.reconsume(.ScriptDataDoubleEscaped);
+                        }
+                        try t.emitCharacter('-');
+
+                        // ScriptDataDoubleEscapedDashDash
+                        while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+                            '-' => try t.emitCharacter('-'),
+                            '>' => {
+                                try t.emitCharacter('>');
+                                return t.setState(.ScriptData);
+                            },
+                            else => break t.reconsume(.ScriptDataDoubleEscaped),
+                        };
                     },
                     '<' => {
-                        t.setState(.ScriptDataDoubleEscapedLessThanSign);
                         try t.emitCharacter('<');
+
+                        // ScriptDataDoubleEscapedLessThanSign
+                        if ((try t.nextInputChar(input)) != @as(u21, '/')) {
+                            return t.reconsume(.ScriptDataDoubleEscaped);
+                        }
+
+                        t.clearTempBuffer();
+                        try t.emitCharacter('/');
+                        t.setState(.ScriptDataDoubleEscaped);
+                        return scriptDataDoubleEscapeStartOrEnd(t, input);
                     },
                     0x00 => {
                         try t.parseError(.UnexpectedNullCharacter);
@@ -980,104 +999,6 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             } else {
                 try t.parseError(.EOFInScriptHtmlCommentLikeText);
                 try t.emitEOF();
-            }
-        },
-        .ScriptDataDoubleEscapedDash => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '-' => {
-                        t.setState(.ScriptDataDoubleEscapedDashDash);
-                        try t.emitCharacter('-');
-                    },
-                    '<' => {
-                        t.setState(.ScriptDataDoubleEscapedLessThanSign);
-                        try t.emitCharacter('<');
-                    },
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        t.setState(.ScriptDataDoubleEscaped);
-                        try t.emitCharacter(REPLACEMENT_CHARACTER);
-                    },
-                    else => |c| {
-                        t.setState(.ScriptDataDoubleEscaped);
-                        try t.emitCharacter(c);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInScriptHtmlCommentLikeText);
-                try t.emitEOF();
-            }
-        },
-        .ScriptDataDoubleEscapedDashDash => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '-' => try t.emitCharacter('-'),
-                    '<' => {
-                        t.setState(.ScriptDataDoubleEscapedLessThanSign);
-                        try t.emitCharacter('<');
-                    },
-                    '>' => {
-                        t.setState(.ScriptData);
-                        try t.emitCharacter('>');
-                    },
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        t.setState(.ScriptDataDoubleEscaped);
-                        try t.emitCharacter(REPLACEMENT_CHARACTER);
-                    },
-                    else => |c| {
-                        t.setState(.ScriptDataDoubleEscaped);
-                        try t.emitCharacter(c);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInScriptHtmlCommentLikeText);
-                try t.emitEOF();
-            }
-        },
-        .ScriptDataDoubleEscapedLessThanSign => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '/' => {
-                    t.clearTempBuffer();
-                    t.setState(.ScriptDataDoubleEscapeEnd);
-                    try t.emitCharacter('/');
-                },
-                else => t.reconsume(.ScriptDataDoubleEscaped),
-            }
-        },
-        .ScriptDataDoubleEscapeStart => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '\t', '\n', 0x0C, ' ', '/', '>' => |c| {
-                    t.setState(if (t.tempBufferEql("script")) .ScriptDataDoubleEscaped else .ScriptDataEscaped);
-                    try t.emitCharacter(c);
-                },
-                'A'...'Z' => |c| {
-                    try t.appendTempBuffer(toLowercase(c));
-                    try t.emitCharacter(c);
-                },
-                'a'...'z' => |c| {
-                    try t.appendTempBuffer(c);
-                    try t.emitCharacter(c);
-                },
-                else => t.reconsume(.ScriptDataEscaped),
-            }
-        },
-        // Nearly identical to ScriptDataDoubleEscapeStart.
-        .ScriptDataDoubleEscapeEnd => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '\t', '\n', 0x0C, ' ', '/', '>' => |c| {
-                    t.setState(if (t.tempBufferEql("script")) .ScriptDataEscaped else .ScriptDataDoubleEscaped);
-                    try t.emitCharacter(c);
-                },
-                'A'...'Z' => |c| {
-                    try t.appendTempBuffer(toLowercase(c));
-                    try t.emitCharacter(c);
-                },
-                'a'...'z' => |c| {
-                    try t.appendTempBuffer(c);
-                    try t.emitCharacter(c);
-                },
-                else => t.reconsume(.ScriptDataDoubleEscaped),
             }
         },
         .BeforeAttributeName => {
@@ -2067,13 +1988,38 @@ fn scriptDataEscapedLessThanSign(t: *Self, input: *[]const u21) !void {
         'A'...'Z', 'a'...'z' => {
             t.clearTempBuffer();
             try t.emitCharacter('<');
-            t.reconsume(.ScriptDataDoubleEscapeStart);
+            t.reconsume(t.state);
+            return scriptDataDoubleEscapeStartOrEnd(t, input);
         },
         else => {
             try t.emitCharacter('<');
             t.reconsume(.ScriptDataEscaped);
         },
     }
+}
+
+fn scriptDataDoubleEscapeStartOrEnd(t: *Self, input: *[]const u21) !void {
+    // TODO: Get rid of this use of the temp buffer
+    while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+        '\t', '\n', 0x0C, ' ', '/', '>' => |c| {
+            try t.emitCharacter(c);
+            const next_state: State = switch (t.state) {
+                .ScriptDataEscaped => .ScriptDataDoubleEscaped,
+                .ScriptDataDoubleEscaped => .ScriptDataEscaped,
+                else => unreachable,
+            };
+            return t.setState(if (t.tempBufferEql("script")) next_state else t.state);
+        },
+        'A'...'Z' => |c| {
+            try t.appendTempBuffer(toLowercase(c));
+            try t.emitCharacter(c);
+        },
+        'a'...'z' => |c| {
+            try t.appendTempBuffer(c);
+            try t.emitCharacter(c);
+        },
+        else => return t.reconsume(t.state),
+    };
 }
 
 fn scriptDataEscapedDashDash(t: *Self, input: *[]const u21) !void {

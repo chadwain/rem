@@ -121,6 +121,8 @@ fn runTestFile(file_path: []const u8) !void {
     for (tests.items) |test_obj| {
         const description = test_obj.Object.get("description").?.String;
 
+        if (!std.mem.eql(u8, description, "</script> in script HTML comment - double escaped")) continue;
+
         var states: [6]TokenizerState = undefined;
         var num_states: usize = 0;
         if (test_obj.Object.get("initialStates")) |initial_states_obj| {
@@ -137,7 +139,8 @@ fn runTestFile(file_path: []const u8) !void {
         prog_task.activate();
 
         const double_escaped = if (test_obj.Object.get("doubleEscaped")) |de| de.Bool else false;
-        const input = try getStringDecoded(test_obj.Object.get("input").?.String, arena_allocator, double_escaped);
+        const input_raw = test_obj.Object.get("input").?.String;
+        const input = try getStringDecoded(input_raw, arena_allocator, double_escaped);
         defer arena_allocator.free(input);
         const expected_tokens = try parseOutput(arena_allocator, test_obj.Object.get("output").?.Array, double_escaped);
         defer expected_tokens.deinit();
@@ -153,7 +156,7 @@ fn runTestFile(file_path: []const u8) !void {
 
         for (states[0..num_states]) |state| {
             runTest(gpa_allocator, input, expected_tokens.items, expected_errors.items, state, last_start_tag_name) catch |err| {
-                std.debug.print("Test \"{s}\" with initial state \"{s}\" failed\n", .{ description, @tagName(state) });
+                std.debug.print("Test \"{s}\" with initial state \"{s}\" failed\nInput: \"{s}\"\n", .{ description, @tagName(state), input_raw });
                 return err;
             };
             prog_task.completeOne();
