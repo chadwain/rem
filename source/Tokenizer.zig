@@ -68,7 +68,6 @@ const TREAT_AS_ANYTHING_ELSE = '\u{FFFF}';
 
 state: State = .Data,
 return_state: State = undefined,
-character_reference_code: u21 = 0,
 current_tag_name: ArrayListUnmanaged(u8) = .{},
 current_tag_attributes: Attributes = .{},
 current_tag_self_closing: bool = false,
@@ -213,12 +212,6 @@ pub const State = enum {
     CharacterReference,
     NamedCharacterReference,
     AmbiguousAmpersand,
-    NumericCharacterReference,
-    HexadecimalCharacterReferenceStart,
-    DecimalCharacterReferenceStart,
-    HexadecimalCharacterReference,
-    DecimalCharacterReference,
-    NumericCharacterReferenceEnd,
 };
 
 fn consumeReplayedCharacters(self: *Self, count: u6) void {
@@ -713,10 +706,6 @@ fn findNamedCharacterReference(self: *Self, input: *[]const u21) !named_characte
     // There is no need to check the consumed characters for errors (controls, surrogates, noncharacters)
     // beacuse we've just determined that they form a valid character reference.
     return last_matched_named_character_value;
-}
-
-fn characterReferenceCodeAddDigit(self: *Self, comptime base: comptime_int, digit: u21) void {
-    self.character_reference_code = self.character_reference_code *| base +| digit;
 }
 
 fn parseError(self: *Self, err: ParseError) !void {
@@ -1378,7 +1367,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 '#' => {
                     _ = try t.nextInputChar(input);
                     try t.appendTempBuffer('#');
-                    t.setState(.NumericCharacterReference);
+                    return numericCharacterReference(t, input);
                 },
                 else => {
                     _ = try t.nextInputChar(input);
@@ -1425,149 +1414,6 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 else => t.reconsumeInReturnState(),
             }
         },
-        .NumericCharacterReference => {
-            t.character_reference_code = 0;
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                'x', 'X' => |c| {
-                    try t.appendTempBuffer(c);
-                    t.setState(.HexadecimalCharacterReferenceStart);
-                },
-                else => t.reconsume(.DecimalCharacterReferenceStart),
-            }
-        },
-        .HexadecimalCharacterReferenceStart => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '0'...'9', 'A'...'F', 'a'...'f' => t.reconsume(.HexadecimalCharacterReference),
-                else => {
-                    try t.parseError(.AbsenceOfDigitsInNumericCharacterReference);
-                    try t.flushCharacterReference();
-                    t.reconsumeInReturnState();
-                },
-            }
-        },
-        .DecimalCharacterReferenceStart => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '0'...'9' => t.reconsume(.DecimalCharacterReference),
-                else => {
-                    try t.parseError(.AbsenceOfDigitsInNumericCharacterReference);
-                    try t.flushCharacterReference();
-                    t.reconsumeInReturnState();
-                },
-            }
-        },
-        .HexadecimalCharacterReference => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '0'...'9' => |c| t.characterReferenceCodeAddDigit(16, decimalCharToNumber(c)),
-                'A'...'F' => |c| t.characterReferenceCodeAddDigit(16, upperHexCharToNumber(c)),
-                'a'...'f' => |c| t.characterReferenceCodeAddDigit(16, lowerHexCharToNumber(c)),
-                ';' => t.setState(.NumericCharacterReferenceEnd),
-                else => {
-                    try t.parseError(.MissingSemicolonAfterCharacterReference);
-                    t.reconsume(.NumericCharacterReferenceEnd);
-                },
-            }
-        },
-        .DecimalCharacterReference => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '0'...'9' => |c| t.characterReferenceCodeAddDigit(10, decimalCharToNumber(c)),
-                ';' => t.setState(.NumericCharacterReferenceEnd),
-                else => {
-                    try t.parseError(.MissingSemicolonAfterCharacterReference);
-                    t.reconsume(.NumericCharacterReferenceEnd);
-                },
-            }
-        },
-        .NumericCharacterReferenceEnd => {
-            switch (t.character_reference_code) {
-                0x00 => {
-                    try t.parseError(.NullCharacterReference);
-                    t.character_reference_code = REPLACEMENT_CHARACTER;
-                },
-                0x10FFFF + 1...std.math.maxInt(@TypeOf(t.character_reference_code)) => {
-                    try t.parseError(.CharacterReferenceOutsideUnicodeRange);
-                    t.character_reference_code = REPLACEMENT_CHARACTER;
-                },
-                0xD800...0xDFFF => {
-                    try t.parseError(.SurrogateCharacterReference);
-                    t.character_reference_code = REPLACEMENT_CHARACTER;
-                },
-                0xFDD0...0xFDEF,
-                0xFFFE,
-                0xFFFF,
-                0x1FFFE,
-                0x1FFFF,
-                0x2FFFE,
-                0x2FFFF,
-                0x3FFFE,
-                0x3FFFF,
-                0x4FFFE,
-                0x4FFFF,
-                0x5FFFE,
-                0x5FFFF,
-                0x6FFFE,
-                0x6FFFF,
-                0x7FFFE,
-                0x7FFFF,
-                0x8FFFE,
-                0x8FFFF,
-                0x9FFFE,
-                0x9FFFF,
-                0xAFFFE,
-                0xAFFFF,
-                0xBFFFE,
-                0xBFFFF,
-                0xCFFFE,
-                0xCFFFF,
-                0xDFFFE,
-                0xDFFFF,
-                0xEFFFE,
-                0xEFFFF,
-                0xFFFFE,
-                0xFFFFF,
-                0x10FFFE,
-                0x10FFFF,
-                => try t.parseError(.NoncharacterCharacterReference),
-                0x01...0x08, 0x0B, 0x0D...0x1F => try t.parseError(.ControlCharacterReference),
-                0x7F...0x9F => |c| {
-                    try t.parseError(.ControlCharacterReference);
-                    switch (c) {
-                        0x80 => t.character_reference_code = 0x20AC,
-                        0x82 => t.character_reference_code = 0x201A,
-                        0x83 => t.character_reference_code = 0x0192,
-                        0x84 => t.character_reference_code = 0x201E,
-                        0x85 => t.character_reference_code = 0x2026,
-                        0x86 => t.character_reference_code = 0x2020,
-                        0x87 => t.character_reference_code = 0x2021,
-                        0x88 => t.character_reference_code = 0x02C6,
-                        0x89 => t.character_reference_code = 0x2030,
-                        0x8A => t.character_reference_code = 0x0160,
-                        0x8B => t.character_reference_code = 0x2039,
-                        0x8C => t.character_reference_code = 0x0152,
-                        0x8E => t.character_reference_code = 0x017D,
-                        0x91 => t.character_reference_code = 0x2018,
-                        0x92 => t.character_reference_code = 0x2019,
-                        0x93 => t.character_reference_code = 0x201C,
-                        0x94 => t.character_reference_code = 0x201D,
-                        0x95 => t.character_reference_code = 0x2022,
-                        0x96 => t.character_reference_code = 0x2013,
-                        0x97 => t.character_reference_code = 0x2014,
-                        0x98 => t.character_reference_code = 0x02DC,
-                        0x99 => t.character_reference_code = 0x2122,
-                        0x9A => t.character_reference_code = 0x0161,
-                        0x9B => t.character_reference_code = 0x203A,
-                        0x9C => t.character_reference_code = 0x0153,
-                        0x9E => t.character_reference_code = 0x017E,
-                        0x9F => t.character_reference_code = 0x0178,
-                        else => {},
-                    }
-                },
-                else => {},
-            }
-            t.clearTempBuffer();
-            try t.appendTempBuffer(t.character_reference_code);
-            try t.flushCharacterReference();
-            t.switchToReturnState();
-        },
     }
 }
 
@@ -1576,6 +1422,151 @@ fn skipHtmlWhitespace(t: *Self, input: *[]const u21) !void {
         '\t', '\n', 0x0C, ' ' => {},
         else => return t.reconsume(t.state),
     };
+}
+
+fn numericCharacterReference(t: *Self, input: *[]const u21) !void {
+    var character_reference_code: u21 = 0;
+    switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+        'x', 'X' => |x| {
+            try t.appendTempBuffer(x);
+
+            // HexadecimalCharacterReferenceStart
+            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+                '0'...'9', 'A'...'F', 'a'...'f' => {
+                    t.reconsume(t.state);
+
+                    // HexadecimalCharacterReference
+                    while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+                        '0'...'9' => |c| characterReferenceCodeAddDigit(&character_reference_code, 16, decimalCharToNumber(c)),
+                        'A'...'F' => |c| characterReferenceCodeAddDigit(&character_reference_code, 16, upperHexCharToNumber(c)),
+                        'a'...'f' => |c| characterReferenceCodeAddDigit(&character_reference_code, 16, lowerHexCharToNumber(c)),
+                        ';' => break,
+                        else => {
+                            try t.parseError(.MissingSemicolonAfterCharacterReference);
+                            break t.reconsume(t.state);
+                        },
+                    };
+                },
+                else => return noDigitsInNumericCharacterReference(t),
+            }
+        },
+        // DecimalCharacterReferenceStart
+        '0'...'9' => {
+            t.reconsume(t.state);
+
+            // DecimalCharacterReference
+            while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+                '0'...'9' => |c| characterReferenceCodeAddDigit(&character_reference_code, 10, decimalCharToNumber(c)),
+                ';' => break,
+                else => {
+                    try t.parseError(.MissingSemicolonAfterCharacterReference);
+                    break t.reconsume(t.state);
+                },
+            };
+        },
+        else => return noDigitsInNumericCharacterReference(t),
+    }
+
+    // NumericCharacterReferenceEnd
+    switch (character_reference_code) {
+        0x00 => {
+            try t.parseError(.NullCharacterReference);
+            character_reference_code = REPLACEMENT_CHARACTER;
+        },
+        0x10FFFF + 1...std.math.maxInt(@TypeOf(character_reference_code)) => {
+            try t.parseError(.CharacterReferenceOutsideUnicodeRange);
+            character_reference_code = REPLACEMENT_CHARACTER;
+        },
+        0xD800...0xDFFF => {
+            try t.parseError(.SurrogateCharacterReference);
+            character_reference_code = REPLACEMENT_CHARACTER;
+        },
+        0xFDD0...0xFDEF,
+        0xFFFE,
+        0xFFFF,
+        0x1FFFE,
+        0x1FFFF,
+        0x2FFFE,
+        0x2FFFF,
+        0x3FFFE,
+        0x3FFFF,
+        0x4FFFE,
+        0x4FFFF,
+        0x5FFFE,
+        0x5FFFF,
+        0x6FFFE,
+        0x6FFFF,
+        0x7FFFE,
+        0x7FFFF,
+        0x8FFFE,
+        0x8FFFF,
+        0x9FFFE,
+        0x9FFFF,
+        0xAFFFE,
+        0xAFFFF,
+        0xBFFFE,
+        0xBFFFF,
+        0xCFFFE,
+        0xCFFFF,
+        0xDFFFE,
+        0xDFFFF,
+        0xEFFFE,
+        0xEFFFF,
+        0xFFFFE,
+        0xFFFFF,
+        0x10FFFE,
+        0x10FFFF,
+        => try t.parseError(.NoncharacterCharacterReference),
+        0x01...0x08, 0x0B, 0x0D...0x1F => try t.parseError(.ControlCharacterReference),
+        0x7F...0x9F => |c| {
+            try t.parseError(.ControlCharacterReference);
+            switch (c) {
+                0x80 => character_reference_code = 0x20AC,
+                0x82 => character_reference_code = 0x201A,
+                0x83 => character_reference_code = 0x0192,
+                0x84 => character_reference_code = 0x201E,
+                0x85 => character_reference_code = 0x2026,
+                0x86 => character_reference_code = 0x2020,
+                0x87 => character_reference_code = 0x2021,
+                0x88 => character_reference_code = 0x02C6,
+                0x89 => character_reference_code = 0x2030,
+                0x8A => character_reference_code = 0x0160,
+                0x8B => character_reference_code = 0x2039,
+                0x8C => character_reference_code = 0x0152,
+                0x8E => character_reference_code = 0x017D,
+                0x91 => character_reference_code = 0x2018,
+                0x92 => character_reference_code = 0x2019,
+                0x93 => character_reference_code = 0x201C,
+                0x94 => character_reference_code = 0x201D,
+                0x95 => character_reference_code = 0x2022,
+                0x96 => character_reference_code = 0x2013,
+                0x97 => character_reference_code = 0x2014,
+                0x98 => character_reference_code = 0x02DC,
+                0x99 => character_reference_code = 0x2122,
+                0x9A => character_reference_code = 0x0161,
+                0x9B => character_reference_code = 0x203A,
+                0x9C => character_reference_code = 0x0153,
+                0x9E => character_reference_code = 0x017E,
+                0x9F => character_reference_code = 0x0178,
+                else => {},
+            }
+        },
+        else => {},
+    }
+    t.clearTempBuffer();
+    try t.appendTempBuffer(character_reference_code);
+    try t.flushCharacterReference();
+    t.switchToReturnState();
+}
+
+fn characterReferenceCodeAddDigit(character_reference_code: *u21, comptime base: comptime_int, digit: u21) void {
+    character_reference_code.* = character_reference_code.* *| base +| digit;
+}
+
+fn noDigitsInNumericCharacterReference(t: *Self) !void {
+    try t.parseError(.AbsenceOfDigitsInNumericCharacterReference);
+    try t.flushCharacterReference();
+    t.reconsumeInReturnState();
 }
 
 fn nonDataEndTagOpen(t: *Self, input: *[]const u21) !void {
