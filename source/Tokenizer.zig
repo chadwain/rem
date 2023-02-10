@@ -194,13 +194,8 @@ pub const State = enum {
     CommentStart,
     CommentStartDash,
     Comment,
-    CommentLessThanSign,
-    CommentLessThanSignBang,
-    CommentLessThanSignBangDash,
-    CommentLessThanSignBangDashDash,
     CommentEndDash,
     CommentEnd,
-    CommentEndBang,
     DOCTYPE,
     BeforeDOCTYPEName,
     DOCTYPEName,
@@ -1089,118 +1084,66 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .Comment => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '<' => {
-                        try t.appendComment('<');
-                        t.setState(.CommentLessThanSign);
-                    },
-                    '-' => t.setState(.CommentEndDash),
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.appendComment(REPLACEMENT_CHARACTER);
-                    },
-                    else => |c| try t.appendComment(c),
-                }
-            } else {
-                try t.parseError(.EOFInComment);
-                try t.emitComment();
-                try t.emitEOF();
-            }
-        },
-        .CommentLessThanSign => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '!' => {
-                    try t.appendComment('!');
-                    t.setState(.CommentLessThanSignBang);
+            switch ((try t.nextInputChar(input)) orelse return eofInComment(t)) {
+                '<' => {
+                    try t.appendComment('<');
+
+                    // CommentLessThanSign
+                    while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+                        '!' => {
+                            try t.appendComment('!');
+
+                            // CommentLessThanSignBang
+                            if ((try t.nextInputChar(input)) != @as(u21, '-')) {
+                                return t.reconsume(.Comment);
+                            }
+
+                            // CommentLessThanSignBangDash
+                            if ((try t.nextInputChar(input)) != @as(u21, '-')) {
+                                return t.reconsume(.CommentEndDash);
+                            }
+
+                            // CommentLessThanSignBangDashDash
+                            // Make end-of-file (null) be handled the same as '>'
+                            if ((try t.nextInputChar(input)) orelse '>' != '>') {
+                                try t.parseError(.NestedComment);
+                            }
+                            return t.reconsume(.CommentEnd);
+                        },
+                        '<' => try t.appendComment('<'),
+                        else => return t.reconsume(.Comment),
+                    };
                 },
-                '<' => try t.appendComment('<'),
-                else => t.reconsume(.Comment),
-            }
-        },
-        .CommentLessThanSignBang => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '-' => t.setState(.CommentLessThanSignBangDash),
-                else => t.reconsume(.Comment),
-            }
-        },
-        .CommentLessThanSignBangDash => {
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '-' => t.setState(.CommentLessThanSignBangDashDash),
-                else => t.reconsume(.CommentEndDash),
-            }
-        },
-        .CommentLessThanSignBangDashDash => {
-            // Make end-of-file (null) be handled the same as '>'
-            switch ((try t.nextInputChar(input)) orelse '>') {
-                '>' => t.reconsume(.CommentEnd),
-                else => {
-                    try t.parseError(.NestedComment);
-                    t.reconsume(.CommentEnd);
+                '-' => t.setState(.CommentEndDash),
+                0x00 => {
+                    try t.parseError(.UnexpectedNullCharacter);
+                    try t.appendComment(REPLACEMENT_CHARACTER);
                 },
+                else => |c| try t.appendComment(c),
             }
         },
         .CommentEndDash => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '-' => t.setState(.CommentEnd),
-                    else => {
-                        try t.appendComment('-');
-                        t.reconsume(.Comment);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInComment);
-                try t.emitComment();
-                try t.emitEOF();
+            switch ((try t.nextInputChar(input)) orelse return eofInComment(t)) {
+                '-' => t.setState(.CommentEnd),
+                else => {
+                    try t.appendComment('-');
+                    t.reconsume(.Comment);
+                },
             }
         },
         .CommentEnd => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '>' => {
-                        t.setState(.Data);
-                        try t.emitComment();
-                    },
-                    '!' => t.setState(.CommentEndBang),
-                    '-' => try t.appendComment('-'),
-                    else => {
-                        try t.appendComment('-');
-                        try t.appendComment('-');
-                        t.reconsume(.Comment);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInComment);
-                try t.emitComment();
-                try t.emitEOF();
-            }
-        },
-        .CommentEndBang => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '-' => {
-                        try t.appendComment('-');
-                        try t.appendComment('-');
-                        try t.appendComment('!');
-                        t.setState(.CommentEndDash);
-                    },
-                    '>' => {
-                        try t.parseError(.IncorrectlyClosedComment);
-                        t.setState(.Data);
-                        try t.emitComment();
-                    },
-                    else => {
-                        try t.appendComment('-');
-                        try t.appendComment('-');
-                        try t.appendComment('!');
-                        t.reconsume(.Comment);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInComment);
-                try t.emitComment();
-                try t.emitEOF();
+            switch ((try t.nextInputChar(input)) orelse return eofInComment(t)) {
+                '>' => {
+                    t.setState(.Data);
+                    try t.emitComment();
+                },
+                '!' => return commentEndBang(t, input),
+                '-' => try t.appendComment('-'),
+                else => {
+                    try t.appendComment('-');
+                    try t.appendComment('-');
+                    t.reconsume(.Comment);
+                },
             }
         },
         .DOCTYPE => {
@@ -1675,6 +1618,34 @@ fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime return_state: St
         try t.emitEOF();
         return;
     }
+}
+
+fn commentEndBang(t: *Self, input: *[]const u21) !void {
+    switch ((try t.nextInputChar(input)) orelse return eofInComment(t)) {
+        '-' => {
+            try t.appendComment('-');
+            try t.appendComment('-');
+            try t.appendComment('!');
+            t.setState(.CommentEndDash);
+        },
+        '>' => {
+            try t.parseError(.IncorrectlyClosedComment);
+            try t.emitComment();
+            t.setState(.Data);
+        },
+        else => {
+            try t.appendComment('-');
+            try t.appendComment('-');
+            try t.appendComment('!');
+            t.reconsume(.Comment);
+        },
+    }
+}
+
+fn eofInComment(t: *Self) !void {
+    try t.parseError(.EOFInComment);
+    try t.emitComment();
+    try t.emitEOF();
 }
 
 fn eofInDoctype(t: *Self) !void {
