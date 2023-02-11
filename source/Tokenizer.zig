@@ -186,14 +186,12 @@ pub const State = enum {
     AfterAttributeName,
     BeforeAttributeValue,
     SelfClosingStartTag,
-    BogusComment,
     DOCTYPE,
     BeforeDOCTYPEName,
     DOCTYPEName,
     AfterDOCTYPEName,
     AfterDOCTYPEPublicKeyword,
     AfterDOCTYPESystemKeyword,
-    BogusDOCTYPE,
 };
 
 fn consumeReplayedCharacters(self: *Self, count: u6) void {
@@ -709,7 +707,8 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                     else => {
                         try t.parseError(.InvalidFirstCharacterOfTagName);
                         t.createCommentToken();
-                        t.reconsume(.BogusComment);
+                        t.reconsume(t.state);
+                        return bogusComment(t, input);
                     },
                 }
             } else {
@@ -798,24 +797,6 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 }
             } else {
                 try t.parseError(.EOFInTag);
-                try t.emitEOF();
-            }
-        },
-        .BogusComment => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '>' => {
-                        t.setState(.Data);
-                        try t.emitComment();
-                    },
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.appendComment(REPLACEMENT_CHARACTER);
-                    },
-                    else => |c| try t.appendComment(c),
-                }
-            } else {
-                try t.emitComment();
                 try t.emitEOF();
             }
         },
@@ -914,7 +895,8 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                         } else {
                             try t.parseError(.InvalidCharacterSequenceAfterDOCTYPEName);
                             t.currentDOCTYPETokenForceQuirks();
-                            t.reconsume(.BogusDOCTYPE);
+                            t.reconsume(t.state);
+                            return bogusDOCTYPE(t, input);
                         }
                     },
                 }
@@ -927,21 +909,6 @@ fn processInput(t: *Self, input: *[]const u21) !void {
         },
         .AfterDOCTYPEPublicKeyword => try afterDOCTYPEPublicOrSystemKeyword(t, input, .public),
         .AfterDOCTYPESystemKeyword => try afterDOCTYPEPublicOrSystemKeyword(t, input, .system),
-        .BogusDOCTYPE => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '>' => {
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    0x00 => try t.parseError(.UnexpectedNullCharacter),
-                    else => {},
-                }
-            } else {
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
         .CDATASection => {
             while (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
@@ -1245,7 +1212,8 @@ fn tagOpen(t: *Self, input: *[]const u21) !void {
             '?' => {
                 try t.parseError(.UnexpectedQuestionMarkInsteadOfTagName);
                 t.createCommentToken();
-                t.reconsume(.BogusComment);
+                t.reconsume(t.state);
+                return bogusComment(t, input);
             },
             else => {
                 try t.parseError(.InvalidFirstCharacterOfTagName);
@@ -1273,12 +1241,29 @@ fn markupDeclarationOpen(t: *Self, input: *[]const u21) !void {
             try t.parseError(.CDATAInHtmlContent);
             t.createCommentToken();
             try t.appendCommentString("[CDATA[");
-            t.setState(.BogusComment);
+            return bogusComment(t, input);
         }
     } else {
         try t.parseError(.IncorrectlyOpenedComment);
         t.createCommentToken();
-        t.setState(.BogusComment);
+        return bogusComment(t, input);
+    }
+}
+
+fn bogusComment(t: *Self, input: *[]const u21) !void {
+    while (try t.nextInputChar(input)) |current_input_char| switch (current_input_char) {
+        '>' => {
+            try t.emitComment();
+            return t.setState(.Data);
+        },
+        0x00 => {
+            try t.parseError(.UnexpectedNullCharacter);
+            try t.appendComment(REPLACEMENT_CHARACTER);
+        },
+        else => |c| try t.appendComment(c),
+    } else {
+        try t.emitComment();
+        try t.emitEOF();
     }
 }
 
@@ -1674,7 +1659,8 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_sy
                 };
                 try t.parseError(err);
                 t.currentDOCTYPETokenForceQuirks();
-                return t.reconsume(.BogusDOCTYPE);
+                t.reconsume(t.state);
+                return bogusDOCTYPE(t, input);
             },
         }
     } else {
@@ -1705,7 +1691,8 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_sy
                 };
                 try t.parseError(err);
                 t.currentDOCTYPETokenForceQuirks();
-                return t.reconsume(.BogusDOCTYPE);
+                t.reconsume(t.state);
+                return bogusDOCTYPE(t, input);
             },
         }
     } else {
@@ -1771,7 +1758,8 @@ fn afterDOCTYPEPublicIdentifier(t: *Self, input: *[]const u21) !void {
             else => {
                 try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
                 t.currentDOCTYPETokenForceQuirks();
-                return t.reconsume(.BogusDOCTYPE);
+                t.reconsume(t.state);
+                return bogusDOCTYPE(t, input);
             },
         }
     } else {
@@ -1793,7 +1781,8 @@ fn afterDOCTYPEPublicIdentifier(t: *Self, input: *[]const u21) !void {
             else => {
                 try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
                 t.currentDOCTYPETokenForceQuirks();
-                return t.reconsume(.BogusDOCTYPE);
+                t.reconsume(t.state);
+                return bogusDOCTYPE(t, input);
             },
         }
     } else {
@@ -1812,11 +1801,27 @@ fn afterDOCTYPESystemIdentifier(t: *Self, input: *[]const u21) !void {
             },
             else => {
                 try t.parseError(.UnexpectedCharacterAfterDOCTYPESystemIdentifier);
-                return t.reconsume(.BogusDOCTYPE);
+                t.reconsume(t.state);
+                return bogusDOCTYPE(t, input);
             },
         }
     } else {
         return eofInDoctype(t);
+    }
+}
+
+fn bogusDOCTYPE(t: *Self, input: *[]const u21) !void {
+    while (try t.nextInputChar(input)) |current_input_char| switch (current_input_char) {
+        '>' => {
+            try t.emitDOCTYPE();
+            return t.setState(.Data);
+        },
+        0x00 => try t.parseError(.UnexpectedNullCharacter),
+        else => {},
+    } else {
+        try t.emitDOCTYPE();
+        try t.emitEOF();
+        return;
     }
 }
 
