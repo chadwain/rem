@@ -179,8 +179,6 @@ pub const State = enum {
     ScriptData,
     PLAINTEXT,
     CDATASection,
-    TagName,
-    SelfClosingStartTag,
 };
 
 fn consumeReplayedCharacters(self: *Self, count: u6) void {
@@ -656,7 +654,7 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 },
                 else => |c| try t.emitCharacter(c),
                 '<' => {
-                    // t.setState(.RAWTEXTLessThanSign);
+                    // RAWTEXTLessThanSign
                     if ((try t.nextInputChar(input)) != @as(u21, '/')) {
                         try t.emitCharacter('<');
                         t.reconsume(.RAWTEXT);
@@ -680,27 +678,6 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 }
             } else {
                 return t.emitEOF();
-            }
-        },
-        .TagName => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => return attribute(t, input),
-                    '/' => t.setState(.SelfClosingStartTag),
-                    '>' => {
-                        t.setState(.Data);
-                        try t.emitCurrentTag();
-                    },
-                    'A'...'Z' => |c| try t.appendCurrentTagName(toLowercase(c)),
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.appendCurrentTagName(REPLACEMENT_CHARACTER);
-                    },
-                    else => |c| try t.appendCurrentTagName(c),
-                }
-            } else {
-                try t.parseError(.EOFInTag);
-                try t.emitEOF();
             }
         },
         .RCDATA => {
@@ -728,25 +705,6 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptData => return scriptData(t, input),
-        .SelfClosingStartTag => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '>' => {
-                        t.makeCurrentTagSelfClosing();
-                        t.setState(.Data);
-                        try t.emitCurrentTag();
-                    },
-                    else => {
-                        try t.parseError(.UnexpectedSolidusInTag);
-                        t.reconsume(t.state);
-                        return attribute(t, input);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInTag);
-                try t.emitEOF();
-            }
-        },
         .CDATASection => {
             while (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
@@ -1045,7 +1003,8 @@ fn tagOpen(t: *Self, input: *[]const u21) !void {
             '/' => return endTagOpen(t, input),
             'A'...'Z', 'a'...'z' => {
                 t.createStartTagToken();
-                t.reconsume(.TagName);
+                t.reconsume(t.state);
+                return tagName(t, input);
             },
             '?' => {
                 try t.parseError(.UnexpectedQuestionMarkInsteadOfTagName);
@@ -1071,7 +1030,8 @@ fn endTagOpen(t: *Self, input: *[]const u21) !void {
         switch (current_input_char) {
             'A'...'Z', 'a'...'z' => {
                 t.createEndTagToken();
-                t.reconsume(.TagName);
+                t.reconsume(t.state);
+                return tagName(t, input);
             },
             '>' => {
                 try t.parseError(.MissingEndTagName);
@@ -1156,8 +1116,7 @@ fn endTagName(t: *Self, input: *[]const u21) !void {
             },
             '/' => {
                 if (t.isAppropriateEndTag()) {
-                    t.setState(.SelfClosingStartTag);
-                    return;
+                    return selfClosingStartTag(t, input);
                 }
                 break;
             },
@@ -1192,16 +1151,48 @@ const AttributeState = enum {
     Name,
     AfterName,
     Value,
+    Slash,
 };
 
+fn tagName(t: *Self, input: *[]const u21) !void {
+    while (try t.nextInputChar(input)) |current_input_char| {
+        switch (current_input_char) {
+            '\t', '\n', 0x0C, ' ' => return attribute(t, input),
+            '/' => return selfClosingStartTag(t, input),
+            '>' => {
+                try t.emitCurrentTag();
+                return t.setState(.Data);
+            },
+            'A'...'Z' => |c| try t.appendCurrentTagName(toLowercase(c)),
+            0x00 => {
+                try t.parseError(.UnexpectedNullCharacter);
+                try t.appendCurrentTagName(REPLACEMENT_CHARACTER);
+            },
+            else => |c| try t.appendCurrentTagName(c),
+        }
+    } else {
+        try t.parseError(.EOFInTag);
+        try t.emitEOF();
+    }
+}
+
 fn attribute(t: *Self, input: *[]const u21) !void {
-    var next_state: ?AttributeState = .BeforeName;
+    return attributeLoop(t, input, .BeforeName);
+}
+
+fn selfClosingStartTag(t: *Self, input: *[]const u21) !void {
+    return attributeLoop(t, input, .Slash);
+}
+
+fn attributeLoop(t: *Self, input: *[]const u21, initial_state: AttributeState) !void {
+    var next_state: ?AttributeState = initial_state;
     while (next_state) |state| {
         next_state = switch (state) {
             .BeforeName => try beforeAttributeName(t, input),
             .Name => try attributeName(t, input),
             .AfterName => try afterAttributeName(t, input),
             .Value => try beforeAttributeValue(t, input),
+            .Slash => try attributeSlash(t, input),
         };
     }
 }
@@ -1259,16 +1250,9 @@ fn afterAttributeName(t: *Self, input: *[]const u21) !?AttributeState {
         if (try t.nextInputChar(input)) |current_input_char| {
             switch (current_input_char) {
                 '\t', '\n', 0x0C, ' ' => {},
-                '/' => {
-                    t.setState(.SelfClosingStartTag);
-                    return null;
-                },
+                '/' => return .Slash,
                 '=' => return .Value,
-                '>' => {
-                    try t.emitCurrentTag();
-                    t.setState(.Data);
-                    return null;
-                },
+                '>' => return try attributeEnd(t),
                 else => {
                     t.createAttribute();
                     t.reconsume(t.state);
@@ -1288,9 +1272,7 @@ fn beforeAttributeValue(t: *Self, input: *[]const u21) !?AttributeState {
         '\'' => return attributeValueQuoted(t, input, .Single),
         '>' => {
             try t.parseError(.MissingAttributeValue);
-            try t.emitCurrentTag();
-            t.setState(.Data);
-            return null;
+            return try attributeEnd(t);
         },
         else => {
             t.reconsume(t.state);
@@ -1328,15 +1310,8 @@ fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime quote_style: Quo
     if (try t.nextInputChar(input)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => return AttributeState.BeforeName,
-            '/' => {
-                t.setState(.SelfClosingStartTag);
-                return null;
-            },
-            '>' => {
-                try t.emitCurrentTag();
-                t.setState(.Data);
-                return null;
-            },
+            '/' => return AttributeState.Slash,
+            '>' => return try attributeEnd(t),
             else => {
                 try t.parseError(.MissingWhitespaceBetweenAttributes);
                 t.reconsume(t.state);
@@ -1358,9 +1333,7 @@ fn attributeValueUnquoted(t: *Self, input: *[]const u21) !?AttributeState {
         '&' => try characterReference(t, input, IsPartOfAnAttribute.Yes),
         '>' => {
             try t.finishAttributeValue();
-            try t.emitCurrentTag();
-            t.setState(.Data);
-            return null;
+            return try attributeEnd(t);
         },
         0x00 => {
             try t.parseError(.UnexpectedNullCharacter);
@@ -1374,6 +1347,30 @@ fn attributeValueUnquoted(t: *Self, input: *[]const u21) !?AttributeState {
     } else {
         return try eofInTag(t);
     }
+}
+
+fn attributeSlash(t: *Self, input: *[]const u21) !?AttributeState {
+    if (try t.nextInputChar(input)) |current_input_char| {
+        switch (current_input_char) {
+            '>' => {
+                t.makeCurrentTagSelfClosing();
+                return try attributeEnd(t);
+            },
+            else => {
+                try t.parseError(.UnexpectedSolidusInTag);
+                t.reconsume(t.state);
+                return AttributeState.BeforeName;
+            },
+        }
+    } else {
+        return try eofInTag(t);
+    }
+}
+
+fn attributeEnd(t: *Self) !?AttributeState {
+    try t.emitCurrentTag();
+    t.setState(.Data);
+    return null;
 }
 
 fn eofInTag(t: *Self) !?AttributeState {
