@@ -179,12 +179,7 @@ pub const State = enum {
     ScriptData,
     PLAINTEXT,
     CDATASection,
-    EndTagOpen,
     TagName,
-    BeforeAttributeName,
-    AttributeName,
-    AfterAttributeName,
-    BeforeAttributeValue,
     SelfClosingStartTag,
     DOCTYPE,
     BeforeDOCTYPEName,
@@ -693,34 +688,10 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 return t.emitEOF();
             }
         },
-        .EndTagOpen => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    'A'...'Z', 'a'...'z' => {
-                        t.createEndTagToken();
-                        t.reconsume(.TagName);
-                    },
-                    '>' => {
-                        try t.parseError(.MissingEndTagName);
-                        t.setState(.Data);
-                    },
-                    else => {
-                        try t.parseError(.InvalidFirstCharacterOfTagName);
-                        t.createCommentToken();
-                        t.reconsume(t.state);
-                        return bogusComment(t, input);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFBeforeTagName);
-                try t.emitString("</");
-                try t.emitEOF();
-            }
-        },
         .TagName => {
             if (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => t.setState(.BeforeAttributeName),
+                    '\t', '\n', 0x0C, ' ' => return attribute(t, input),
                     '/' => t.setState(.SelfClosingStartTag),
                     '>' => {
                         t.setState(.Data);
@@ -763,25 +734,6 @@ fn processInput(t: *Self, input: *[]const u21) !void {
             }
         },
         .ScriptData => return scriptData(t, input),
-        .BeforeAttributeName => return beforeAttributeName(t, input),
-        .AttributeName => return attributeName(t, input),
-        .AfterAttributeName => return afterAttributeName(t, input),
-        .BeforeAttributeValue => {
-            while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
-                '\t', '\n', 0x0C, ' ' => {},
-                '"' => return attributeValueQuoted(t, input, .Double),
-                '\'' => return attributeValueQuoted(t, input, .Single),
-                '>' => {
-                    try t.parseError(.MissingAttributeValue);
-                    try t.emitCurrentTag();
-                    return t.setState(.Data);
-                },
-                else => {
-                    t.reconsume(t.state);
-                    return attributeValueUnquoted(t, input);
-                },
-            };
-        },
         .SelfClosingStartTag => {
             if (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
@@ -792,7 +744,8 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                     },
                     else => {
                         try t.parseError(.UnexpectedSolidusInTag);
-                        t.reconsume(.BeforeAttributeName);
+                        t.reconsume(t.state);
+                        return attribute(t, input);
                     },
                 }
             } else {
@@ -1204,7 +1157,7 @@ fn tagOpen(t: *Self, input: *[]const u21) !void {
     if (try t.nextInputChar(input)) |current_input_char| {
         switch (current_input_char) {
             '!' => return markupDeclarationOpen(t, input),
-            '/' => t.setState(.EndTagOpen),
+            '/' => return endTagOpen(t, input),
             'A'...'Z', 'a'...'z' => {
                 t.createStartTagToken();
                 t.reconsume(.TagName);
@@ -1224,6 +1177,31 @@ fn tagOpen(t: *Self, input: *[]const u21) !void {
     } else {
         try t.parseError(.EOFBeforeTagName);
         try t.emitCharacter('<');
+        try t.emitEOF();
+    }
+}
+
+fn endTagOpen(t: *Self, input: *[]const u21) !void {
+    if (try t.nextInputChar(input)) |current_input_char| {
+        switch (current_input_char) {
+            'A'...'Z', 'a'...'z' => {
+                t.createEndTagToken();
+                t.reconsume(.TagName);
+            },
+            '>' => {
+                try t.parseError(.MissingEndTagName);
+                t.setState(.Data);
+            },
+            else => {
+                try t.parseError(.InvalidFirstCharacterOfTagName);
+                t.createCommentToken();
+                t.reconsume(t.state);
+                return bogusComment(t, input);
+            },
+        }
+    } else {
+        try t.parseError(.EOFBeforeTagName);
+        try t.emitString("</");
         try t.emitEOF();
     }
 }
@@ -1287,8 +1265,7 @@ fn endTagName(t: *Self, input: *[]const u21) !void {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {
                 if (t.isAppropriateEndTag()) {
-                    t.setState(.BeforeAttributeName);
-                    return;
+                    return attribute(t, input);
                 }
                 break;
             },
@@ -1325,34 +1302,59 @@ fn endTagName(t: *Self, input: *[]const u21) !void {
     t.reconsume(t.state);
 }
 
-fn beforeAttributeName(t: *Self, input: *[]const u21) !void {
+const AttributeState = enum {
+    BeforeName,
+    Name,
+    AfterName,
+    Value,
+};
+
+fn attribute(t: *Self, input: *[]const u21) !void {
+    var next_state: ?AttributeState = .BeforeName;
+    while (next_state) |state| {
+        next_state = switch (state) {
+            .BeforeName => try beforeAttributeName(t, input),
+            .Name => try attributeName(t, input),
+            .AfterName => try afterAttributeName(t, input),
+            .Value => try beforeAttributeValue(t, input),
+        };
+    }
+}
+
+fn beforeAttributeName(t: *Self, input: *[]const u21) !AttributeState {
     // Make end-of-file (null) be handled the same as '>'
     while (true) switch ((try t.nextInputChar(input)) orelse '>') {
         '\t', '\n', 0x0C, ' ' => {},
-        '/', '>' => return t.reconsume(.AfterAttributeName),
+        '/', '>' => {
+            t.reconsume(t.state);
+            return .AfterName;
+        },
         '=' => {
             try t.parseError(.UnexpectedEqualsSignBeforeAttributeName);
             t.createAttribute();
             try t.appendCurrentAttributeName('=');
-            return t.setState(.AttributeName);
+            return .Name;
         },
         else => {
             t.createAttribute();
-            return t.reconsume(.AttributeName);
+            t.reconsume(t.state);
+            return .Name;
         },
     };
 }
 
-fn attributeName(t: *Self, input: *[]const u21) !void {
+fn attributeName(t: *Self, input: *[]const u21) !AttributeState {
     // Make end-of-file (null) be handled the same as '>'
     while (true) switch ((try t.nextInputChar(input)) orelse '>') {
         '\t', '\n', 0x0C, ' ', '/', '>' => {
             try t.finishAttributeName();
-            return t.reconsume(.AfterAttributeName);
+            t.reconsume(t.state);
+            return .AfterName;
         },
         '=' => {
             try t.finishAttributeName();
-            return t.setState(.BeforeAttributeValue);
+            t.setState(t.state);
+            return .Value;
         },
         'A'...'Z' => |c| try t.appendCurrentAttributeName(toLowercase(c)),
         0x00 => {
@@ -1367,32 +1369,54 @@ fn attributeName(t: *Self, input: *[]const u21) !void {
     };
 }
 
-fn afterAttributeName(t: *Self, input: *[]const u21) !void {
+fn afterAttributeName(t: *Self, input: *[]const u21) !?AttributeState {
     while (true) {
         if (try t.nextInputChar(input)) |current_input_char| {
             switch (current_input_char) {
                 '\t', '\n', 0x0C, ' ' => {},
-                '/' => return t.setState(.SelfClosingStartTag),
-                '=' => return t.setState(.BeforeAttributeValue),
+                '/' => {
+                    t.setState(.SelfClosingStartTag);
+                    return null;
+                },
+                '=' => return .Value,
                 '>' => {
-                    t.setState(.Data);
                     try t.emitCurrentTag();
-                    return;
+                    t.setState(.Data);
+                    return null;
                 },
                 else => {
                     t.createAttribute();
-                    return t.reconsume(.AttributeName);
+                    t.reconsume(t.state);
+                    return AttributeState.Name;
                 },
             }
         } else {
-            return eofInTag(t);
+            return try eofInTag(t);
         }
     }
 }
 
+fn beforeAttributeValue(t: *Self, input: *[]const u21) !?AttributeState {
+    while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+        '\t', '\n', 0x0C, ' ' => {},
+        '"' => return attributeValueQuoted(t, input, .Double),
+        '\'' => return attributeValueQuoted(t, input, .Single),
+        '>' => {
+            try t.parseError(.MissingAttributeValue);
+            try t.emitCurrentTag();
+            t.setState(.Data);
+            return null;
+        },
+        else => {
+            t.reconsume(t.state);
+            return attributeValueUnquoted(t, input);
+        },
+    };
+}
+
 const QuoteStyle = enum { Single, Double };
 
-fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime quote_style: QuoteStyle) !void {
+fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime quote_style: QuoteStyle) !?AttributeState {
     const quote = switch (quote_style) {
         .Single => '\'',
         .Double => '"',
@@ -1412,39 +1436,46 @@ fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime quote_style: Quo
             else => |c| try t.appendCurrentAttributeValue(c),
         }
     } else {
-        return eofInTag(t);
+        return try eofInTag(t);
     }
 
     // AfterAttributeValueQuoted
     if (try t.nextInputChar(input)) |current_input_char| {
         switch (current_input_char) {
-            '\t', '\n', 0x0C, ' ' => return t.setState(.BeforeAttributeName),
-            '/' => return t.setState(.SelfClosingStartTag),
+            '\t', '\n', 0x0C, ' ' => return AttributeState.BeforeName,
+            '/' => {
+                t.setState(.SelfClosingStartTag);
+                return null;
+            },
             '>' => {
                 try t.emitCurrentTag();
-                return t.setState(.Data);
+                t.setState(.Data);
+                return null;
             },
             else => {
                 try t.parseError(.MissingWhitespaceBetweenAttributes);
-                return t.reconsume(.BeforeAttributeName);
+                t.reconsume(t.state);
+                return AttributeState.BeforeName;
             },
         }
     } else {
-        return eofInTag(t);
+        return try eofInTag(t);
     }
 }
 
-fn attributeValueUnquoted(t: *Self, input: *[]const u21) !void {
+fn attributeValueUnquoted(t: *Self, input: *[]const u21) !?AttributeState {
     while (try t.nextInputChar(input)) |current_input_char| switch (current_input_char) {
         '\t', '\n', 0x0C, ' ' => {
             try t.finishAttributeValue();
-            return t.setState(.BeforeAttributeName);
+            t.setState(t.state);
+            return AttributeState.BeforeName;
         },
         '&' => try characterReference(t, input, IsPartOfAnAttribute.Yes),
         '>' => {
             try t.finishAttributeValue();
             try t.emitCurrentTag();
-            return t.setState(.Data);
+            t.setState(.Data);
+            return null;
         },
         0x00 => {
             try t.parseError(.UnexpectedNullCharacter);
@@ -1456,13 +1487,14 @@ fn attributeValueUnquoted(t: *Self, input: *[]const u21) !void {
         },
         else => |c| try t.appendCurrentAttributeValue(c),
     } else {
-        return eofInTag(t);
+        return try eofInTag(t);
     }
 }
 
-fn eofInTag(t: *Self) !void {
+fn eofInTag(t: *Self) !?AttributeState {
     try t.parseError(.EOFInTag);
     try t.emitEOF();
+    return null;
 }
 
 const CommentState = enum {
