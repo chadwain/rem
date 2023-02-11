@@ -181,12 +181,6 @@ pub const State = enum {
     CDATASection,
     TagName,
     SelfClosingStartTag,
-    DOCTYPE,
-    BeforeDOCTYPEName,
-    DOCTYPEName,
-    AfterDOCTYPEName,
-    AfterDOCTYPEPublicKeyword,
-    AfterDOCTYPESystemKeyword,
 };
 
 fn consumeReplayedCharacters(self: *Self, count: u6) void {
@@ -753,115 +747,6 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 try t.emitEOF();
             }
         },
-        .DOCTYPE => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => t.setState(.BeforeDOCTYPEName),
-                    '>' => t.reconsume(.BeforeDOCTYPEName),
-                    else => {
-                        try t.parseError(.MissingWhitespaceBeforeDOCTYPEName);
-                        t.reconsume(.BeforeDOCTYPEName);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.createDOCTYPEToken();
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
-        .BeforeDOCTYPEName => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => {},
-                    'A'...'Z' => |c| {
-                        t.createDOCTYPEToken();
-                        t.markCurrentDOCTYPENameNotMissing();
-                        try t.appendDOCTYPEName(toLowercase(c));
-                        t.setState(.DOCTYPEName);
-                    },
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        t.createDOCTYPEToken();
-                        t.markCurrentDOCTYPENameNotMissing();
-                        try t.appendDOCTYPEName(REPLACEMENT_CHARACTER);
-                        t.setState(.DOCTYPEName);
-                    },
-                    '>' => {
-                        try t.parseError(.MissingDOCTYPEName);
-                        t.createDOCTYPEToken();
-                        t.currentDOCTYPETokenForceQuirks();
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    else => |c| {
-                        t.createDOCTYPEToken();
-                        t.markCurrentDOCTYPENameNotMissing();
-                        try t.appendDOCTYPEName(c);
-                        t.setState(.DOCTYPEName);
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.createDOCTYPEToken();
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
-        .DOCTYPEName => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => t.setState(.AfterDOCTYPEName),
-                    '>' => {
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    'A'...'Z' => |c| try t.appendDOCTYPEName(toLowercase(c)),
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.appendDOCTYPEName(REPLACEMENT_CHARACTER);
-                    },
-                    else => |c| try t.appendDOCTYPEName(c),
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
-        .AfterDOCTYPEName => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '\t', '\n', 0x0C, ' ' => {},
-                    '>' => {
-                        t.setState(.Data);
-                        try t.emitDOCTYPE();
-                    },
-                    else => |c| {
-                        if (caseInsensitiveEql(c, 'P') and t.consumeCharsIfCaseInsensitiveEql(input, "UBLIC")) {
-                            t.setState(.AfterDOCTYPEPublicKeyword);
-                        } else if (caseInsensitiveEql(c, 'S') and t.consumeCharsIfCaseInsensitiveEql(input, "YSTEM")) {
-                            t.setState(.AfterDOCTYPESystemKeyword);
-                        } else {
-                            try t.parseError(.InvalidCharacterSequenceAfterDOCTYPEName);
-                            t.currentDOCTYPETokenForceQuirks();
-                            t.reconsume(t.state);
-                            return bogusDOCTYPE(t, input);
-                        }
-                    },
-                }
-            } else {
-                try t.parseError(.EOFInDOCTYPE);
-                t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                try t.emitEOF();
-            }
-        },
-        .AfterDOCTYPEPublicKeyword => try afterDOCTYPEPublicOrSystemKeyword(t, input, .public),
-        .AfterDOCTYPESystemKeyword => try afterDOCTYPEPublicOrSystemKeyword(t, input, .system),
         .CDATASection => {
             while (try t.nextInputChar(input)) |current_input_char| {
                 switch (current_input_char) {
@@ -1211,7 +1096,7 @@ fn markupDeclarationOpen(t: *Self, input: *[]const u21) !void {
         t.createCommentToken();
         return commentStart(t, input);
     } else if (t.consumeCharsIfCaseInsensitiveEql(input, "DOCTYPE")) {
-        t.setState(.DOCTYPE);
+        return doctype(t, input);
     } else if (t.consumeCharsIfEql(input, "[CDATA[")) {
         if (t.adjustedCurrentNodeIsNotInHtmlNamespace()) {
             t.setState(.CDATASection);
@@ -1651,16 +1536,113 @@ fn incorrectlyClosedComment(t: *Self) !?CommentState {
     return null;
 }
 
-fn eofInDoctype(t: *Self) !void {
-    try t.parseError(.EOFInDOCTYPE);
-    t.currentDOCTYPETokenForceQuirks();
-    try t.emitDOCTYPE();
-    try t.emitEOF();
+const DoctypeState = enum {
+    BeforeName,
+    Name,
+    AfterName,
+};
+
+fn doctype(t: *Self, input: *[]const u21) !void {
+    t.createDOCTYPEToken();
+    var next_state: ?DoctypeState = next_state: {
+        if (try t.nextInputChar(input)) |current_input_char| {
+            switch (current_input_char) {
+                '\t', '\n', 0x0C, ' ' => {},
+                '>' => t.reconsume(t.state),
+                else => {
+                    try t.parseError(.MissingWhitespaceBeforeDOCTYPEName);
+                    t.reconsume(t.state);
+                },
+            }
+            break :next_state .BeforeName;
+        } else {
+            break :next_state try eofInDoctype(t);
+        }
+    };
+
+    while (next_state) |state| {
+        next_state = switch (state) {
+            .BeforeName => try beforeDoctypeName(t, input),
+            .Name => try doctypeName(t, input),
+            .AfterName => try afterDoctypeName(t, input),
+        };
+    }
+}
+
+fn beforeDoctypeName(t: *Self, input: *[]const u21) !?DoctypeState {
+    while (try t.nextInputChar(input)) |current_input_char| {
+        switch (current_input_char) {
+            '\t', '\n', 0x0C, ' ' => {},
+            'A'...'Z' => |c| {
+                t.markCurrentDOCTYPENameNotMissing();
+                try t.appendDOCTYPEName(toLowercase(c));
+                return DoctypeState.Name;
+            },
+            0x00 => {
+                try t.parseError(.UnexpectedNullCharacter);
+                t.markCurrentDOCTYPENameNotMissing();
+                try t.appendDOCTYPEName(REPLACEMENT_CHARACTER);
+                return DoctypeState.Name;
+            },
+            '>' => {
+                try t.parseError(.MissingDOCTYPEName);
+                t.currentDOCTYPETokenForceQuirks();
+                return try doctypeEnd(t);
+            },
+            else => |c| {
+                t.markCurrentDOCTYPENameNotMissing();
+                try t.appendDOCTYPEName(c);
+                return DoctypeState.Name;
+            },
+        }
+    } else {
+        return try eofInDoctype(t);
+    }
+}
+
+fn doctypeName(t: *Self, input: *[]const u21) !?DoctypeState {
+    while (try t.nextInputChar(input)) |current_input_char| {
+        switch (current_input_char) {
+            '\t', '\n', 0x0C, ' ' => return DoctypeState.AfterName,
+            '>' => return try doctypeEnd(t),
+            'A'...'Z' => |c| try t.appendDOCTYPEName(toLowercase(c)),
+            0x00 => {
+                try t.parseError(.UnexpectedNullCharacter);
+                try t.appendDOCTYPEName(REPLACEMENT_CHARACTER);
+            },
+            else => |c| try t.appendDOCTYPEName(c),
+        }
+    } else {
+        return try eofInDoctype(t);
+    }
+}
+
+fn afterDoctypeName(t: *Self, input: *[]const u21) !?DoctypeState {
+    while (try t.nextInputChar(input)) |current_input_char| {
+        switch (current_input_char) {
+            '\t', '\n', 0x0C, ' ' => {},
+            '>' => return try doctypeEnd(t),
+            else => |c| {
+                if (caseInsensitiveEql(c, 'P') and t.consumeCharsIfCaseInsensitiveEql(input, "UBLIC")) {
+                    return afterDOCTYPEPublicOrSystemKeyword(t, input, .public);
+                } else if (caseInsensitiveEql(c, 'S') and t.consumeCharsIfCaseInsensitiveEql(input, "YSTEM")) {
+                    return afterDOCTYPEPublicOrSystemKeyword(t, input, .system);
+                } else {
+                    try t.parseError(.InvalidCharacterSequenceAfterDOCTYPEName);
+                    t.currentDOCTYPETokenForceQuirks();
+                    t.reconsume(t.state);
+                    return bogusDOCTYPE(t, input);
+                }
+            },
+        }
+    } else {
+        return try eofInDoctype(t);
+    }
 }
 
 const PublicOrSystem = enum { public, system };
 
-fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_system: PublicOrSystem) !void {
+fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_system: PublicOrSystem) !?DoctypeState {
     // AfterDOCTYPEPublicKeyword
     // AfterDOCTYPESystemKeyword
     if (try t.nextInputChar(input)) |current_input_char| {
@@ -1681,8 +1663,7 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_sy
                 };
                 try t.parseError(err);
                 t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                return t.setState(.Data);
+                return try doctypeEnd(t);
             },
             else => {
                 const err: ParseError = switch (public_or_system) {
@@ -1696,7 +1677,7 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_sy
             },
         }
     } else {
-        return eofInDoctype(t);
+        return try eofInDoctype(t);
     }
 
     // BeforeDOCTYPEPublicIdentifier
@@ -1713,8 +1694,7 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_sy
                 };
                 try t.parseError(err);
                 t.currentDOCTYPETokenForceQuirks();
-                try t.emitDOCTYPE();
-                return t.setState(.Data);
+                return try doctypeEnd(t);
             },
             else => {
                 const err: ParseError = switch (public_or_system) {
@@ -1728,11 +1708,11 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_sy
             },
         }
     } else {
-        return eofInDoctype(t);
+        return try eofInDoctype(t);
     }
 }
 
-fn doctypePublicOrSystemIdentifier(t: *Self, input: *[]const u21, public_or_system: PublicOrSystem, quote: u21) Error!void {
+fn doctypePublicOrSystemIdentifier(t: *Self, input: *[]const u21, public_or_system: PublicOrSystem, quote: u21) Error!?DoctypeState {
     // DOCTYPEPublicIdentifierDoubleQuoted
     // DOCTYPEPublicIdentifierSingleQuoted
     // DOCTYPESystemIdentifierDoubleQuoted
@@ -1765,24 +1745,20 @@ fn doctypePublicOrSystemIdentifier(t: *Self, input: *[]const u21, public_or_syst
             };
             try t.parseError(err);
             t.currentDOCTYPETokenForceQuirks();
-            try t.emitDOCTYPE();
-            return t.setState(.Data);
+            return try doctypeEnd(t);
         } else {
             try append(t, current_input_char);
         }
     } else {
-        return eofInDoctype(t);
+        return try eofInDoctype(t);
     }
 }
 
-fn afterDOCTYPEPublicIdentifier(t: *Self, input: *[]const u21) !void {
+fn afterDOCTYPEPublicIdentifier(t: *Self, input: *[]const u21) !?DoctypeState {
     if (try t.nextInputChar(input)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
-            '>' => {
-                try t.emitDOCTYPE();
-                return t.setState(.Data);
-            },
+            '>' => return try doctypeEnd(t),
             '"', '\'' => |quote| {
                 try t.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
                 return doctypePublicOrSystemIdentifier(t, input, .system, quote);
@@ -1795,7 +1771,7 @@ fn afterDOCTYPEPublicIdentifier(t: *Self, input: *[]const u21) !void {
             },
         }
     } else {
-        return eofInDoctype(t);
+        return try eofInDoctype(t);
     }
 
     // BetweenDOCTYPEPublicAndSystemIdentifiers
@@ -1803,10 +1779,7 @@ fn afterDOCTYPEPublicIdentifier(t: *Self, input: *[]const u21) !void {
     if (try t.nextInputChar(input)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => unreachable,
-            '>' => {
-                try t.emitDOCTYPE();
-                return t.setState(.Data);
-            },
+            '>' => return try doctypeEnd(t),
             '"', '\'' => |quote| {
                 return doctypePublicOrSystemIdentifier(t, input, .system, quote);
             },
@@ -1818,19 +1791,16 @@ fn afterDOCTYPEPublicIdentifier(t: *Self, input: *[]const u21) !void {
             },
         }
     } else {
-        return eofInDoctype(t);
+        return try eofInDoctype(t);
     }
 }
 
-fn afterDOCTYPESystemIdentifier(t: *Self, input: *[]const u21) !void {
+fn afterDOCTYPESystemIdentifier(t: *Self, input: *[]const u21) !?DoctypeState {
     try skipHtmlWhitespace(t, input);
     if (try t.nextInputChar(input)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => unreachable,
-            '>' => {
-                try t.emitDOCTYPE();
-                return t.setState(.Data);
-            },
+            '>' => return try doctypeEnd(t),
             else => {
                 try t.parseError(.UnexpectedCharacterAfterDOCTYPESystemIdentifier);
                 t.reconsume(t.state);
@@ -1838,22 +1808,37 @@ fn afterDOCTYPESystemIdentifier(t: *Self, input: *[]const u21) !void {
             },
         }
     } else {
-        return eofInDoctype(t);
+        return try eofInDoctype(t);
     }
 }
 
-fn bogusDOCTYPE(t: *Self, input: *[]const u21) !void {
+fn doctypeEnd(t: *Self) !?DoctypeState {
+    try t.emitDOCTYPE();
+    t.setState(.Data);
+    return null;
+}
+
+fn eofInDoctype(t: *Self) !?DoctypeState {
+    try t.parseError(.EOFInDOCTYPE);
+    t.currentDOCTYPETokenForceQuirks();
+    try t.emitDOCTYPE();
+    try t.emitEOF();
+    return null;
+}
+
+fn bogusDOCTYPE(t: *Self, input: *[]const u21) !?DoctypeState {
     while (try t.nextInputChar(input)) |current_input_char| switch (current_input_char) {
         '>' => {
             try t.emitDOCTYPE();
-            return t.setState(.Data);
+            t.setState(.Data);
+            return null;
         },
         0x00 => try t.parseError(.UnexpectedNullCharacter),
         else => {},
     } else {
         try t.emitDOCTYPE();
         try t.emitEOF();
-        return;
+        return null;
     }
 }
 
