@@ -24,7 +24,6 @@ const ArrayList = std.ArrayList;
 
 tokenizer: Tokenizer,
 constructor: TreeConstructor,
-input: []const u21,
 allocator: Allocator,
 
 const Self = @This();
@@ -144,9 +143,8 @@ pub fn init(
     errdefer error_handler.deinit();
 
     return Self{
-        .tokenizer = Tokenizer.init(allocator, token_sink, error_handler),
+        .tokenizer = Tokenizer.init(allocator, input, token_sink, error_handler),
         .constructor = TreeConstructor.init(dom, document, allocator, error_handler, .{ .scripting = scripting }),
-        .input = input,
         .allocator = allocator,
     };
 }
@@ -195,13 +193,12 @@ pub fn initFragment(
     errdefer error_handler.deinit();
 
     var result = Self{
-        .tokenizer = Tokenizer.initState(allocator, initial_state, token_sink, error_handler),
+        .tokenizer = Tokenizer.initState(allocator, input, initial_state, token_sink, error_handler),
         .constructor = TreeConstructor.init(dom, document, allocator, error_handler, .{
             .fragment_context = context,
             .scripting = scripting,
         }),
         // Step 12
-        .input = input,
         .allocator = allocator,
     };
 
@@ -260,7 +257,7 @@ pub fn deinit(self: *Self) void {
 /// Runs the tokenization and tree construction steps to completion.
 pub fn run(self: *Self) !void {
     const tokens: *ArrayList(Token) = self.tokenizer.tokens;
-    while (self.tokenizer.run(&self.input) catch |err| switch (err) {
+    while (self.tokenizer.run() catch |err| switch (err) {
         error.AbortParsing => blk: {
             self.abort();
             break :blk false;
@@ -298,8 +295,9 @@ pub fn run(self: *Self) !void {
 /// Implements HTML's "abort a parser" algorithm
 /// https://html.spec.whatwg.org/multipage/parsing.html#abort-a-parser
 fn abort(self: *Self) void {
+    _ = self;
     // TODO: The rest of this algorithm.
-    self.input = &[0]u21{};
+    // self.input = &[0]u21{};
 }
 
 /// Returns the Document node associated with this parser.

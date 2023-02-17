@@ -33,7 +33,7 @@ test "Tree constructor usage" {
     const allocator = std.testing.allocator;
 
     const string = "<!doctype><html>asdf</body hello=world>";
-    var input: []const u21 = &rem.util.utf8DecodeStringComptime(string);
+    const input: []const u21 = &rem.util.utf8DecodeStringComptime(string);
 
     var tokens = std.ArrayList(Token).init(allocator);
     defer {
@@ -44,7 +44,7 @@ test "Tree constructor usage" {
     var error_handler: ErrorHandler = .ignore;
     defer error_handler.deinit();
 
-    var tokenizer = Tokenizer.init(allocator, &tokens, &error_handler);
+    var tokenizer = Tokenizer.init(allocator, input, &tokens, &error_handler);
     defer tokenizer.deinit();
 
     var dom = Dom{ .allocator = allocator };
@@ -55,7 +55,7 @@ test "Tree constructor usage" {
     var constructor = TreeConstructor.init(&dom, document, allocator, &error_handler, .{});
     defer constructor.deinit();
 
-    while (try tokenizer.run(&input)) {
+    while (try tokenizer.run()) {
         if (tokens.items.len > 0) {
             var constructor_result: TreeConstructor.RunResult = undefined;
             for (tokens.items) |*token| {

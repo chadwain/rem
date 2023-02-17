@@ -7,7 +7,7 @@ test "Tokenizer usage" {
     const allocator = std.testing.allocator;
 
     const string = "<!doctype><HTML>asdf</body hello=world>";
-    var input: []const u21 = &rem.util.utf8DecodeStringComptime(string);
+    const input: []const u21 = &rem.util.utf8DecodeStringComptime(string);
 
     var all_tokens = std.ArrayList(Token).init(allocator);
     defer {
@@ -18,10 +18,10 @@ test "Tokenizer usage" {
     var error_handler = ErrorHandler{ .report = ArrayList(ParseError).init(allocator) };
     defer error_handler.report.deinit();
 
-    var tokenizer = init(allocator, &all_tokens, &error_handler);
+    var tokenizer = init(allocator, input, &all_tokens, &error_handler);
     defer tokenizer.deinit();
 
-    while (try tokenizer.run(&input)) {}
+    while (try tokenizer.run()) {}
 
     const expected_tokens = &[8]Token{
         .{ .doctype = .{ .name = null, .public_identifier = null, .system_identifier = null, .force_quirks = true } },
@@ -67,6 +67,7 @@ const REPLACEMENT_CHARACTER = '\u{FFFD}';
 const TREAT_AS_ANYTHING_ELSE = '\u{FFFF}';
 
 state: State = .Data,
+input: InputStream,
 current_tag_name: ArrayListUnmanaged(u8) = .{},
 current_tag_attributes: Attributes = .{},
 current_tag_self_closing: bool = false,
@@ -85,15 +86,7 @@ current_comment_data: ArrayListUnmanaged(u8) = .{},
 temp_buffer: ArrayListUnmanaged(u21) = .{},
 adjusted_current_node_is_not_in_html_namespace: bool = false,
 
-reconsumed_input_char: ?u21 = undefined,
-should_reconsume: bool = false,
-previous_char_was_carriage_return: bool = false,
 reached_eof: bool = false,
-/// Stores codepoints that were read from the input stream but were not consumed.
-/// This buffer has a maximum length of 32, which is the length of the longest named character reference,
-/// ignoring the leading ampersand (namely '&CounterClockwiseContourIntegral;').
-replayed_characters: [32]u21 = undefined,
-replayed_characters_len: u6 = 0,
 allocator: Allocator,
 
 tokens: *ArrayList(Token),
@@ -102,21 +95,24 @@ error_handler: *ErrorHandler,
 /// Create a new HTML5 tokenizer.
 pub fn init(
     allocator: Allocator,
+    input: []const u21,
     token_sink: *ArrayList(Token),
     error_handler: *ErrorHandler,
 ) Self {
-    return initState(allocator, .Data, token_sink, error_handler);
+    return initState(allocator, input, .Data, token_sink, error_handler);
 }
 
 /// Create a new HTML5 tokenizer, and change to a particular state.
 pub fn initState(
     allocator: Allocator,
+    input: []const u21,
     state: State,
     token_sink: *ArrayList(Token),
     error_handler: *ErrorHandler,
 ) Self {
     return Self{
         .allocator = allocator,
+        .input = .{ .chars = input },
         .state = state,
         .tokens = token_sink,
         .error_handler = error_handler,
@@ -151,9 +147,9 @@ pub fn deinit(self: *Self) void {
 ///     1. Change the tokenizer's state via setState, if appropriate.
 ///     2. Call setAdjustedCurrentNodeIsNotInHtmlNamespace with an appropriate value.
 ///     3. Change the input stream, if appropriate.
-pub fn run(self: *Self, input: *[]const u21) !bool {
+pub fn run(self: *Self) !bool {
     if (self.reached_eof) return false;
-    try processInput(self, input);
+    try processInput(self);
     return true;
 }
 
@@ -181,150 +177,100 @@ pub const State = enum {
     CDATASection,
 };
 
-fn consumeReplayedCharacters(self: *Self, count: u6) void {
-    for (self.replayed_characters[count..self.replayed_characters_len]) |c, i| {
-        self.replayed_characters[i] = c;
+const InputStream = struct {
+    chars: []const u21,
+    position: usize = 0,
+    eof: bool = false,
+    reconsume: bool = false,
+};
+
+/// Returns the next input character in the input stream.
+/// Performs §13.2.3.5 "Preprocessing the input stream" of the HTML standard.
+fn next(self: *Self) !?u21 {
+    const re = self.input.reconsume;
+    const char = self.nextNoErrorCheck();
+    if (!re and char != null) {
+        try self.checkInputCharacterForErrors(char.?);
     }
-    self.replayed_characters_len -= count;
+    return char;
 }
 
-fn replayCharacters(self: *Self, codepoints: []const u21) void {
-    if (debug) {
-        if (codepoints.len <= self.replayed_characters_len) {
-            for (codepoints) |c, i| {
-                assert(self.replayed_characters[i] == c);
-            }
-        } else {
-            for (self.replayed_characters[0..self.replayed_characters_len]) |c, i| {
-                assert(codepoints[i] == c);
-            }
+fn nextNoErrorCheck(self: *Self) ?u21 {
+    if (self.input.position >= self.input.chars.len) {
+        self.input.eof = true;
+        return null;
+    }
+
+    var char = self.input.chars[self.input.position];
+    self.input.position += 1;
+    if (char == '\r') {
+        char = '\n';
+        if (self.input.position < self.input.chars.len and self.input.chars[self.input.position] == '\n') {
+            self.input.position += 1;
         }
     }
 
-    if (codepoints.len > self.replayed_characters_len) {
-        for (codepoints[self.replayed_characters_len..]) |c, i| {
-            self.replayed_characters[self.replayed_characters_len + i] = c;
-        }
-        self.replayed_characters_len = @intCast(u6, codepoints.len);
-    }
+    self.input.reconsume = false;
+
+    return char;
 }
 
-/// Returns what would be the next input character in the input stream,
-/// taking into account that it could be a replayed character.
-/// A value of `null` represents the "EOF" character.
-fn nextInputStreamChar(self: *Self, input: *[]const u21, replayed_characters_index: *u6) ?u21 {
-    if (replayed_characters_index.* < self.replayed_characters_len) {
-        const character = self.replayed_characters[replayed_characters_index.*];
-        replayed_characters_index.* += 1;
-        return character;
+fn nextIgnoreEof(self: *Self) !u21 {
+    const char = try self.next();
+    return char orelse TREAT_AS_ANYTHING_ELSE;
+}
+
+fn peekIgnoreEof(self: *Self) !u21 {
+    const char = try self.nextIgnoreEof();
+    self.back();
+    return char;
+}
+
+fn back(self: *Self) void {
+    if (self.input.eof) {
+        self.input.eof = false;
+        return;
+    }
+
+    const previous = self.input.chars[self.input.position - 1];
+    if (previous == '\n' and self.input.position > 2 and self.input.chars[self.input.position - 2] == '\r') {
+        self.input.position -= 2;
     } else {
-        if (input.*.len == 0) return null;
-        const character = input.*[0];
-        input.* = input.*[1..];
-        return character;
-    }
-}
-
-/// Returns either the next input character in the input stream, or
-/// the previous input character to be reconsumed.
-/// Normalizes newlines according to §13.2.3.5 "Preprocessing the input stream" of the HTML standard.
-fn nextInputChar(self: *Self, input: *[]const u21) !?u21 {
-    if (self.should_reconsume) {
-        self.should_reconsume = false;
-        return self.reconsumed_input_char;
-    } else {
-        var replayed_characters_index: u6 = 0;
-        defer self.consumeReplayedCharacters(replayed_characters_index);
-
-        var next_char = self.nextInputStreamChar(input, &replayed_characters_index);
-
-        if (next_char) |character| {
-            if (character == '\n' and self.previous_char_was_carriage_return) {
-                next_char = self.nextInputStreamChar(input, &replayed_characters_index);
-            }
-        }
-
-        if (next_char) |*character| {
-            if (character.* == '\r') {
-                character.* = '\n';
-                self.previous_char_was_carriage_return = true;
-            } else {
-                self.previous_char_was_carriage_return = false;
-            }
-
-            try self.checkInputCharacterForErrors(character.*);
-        }
-
-        self.reconsumed_input_char = next_char;
-        return next_char;
-    }
-}
-
-/// Returns either the next input character in the input stream, or
-/// the previous input character to be reconsumed.
-/// Does not modify the state of the tokenizer.
-/// Normalizes newlines according to §13.2.3.5 "Preprocessing the input stream" of the HTML standard.
-fn peekInputChar(self: *Self, input: *[]const u21) ?u21 {
-    if (self.should_reconsume) {
-        return self.reconsumed_input_char;
-    } else {
-        var replayed_characters_index: u6 = 0;
-        var replayed: []const u21 = &[_]u21{};
-        defer self.replayCharacters(replayed);
-
-        var next_char = self.nextInputStreamChar(input, &replayed_characters_index) orelse return null;
-        replayed = &[1]u21{next_char};
-
-        if (next_char == '\n' and self.previous_char_was_carriage_return) {
-            next_char = self.nextInputStreamChar(input, &replayed_characters_index) orelse return null;
-            replayed = &[2]u21{ '\n', next_char };
-        }
-
-        if (next_char == '\r') {
-            next_char = '\n';
-        }
-
-        return next_char;
+        self.input.position -= 1;
     }
 }
 
 /// Scans the next characters in the input stream to see if they are equal to `string`.
 /// If so, consumes those characters and returns `true`. Otherwise, adds any read characters
 /// to the list of replayed characters and returns `false`.
-fn consumeCharsIfEql(self: *Self, input: *[]const u21, comptime string: []const u8) bool {
-    comptime assert(string.len <= 7);
-    comptime assert(std.mem.indexOfScalar(u8, string, '\r') == null);
+fn consumeCharsIfEql(self: *Self, comptime string: []const u8) bool {
     const decoded_string = rem.util.utf8DecodeStringComptime(string);
-    return consumeCharsIfEqlGeneric(self, input, &decoded_string, caseSensitiveEql);
+    return consumeCharsIfEqlGeneric(self, &decoded_string, caseSensitiveEql);
 }
 
 /// Scans the next characters in the input stream to see if they are equal to `string` in
 /// a case-insensitive manner.
 /// If so, consumes those characters and returns `true`. Otherwise, adds any read characters
 /// to the list of replayed characters and returns `false`.
-fn consumeCharsIfCaseInsensitiveEql(self: *Self, input: *[]const u21, comptime string: []const u8) bool {
-    comptime assert(string.len <= 7);
-    comptime assert(std.mem.indexOfScalar(u8, string, '\r') == null);
+fn consumeCharsIfCaseInsensitiveEql(self: *Self, comptime string: []const u8) bool {
     const decoded_string = rem.util.utf8DecodeStringComptime(string);
-    return consumeCharsIfEqlGeneric(self, input, &decoded_string, caseInsensitiveEql);
+    return consumeCharsIfEqlGeneric(self, &decoded_string, caseInsensitiveEql);
 }
 
-fn consumeCharsIfEqlGeneric(self: *Self, input: *[]const u21, decoded_string: []const u21, comptime eqlFn: fn (u21, u21) bool) bool {
-    var read_characters: [7]u21 = undefined;
-    var read_characters_len: u6 = 0;
-
-    var replayed_characters_index: u6 = 0;
-    for (decoded_string) |character| {
-        const next_char = self.nextInputStreamChar(input, &replayed_characters_index) orelse break;
-        read_characters[read_characters_len] = next_char;
-        read_characters_len += 1;
-        if (!eqlFn(next_char, character)) break;
+fn consumeCharsIfEqlGeneric(self: *Self, decoded_string: []const u21, comptime eqlFn: fn (u21, u21) bool) bool {
+    var index: usize = 0;
+    while (index < decoded_string.len) {
+        const string_char = decoded_string[index];
+        index += 1;
+        const next_char = self.nextNoErrorCheck() orelse break;
+        if (!eqlFn(string_char, next_char)) break;
     } else {
-        self.consumeReplayedCharacters(replayed_characters_index);
         return true;
     }
 
-    self.replayCharacters(read_characters[0..read_characters_len]);
+    while (index > 0) : (index -= 1) {
+        self.back();
+    }
     return false;
 }
 
@@ -380,9 +326,14 @@ fn checkInputCharacterForErrors(self: *Self, character: u21) !void {
     }
 }
 
-fn reconsume(self: *Self, new_state: State) void {
-    self.should_reconsume = true;
-    self.state = new_state;
+fn reconsume(self: *Self) void {
+    self.back();
+    self.input.reconsume = true;
+}
+
+fn reconsumeInState(self: *Self, new_state: State) void {
+    self.reconsume();
+    self.setState(new_state);
 }
 
 fn createDOCTYPEToken(self: *Self) void {
@@ -629,25 +580,23 @@ fn adjustedCurrentNodeIsNotInHtmlNamespace(self: *Self) bool {
     return self.adjusted_current_node_is_not_in_html_namespace;
 }
 
-fn processInput(t: *Self, input: *[]const u21) !void {
+fn processInput(t: *Self) !void {
     switch (t.state) {
         .Data => {
-            if (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '&' => try characterReference(t, input, IsPartOfAnAttribute.No),
-                    '<' => return tagOpen(t, input),
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.emitCharacter(0x00);
-                    },
-                    else => |c| try t.emitCharacter(c),
-                }
+            if (try t.next()) |char| switch (char) {
+                '&' => try characterReference(t, IsPartOfAnAttribute.No),
+                '<' => return tagOpen(t),
+                0x00 => {
+                    try t.parseError(.UnexpectedNullCharacter);
+                    try t.emitCharacter(0x00);
+                },
+                else => |c| try t.emitCharacter(c),
             } else {
-                try t.emitEOF();
+                return t.emitEOF();
             }
         },
         .RAWTEXT => {
-            while (try t.nextInputChar(input)) |current_input_char| switch (current_input_char) {
+            while (try t.next()) |char| switch (char) {
                 0x00 => {
                     try t.parseError(.UnexpectedNullCharacter);
                     try t.emitCharacter(REPLACEMENT_CHARACTER);
@@ -655,35 +604,33 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                 else => |c| try t.emitCharacter(c),
                 '<' => {
                     // RAWTEXTLessThanSign
-                    if ((try t.nextInputChar(input)) != @as(u21, '/')) {
+                    if ((try t.nextIgnoreEof()) != '/') {
                         try t.emitCharacter('<');
-                        t.reconsume(.RAWTEXT);
+                        t.reconsumeInState(.RAWTEXT);
                         continue;
                     }
 
-                    return nonDataEndTagOpen(t, input);
+                    return nonDataEndTagOpen(t);
                 },
             } else {
                 try t.emitEOF();
             }
         },
-        .PLAINTEXT => {
-            while (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    0x00 => {
-                        try t.parseError(.UnexpectedNullCharacter);
-                        try t.emitCharacter(REPLACEMENT_CHARACTER);
-                    },
-                    else => |c| try t.emitCharacter(c),
-                }
+        .PLAINTEXT => while (true) {
+            if (try t.next()) |char| switch (char) {
+                0x00 => {
+                    try t.parseError(.UnexpectedNullCharacter);
+                    try t.emitCharacter(REPLACEMENT_CHARACTER);
+                },
+                else => |c| try t.emitCharacter(c),
             } else {
                 return t.emitEOF();
             }
         },
         .RCDATA => {
-            while (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    '&' => try characterReference(t, input, IsPartOfAnAttribute.No),
+            while (try t.next()) |char| {
+                switch (char) {
+                    '&' => try characterReference(t, IsPartOfAnAttribute.No),
                     0x00 => {
                         try t.parseError(.UnexpectedNullCharacter);
                         try t.emitCharacter(REPLACEMENT_CHARACTER);
@@ -691,44 +638,44 @@ fn processInput(t: *Self, input: *[]const u21) !void {
                     else => |c| try t.emitCharacter(c),
                     '<' => {
                         // RCDATALessThanSign
-                        if ((try t.nextInputChar(input)) != @as(u21, '/')) {
+                        if ((try t.nextIgnoreEof()) != '/') {
                             try t.emitCharacter('<');
-                            t.reconsume(.RCDATA);
+                            t.reconsumeInState(.RCDATA);
                             continue;
                         }
 
-                        return nonDataEndTagOpen(t, input);
+                        return nonDataEndTagOpen(t);
                     },
                 }
             } else {
                 return t.emitEOF();
             }
         },
-        .ScriptData => return scriptData(t, input),
-        .CDATASection => {
-            while (try t.nextInputChar(input)) |current_input_char| {
-                switch (current_input_char) {
-                    ']' => {
-                        // CDATASectionBracket
-                        if ((try t.nextInputChar(input)) != @as(u21, ']')) {
-                            try t.emitCharacter(']');
-                            t.reconsume(.CDATASection);
-                            continue;
-                        }
+        .ScriptData => return scriptData(t),
+        .CDATASection => while (true) {
+            if (try t.next()) |char| switch (char) {
+                ']' => {
+                    // CDATASectionBracket
+                    if ((try t.nextIgnoreEof()) != ']') {
+                        try t.emitCharacter(']');
+                        t.back();
+                        continue;
+                    }
 
-                        // CDATASectionEnd
-                        while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+                    // CDATASectionEnd
+                    while (true) {
+                        switch (try t.nextIgnoreEof()) {
                             ']' => try t.emitCharacter(']'),
                             '>' => return t.setState(.Data),
                             else => {
                                 try t.emitString("]]");
-                                t.reconsume(.CDATASection);
+                                t.back();
                                 break;
                             },
-                        };
-                    },
-                    else => |c| try t.emitCharacter(c),
-                }
+                        }
+                    }
+                },
+                else => |c| try t.emitCharacter(c),
             } else {
                 try t.parseError(.EOFInCDATA);
                 try t.emitEOF();
@@ -738,44 +685,48 @@ fn processInput(t: *Self, input: *[]const u21) !void {
     }
 }
 
-fn skipHtmlWhitespace(t: *Self, input: *[]const u21) !void {
-    while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+fn skipHtmlWhitespace(t: *Self) !void {
+    while (true) switch (try t.nextIgnoreEof()) {
         '\t', '\n', 0x0C, ' ' => {},
-        else => return t.reconsume(t.state),
+        else => return t.reconsume(),
     };
 }
 
 const IsPartOfAnAttribute = enum { Yes, No };
 
-fn characterReference(t: *Self, input: *[]const u21, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
-    // NOTE: This is not exactly as the spec says, but should yield the same results.
+fn characterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
     t.clearTempBuffer();
     try t.appendTempBuffer('&');
-    switch (t.peekInputChar(input) orelse TREAT_AS_ANYTHING_ELSE) {
+    switch (try t.nextIgnoreEof()) {
         '0'...'9', 'A'...'Z', 'a'...'z' => {
-            return namedCharacterReference(t, input, is_part_of_an_attribute);
+            t.back();
+            return namedCharacterReference(t, is_part_of_an_attribute);
         },
         '#' => {
-            _ = try t.nextInputChar(input);
             try t.appendTempBuffer('#');
-            return numericCharacterReference(t, input, is_part_of_an_attribute);
+            return numericCharacterReference(t, is_part_of_an_attribute);
         },
-        else => try t.flushCharacterReference(is_part_of_an_attribute),
+        else => {
+            t.back();
+            return flushCharacterReference(t, is_part_of_an_attribute);
+        },
     }
 }
 
-fn namedCharacterReference(t: *Self, input: *[]const u21, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
-    const chars = try t.findNamedCharacterReference(input);
+fn namedCharacterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
+    const chars = try t.findNamedCharacterReference();
     const match_found = chars[0] != null;
     if (match_found) {
-        const historical_reasons = is_part_of_an_attribute == .Yes and
-            t.tempBufferLast() != ';' and
-            switch (t.peekInputChar(input) orelse TREAT_AS_ANYTHING_ELSE) {
-            '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
-            else => false,
-        };
+        const historical_reasons = if (is_part_of_an_attribute == .Yes and t.tempBufferLast() != ';')
+            switch (try t.peekIgnoreEof()) {
+                '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
+                else => false,
+            }
+        else
+            false;
+
         if (historical_reasons) {
-            try t.flushCharacterReference(is_part_of_an_attribute);
+            return t.flushCharacterReference(is_part_of_an_attribute);
         } else {
             if (t.tempBufferLast() != ';') {
                 try t.parseError(.MissingSemicolonAfterCharacterReference);
@@ -783,21 +734,23 @@ fn namedCharacterReference(t: *Self, input: *[]const u21, is_part_of_an_attribut
             t.clearTempBuffer();
             try t.appendTempBuffer(chars[0].?);
             if (chars[1]) |c| try t.appendTempBuffer(c);
-            try t.flushCharacterReference(is_part_of_an_attribute);
+            return t.flushCharacterReference(is_part_of_an_attribute);
         }
     } else {
         try t.flushCharacterReference(is_part_of_an_attribute);
-        return ambiguousAmpersand(t, input, is_part_of_an_attribute);
+        return ambiguousAmpersand(t, is_part_of_an_attribute);
     }
 }
 
-fn findNamedCharacterReference(self: *Self, input: *[]const u21) !named_characters_data.Value {
+fn findNamedCharacterReference(self: *Self) !named_characters_data.Value {
     var node = named_characters_data.root;
-    var replayed_characters_index: u6 = 0;
     var character_reference_consumed_codepoints_count: usize = 1;
     var last_matched_named_character_value = named_characters_data.Value{ null, null };
     while (true) {
-        const character = self.nextInputStreamChar(input, &replayed_characters_index) orelse break;
+        const character = self.nextNoErrorCheck() orelse {
+            self.back();
+            break;
+        };
         try self.appendTempBuffer(character);
         const key_index = node.find(character) orelse break;
 
@@ -817,48 +770,50 @@ fn findNamedCharacterReference(self: *Self, input: *[]const u21) !named_characte
         }
     }
 
-    self.consumeReplayedCharacters(std.math.min(replayed_characters_index, character_reference_consumed_codepoints_count));
-    self.replayCharacters(self.temp_buffer.items[character_reference_consumed_codepoints_count..]);
-    self.temp_buffer.shrinkRetainingCapacity(character_reference_consumed_codepoints_count);
+    while (self.temp_buffer.items.len > character_reference_consumed_codepoints_count) {
+        self.back();
+        self.temp_buffer.items.len -= 1;
+    }
+
     // There is no need to check the consumed characters for errors (controls, surrogates, noncharacters)
     // beacuse we've just determined that they form a valid character reference.
     return last_matched_named_character_value;
 }
 
-fn ambiguousAmpersand(t: *Self, input: *[]const u21, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
-    while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+fn ambiguousAmpersand(t: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
+    while (true) switch (try t.nextIgnoreEof()) {
         '0'...'9', 'A'...'Z', 'a'...'z' => |c| switch (is_part_of_an_attribute) {
             .Yes => try t.appendCurrentAttributeValue(c),
             .No => try t.emitCharacter(c),
         },
         ';' => {
             try t.parseError(.UnknownNamedCharacterReference);
-            return t.reconsume(t.state);
+            return t.reconsume();
         },
-        else => return t.reconsume(t.state),
+        else => return t.reconsume(),
     };
 }
 
-fn numericCharacterReference(t: *Self, input: *[]const u21, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
+fn numericCharacterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
     var character_reference_code: u21 = 0;
-    switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+    switch (try t.nextIgnoreEof()) {
         'x', 'X' => |x| {
             try t.appendTempBuffer(x);
 
             // HexadecimalCharacterReferenceStart
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch (try t.nextIgnoreEof()) {
                 '0'...'9', 'A'...'F', 'a'...'f' => {
-                    t.reconsume(t.state);
+                    t.reconsume();
 
                     // HexadecimalCharacterReference
-                    while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+                    while (true) switch (try t.nextIgnoreEof()) {
                         '0'...'9' => |c| characterReferenceCodeAddDigit(&character_reference_code, 16, decimalCharToNumber(c)),
                         'A'...'F' => |c| characterReferenceCodeAddDigit(&character_reference_code, 16, upperHexCharToNumber(c)),
                         'a'...'f' => |c| characterReferenceCodeAddDigit(&character_reference_code, 16, lowerHexCharToNumber(c)),
                         ';' => break,
                         else => {
                             try t.parseError(.MissingSemicolonAfterCharacterReference);
-                            break t.reconsume(t.state);
+                            break t.reconsume();
                         },
                     };
                 },
@@ -867,15 +822,15 @@ fn numericCharacterReference(t: *Self, input: *[]const u21, is_part_of_an_attrib
         },
         // DecimalCharacterReferenceStart
         '0'...'9' => {
-            t.reconsume(t.state);
+            t.reconsume();
 
             // DecimalCharacterReference
-            while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            while (true) switch (try t.nextIgnoreEof()) {
                 '0'...'9' => |c| characterReferenceCodeAddDigit(&character_reference_code, 10, decimalCharToNumber(c)),
                 ';' => break,
                 else => {
                     try t.parseError(.MissingSemicolonAfterCharacterReference);
-                    break t.reconsume(t.state);
+                    break t.reconsume();
                 },
             };
         },
@@ -980,7 +935,7 @@ fn characterReferenceCodeAddDigit(character_reference_code: *u21, comptime base:
 fn noDigitsInNumericCharacterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
     try t.parseError(.AbsenceOfDigitsInNumericCharacterReference);
     try t.flushCharacterReference(is_part_of_an_attribute);
-    t.reconsume(t.state);
+    t.reconsume();
 }
 
 fn flushCharacterReference(self: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
@@ -996,28 +951,26 @@ fn flushCharacterReference(self: *Self, is_part_of_an_attribute: IsPartOfAnAttri
     }
 }
 
-fn tagOpen(t: *Self, input: *[]const u21) !void {
-    if (try t.nextInputChar(input)) |current_input_char| {
-        switch (current_input_char) {
-            '!' => return markupDeclarationOpen(t, input),
-            '/' => return endTagOpen(t, input),
-            'A'...'Z', 'a'...'z' => {
-                t.createStartTagToken();
-                t.reconsume(t.state);
-                return tagName(t, input);
-            },
-            '?' => {
-                try t.parseError(.UnexpectedQuestionMarkInsteadOfTagName);
-                t.createCommentToken();
-                t.reconsume(t.state);
-                return bogusComment(t, input);
-            },
-            else => {
-                try t.parseError(.InvalidFirstCharacterOfTagName);
-                try t.emitCharacter('<');
-                t.reconsume(.Data);
-            },
-        }
+fn tagOpen(t: *Self) !void {
+    if (try t.next()) |char| switch (char) {
+        '!' => return markupDeclarationOpen(t),
+        '/' => return endTagOpen(t),
+        'A'...'Z', 'a'...'z' => {
+            t.createStartTagToken();
+            t.reconsume();
+            return tagName(t);
+        },
+        '?' => {
+            try t.parseError(.UnexpectedQuestionMarkInsteadOfTagName);
+            t.createCommentToken();
+            t.reconsume();
+            return bogusComment(t);
+        },
+        else => {
+            try t.parseError(.InvalidFirstCharacterOfTagName);
+            try t.emitCharacter('<');
+            t.reconsumeInState(.Data);
+        },
     } else {
         try t.parseError(.EOFBeforeTagName);
         try t.emitCharacter('<');
@@ -1025,13 +978,13 @@ fn tagOpen(t: *Self, input: *[]const u21) !void {
     }
 }
 
-fn endTagOpen(t: *Self, input: *[]const u21) !void {
-    if (try t.nextInputChar(input)) |current_input_char| {
-        switch (current_input_char) {
+fn endTagOpen(t: *Self) !void {
+    if (try t.next()) |char| {
+        switch (char) {
             'A'...'Z', 'a'...'z' => {
                 t.createEndTagToken();
-                t.reconsume(t.state);
-                return tagName(t, input);
+                t.reconsume();
+                return tagName(t);
             },
             '>' => {
                 try t.parseError(.MissingEndTagName);
@@ -1040,8 +993,8 @@ fn endTagOpen(t: *Self, input: *[]const u21) !void {
             else => {
                 try t.parseError(.InvalidFirstCharacterOfTagName);
                 t.createCommentToken();
-                t.reconsume(t.state);
-                return bogusComment(t, input);
+                t.reconsume();
+                return bogusComment(t);
             },
         }
     } else {
@@ -1051,30 +1004,30 @@ fn endTagOpen(t: *Self, input: *[]const u21) !void {
     }
 }
 
-fn markupDeclarationOpen(t: *Self, input: *[]const u21) !void {
-    if (t.consumeCharsIfEql(input, "--")) {
+fn markupDeclarationOpen(t: *Self) !void {
+    if (t.consumeCharsIfEql("--")) {
         t.createCommentToken();
-        return commentStart(t, input);
-    } else if (t.consumeCharsIfCaseInsensitiveEql(input, "DOCTYPE")) {
-        return doctype(t, input);
-    } else if (t.consumeCharsIfEql(input, "[CDATA[")) {
+        return commentStart(t);
+    } else if (t.consumeCharsIfCaseInsensitiveEql("DOCTYPE")) {
+        return doctype(t);
+    } else if (t.consumeCharsIfEql("[CDATA[")) {
         if (t.adjustedCurrentNodeIsNotInHtmlNamespace()) {
             t.setState(.CDATASection);
         } else {
             try t.parseError(.CDATAInHtmlContent);
             t.createCommentToken();
             try t.appendCommentString("[CDATA[");
-            return bogusComment(t, input);
+            return bogusComment(t);
         }
     } else {
         try t.parseError(.IncorrectlyOpenedComment);
         t.createCommentToken();
-        return bogusComment(t, input);
+        return bogusComment(t);
     }
 }
 
-fn bogusComment(t: *Self, input: *[]const u21) !void {
-    while (try t.nextInputChar(input)) |current_input_char| switch (current_input_char) {
+fn bogusComment(t: *Self) !void {
+    while (try t.next()) |char| switch (char) {
         '>' => {
             try t.emitComment();
             return t.setState(.Data);
@@ -1090,33 +1043,33 @@ fn bogusComment(t: *Self, input: *[]const u21) !void {
     }
 }
 
-fn nonDataEndTagOpen(t: *Self, input: *[]const u21) !void {
+fn nonDataEndTagOpen(t: *Self) !void {
     t.clearTempBuffer();
-    switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+    switch (try t.nextIgnoreEof()) {
         'A'...'Z', 'a'...'z' => {
             t.createEndTagToken();
-            t.reconsume(t.state);
-            return endTagName(t, input);
+            t.reconsume();
+            return endTagName(t);
         },
         else => {
             try t.emitString("</");
-            t.reconsume(t.state);
+            t.reconsume();
         },
     }
 }
 
-fn endTagName(t: *Self, input: *[]const u21) !void {
-    while (try t.nextInputChar(input)) |current_input_char| {
-        switch (current_input_char) {
+fn endTagName(t: *Self) !void {
+    while (try t.next()) |char| {
+        switch (char) {
             '\t', '\n', 0x0C, ' ' => {
                 if (t.isAppropriateEndTag()) {
-                    return attribute(t, input);
+                    return attribute(t);
                 }
                 break;
             },
             '/' => {
                 if (t.isAppropriateEndTag()) {
-                    return selfClosingStartTag(t, input);
+                    return selfClosingStartTag(t);
                 }
                 break;
             },
@@ -1143,7 +1096,7 @@ fn endTagName(t: *Self, input: *[]const u21) !void {
     t.resetCurrentTagName();
     try t.emitString("</");
     try t.emitTempBufferCharacters();
-    t.reconsume(t.state);
+    t.reconsume();
 }
 
 const AttributeState = enum {
@@ -1154,11 +1107,11 @@ const AttributeState = enum {
     Slash,
 };
 
-fn tagName(t: *Self, input: *[]const u21) !void {
-    while (try t.nextInputChar(input)) |current_input_char| {
+fn tagName(t: *Self) !void {
+    while (try t.next()) |current_input_char| {
         switch (current_input_char) {
-            '\t', '\n', 0x0C, ' ' => return attribute(t, input),
-            '/' => return selfClosingStartTag(t, input),
+            '\t', '\n', 0x0C, ' ' => return attribute(t),
+            '/' => return selfClosingStartTag(t),
             '>' => {
                 try t.emitCurrentTag();
                 return t.setState(.Data);
@@ -1176,33 +1129,33 @@ fn tagName(t: *Self, input: *[]const u21) !void {
     }
 }
 
-fn attribute(t: *Self, input: *[]const u21) !void {
-    return attributeLoop(t, input, .BeforeName);
+fn attribute(t: *Self) !void {
+    return attributeLoop(t, .BeforeName);
 }
 
-fn selfClosingStartTag(t: *Self, input: *[]const u21) !void {
-    return attributeLoop(t, input, .Slash);
+fn selfClosingStartTag(t: *Self) !void {
+    return attributeLoop(t, .Slash);
 }
 
-fn attributeLoop(t: *Self, input: *[]const u21, initial_state: AttributeState) !void {
+fn attributeLoop(t: *Self, initial_state: AttributeState) !void {
     var next_state: ?AttributeState = initial_state;
     while (next_state) |state| {
         next_state = switch (state) {
-            .BeforeName => try beforeAttributeName(t, input),
-            .Name => try attributeName(t, input),
-            .AfterName => try afterAttributeName(t, input),
-            .Value => try beforeAttributeValue(t, input),
-            .Slash => try attributeSlash(t, input),
+            .BeforeName => try beforeAttributeName(t),
+            .Name => try attributeName(t),
+            .AfterName => try afterAttributeName(t),
+            .Value => try beforeAttributeValue(t),
+            .Slash => try attributeSlash(t),
         };
     }
 }
 
-fn beforeAttributeName(t: *Self, input: *[]const u21) !AttributeState {
+fn beforeAttributeName(t: *Self) !AttributeState {
     // Make end-of-file (null) be handled the same as '>'
-    while (true) switch ((try t.nextInputChar(input)) orelse '>') {
+    while (true) switch ((try t.next()) orelse '>') {
         '\t', '\n', 0x0C, ' ' => {},
         '/', '>' => {
-            t.reconsume(t.state);
+            t.reconsume();
             return .AfterName;
         },
         '=' => {
@@ -1213,18 +1166,18 @@ fn beforeAttributeName(t: *Self, input: *[]const u21) !AttributeState {
         },
         else => {
             t.createAttribute();
-            t.reconsume(t.state);
+            t.reconsume();
             return .Name;
         },
     };
 }
 
-fn attributeName(t: *Self, input: *[]const u21) !AttributeState {
+fn attributeName(t: *Self) !AttributeState {
     // Make end-of-file (null) be handled the same as '>'
-    while (true) switch ((try t.nextInputChar(input)) orelse '>') {
+    while (true) switch ((try t.next()) orelse '>') {
         '\t', '\n', 0x0C, ' ', '/', '>' => {
             try t.finishAttributeName();
-            t.reconsume(t.state);
+            t.reconsume();
             return .AfterName;
         },
         '=' => {
@@ -1245,9 +1198,9 @@ fn attributeName(t: *Self, input: *[]const u21) !AttributeState {
     };
 }
 
-fn afterAttributeName(t: *Self, input: *[]const u21) !?AttributeState {
+fn afterAttributeName(t: *Self) !?AttributeState {
     while (true) {
-        if (try t.nextInputChar(input)) |current_input_char| {
+        if (try t.next()) |current_input_char| {
             switch (current_input_char) {
                 '\t', '\n', 0x0C, ' ' => {},
                 '/' => return .Slash,
@@ -1255,7 +1208,7 @@ fn afterAttributeName(t: *Self, input: *[]const u21) !?AttributeState {
                 '>' => return try attributeEnd(t),
                 else => {
                     t.createAttribute();
-                    t.reconsume(t.state);
+                    t.reconsume();
                     return AttributeState.Name;
                 },
             }
@@ -1265,37 +1218,37 @@ fn afterAttributeName(t: *Self, input: *[]const u21) !?AttributeState {
     }
 }
 
-fn beforeAttributeValue(t: *Self, input: *[]const u21) !?AttributeState {
-    while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+fn beforeAttributeValue(t: *Self) !?AttributeState {
+    while (true) switch (try t.nextIgnoreEof()) {
         '\t', '\n', 0x0C, ' ' => {},
-        '"' => return attributeValueQuoted(t, input, .Double),
-        '\'' => return attributeValueQuoted(t, input, .Single),
+        '"' => return attributeValueQuoted(t, .Double),
+        '\'' => return attributeValueQuoted(t, .Single),
         '>' => {
             try t.parseError(.MissingAttributeValue);
             return try attributeEnd(t);
         },
         else => {
-            t.reconsume(t.state);
-            return attributeValueUnquoted(t, input);
+            t.reconsume();
+            return attributeValueUnquoted(t);
         },
     };
 }
 
 const QuoteStyle = enum { Single, Double };
 
-fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime quote_style: QuoteStyle) !?AttributeState {
+fn attributeValueQuoted(t: *Self, comptime quote_style: QuoteStyle) !?AttributeState {
     const quote = switch (quote_style) {
         .Single => '\'',
         .Double => '"',
     };
 
-    while (try t.nextInputChar(input)) |current_input_char| {
+    while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             quote => {
                 try t.finishAttributeValue();
                 break;
             },
-            '&' => try characterReference(t, input, IsPartOfAnAttribute.Yes),
+            '&' => try characterReference(t, IsPartOfAnAttribute.Yes),
             0x00 => {
                 try t.parseError(.UnexpectedNullCharacter);
                 try t.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
@@ -1307,14 +1260,14 @@ fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime quote_style: Quo
     }
 
     // AfterAttributeValueQuoted
-    if (try t.nextInputChar(input)) |current_input_char| {
+    if (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => return AttributeState.BeforeName,
             '/' => return AttributeState.Slash,
             '>' => return try attributeEnd(t),
             else => {
                 try t.parseError(.MissingWhitespaceBetweenAttributes);
-                t.reconsume(t.state);
+                t.reconsume();
                 return AttributeState.BeforeName;
             },
         }
@@ -1323,14 +1276,14 @@ fn attributeValueQuoted(t: *Self, input: *[]const u21, comptime quote_style: Quo
     }
 }
 
-fn attributeValueUnquoted(t: *Self, input: *[]const u21) !?AttributeState {
-    while (try t.nextInputChar(input)) |current_input_char| switch (current_input_char) {
+fn attributeValueUnquoted(t: *Self) !?AttributeState {
+    while (try t.next()) |current_input_char| switch (current_input_char) {
         '\t', '\n', 0x0C, ' ' => {
             try t.finishAttributeValue();
             t.setState(t.state);
             return AttributeState.BeforeName;
         },
-        '&' => try characterReference(t, input, IsPartOfAnAttribute.Yes),
+        '&' => try characterReference(t, IsPartOfAnAttribute.Yes),
         '>' => {
             try t.finishAttributeValue();
             return try attributeEnd(t);
@@ -1349,8 +1302,8 @@ fn attributeValueUnquoted(t: *Self, input: *[]const u21) !?AttributeState {
     }
 }
 
-fn attributeSlash(t: *Self, input: *[]const u21) !?AttributeState {
-    if (try t.nextInputChar(input)) |current_input_char| {
+fn attributeSlash(t: *Self) !?AttributeState {
+    if (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '>' => {
                 t.makeCurrentTagSelfClosing();
@@ -1358,7 +1311,7 @@ fn attributeSlash(t: *Self, input: *[]const u21) !?AttributeState {
             },
             else => {
                 try t.parseError(.UnexpectedSolidusInTag);
-                t.reconsume(t.state);
+                t.reconsume();
                 return AttributeState.BeforeName;
             },
         }
@@ -1385,24 +1338,24 @@ const CommentState = enum {
     End,
 };
 
-fn commentStart(t: *Self, input: *[]const u21) !void {
+fn commentStart(t: *Self) !void {
     var next_state: ?CommentState = next_state: {
-        switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+        switch (try t.nextIgnoreEof()) {
             '-' => {
                 // CommentStartDash
-                switch ((try t.nextInputChar(input)) orelse break :next_state try eofInComment(t)) {
+                switch ((try t.next()) orelse break :next_state try eofInComment(t)) {
                     '-' => break :next_state .End,
                     '>' => break :next_state try abruptCommentClose(t),
                     else => {
                         try t.appendComment('-');
-                        t.reconsume(t.state);
+                        t.reconsume();
                         break :next_state .Normal;
                     },
                 }
             },
             '>' => break :next_state try abruptCommentClose(t),
             else => {
-                t.reconsume(t.state);
+                t.reconsume();
                 break :next_state .Normal;
             },
         }
@@ -1410,46 +1363,46 @@ fn commentStart(t: *Self, input: *[]const u21) !void {
 
     while (next_state) |state| {
         next_state = switch (state) {
-            .Normal => try comment(t, input),
-            .EndDash => try commentEndDash(t, input),
-            .End => try commentEnd(t, input),
+            .Normal => try comment(t),
+            .EndDash => try commentEndDash(t),
+            .End => try commentEnd(t),
         };
     }
 }
 
-fn comment(t: *Self, input: *[]const u21) !?CommentState {
-    while (try t.nextInputChar(input)) |current_input_char| switch (current_input_char) {
+fn comment(t: *Self) !?CommentState {
+    while (try t.next()) |current_input_char| switch (current_input_char) {
         '<' => {
             try t.appendComment('<');
 
             // CommentLessThanSign
-            while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            while (true) switch (try t.nextIgnoreEof()) {
                 '!' => {
                     try t.appendComment('!');
 
                     // CommentLessThanSignBang
-                    if ((try t.nextInputChar(input)) != @as(u21, '-')) {
-                        t.reconsume(t.state);
+                    if ((try t.nextIgnoreEof()) != '-') {
+                        t.reconsume();
                         break;
                     }
 
                     // CommentLessThanSignBangDash
-                    if ((try t.nextInputChar(input)) != @as(u21, '-')) {
-                        t.reconsume(t.state);
+                    if ((try t.nextIgnoreEof()) != '-') {
+                        t.reconsume();
                         return CommentState.EndDash;
                     }
 
                     // CommentLessThanSignBangDashDash
                     // Make end-of-file (null) be handled the same as '>'
-                    if ((try t.nextInputChar(input)) orelse '>' != '>') {
+                    if ((try t.next()) orelse '>' != '>') {
                         try t.parseError(.NestedComment);
                     }
-                    t.reconsume(t.state);
+                    t.reconsume();
                     return .End;
                 },
                 '<' => try t.appendComment('<'),
                 else => {
-                    t.reconsume(t.state);
+                    t.reconsume();
                     break;
                 },
             };
@@ -1465,29 +1418,29 @@ fn comment(t: *Self, input: *[]const u21) !?CommentState {
     }
 }
 
-fn commentEndDash(t: *Self, input: *[]const u21) !?CommentState {
-    switch ((try t.nextInputChar(input)) orelse return try eofInComment(t)) {
+fn commentEndDash(t: *Self) !?CommentState {
+    switch ((try t.next()) orelse return try eofInComment(t)) {
         '-' => return CommentState.End,
         else => {
             try t.appendComment('-');
-            t.reconsume(t.state);
+            t.reconsume();
             return CommentState.Normal;
         },
     }
 }
 
-fn commentEnd(t: *Self, input: *[]const u21) !?CommentState {
-    while (try t.nextInputChar(input)) |current_input_char| switch (current_input_char) {
+fn commentEnd(t: *Self) !?CommentState {
+    while (try t.next()) |current_input_char| switch (current_input_char) {
         '>' => {
             try t.emitComment();
             return null;
         },
-        '!' => return try commentEndBang(t, input),
+        '!' => return try commentEndBang(t),
         '-' => try t.appendComment('-'),
         else => {
             try t.appendComment('-');
             try t.appendComment('-');
-            t.reconsume(t.state);
+            t.reconsume();
             return CommentState.Normal;
         },
     } else {
@@ -1495,8 +1448,8 @@ fn commentEnd(t: *Self, input: *[]const u21) !?CommentState {
     }
 }
 
-fn commentEndBang(t: *Self, input: *[]const u21) !?CommentState {
-    switch ((try t.nextInputChar(input)) orelse return try eofInComment(t)) {
+fn commentEndBang(t: *Self) !?CommentState {
+    switch ((try t.next()) orelse return try eofInComment(t)) {
         '-' => {
             try t.appendComment('-');
             try t.appendComment('-');
@@ -1508,7 +1461,7 @@ fn commentEndBang(t: *Self, input: *[]const u21) !?CommentState {
             try t.appendComment('-');
             try t.appendComment('-');
             try t.appendComment('!');
-            t.reconsume(t.state);
+            t.reconsume();
             return CommentState.Normal;
         },
     }
@@ -1539,16 +1492,16 @@ const DoctypeState = enum {
     AfterName,
 };
 
-fn doctype(t: *Self, input: *[]const u21) !void {
+fn doctype(t: *Self) !void {
     t.createDOCTYPEToken();
     var next_state: ?DoctypeState = next_state: {
-        if (try t.nextInputChar(input)) |current_input_char| {
+        if (try t.next()) |current_input_char| {
             switch (current_input_char) {
                 '\t', '\n', 0x0C, ' ' => {},
-                '>' => t.reconsume(t.state),
+                '>' => t.reconsume(),
                 else => {
                     try t.parseError(.MissingWhitespaceBeforeDOCTYPEName);
-                    t.reconsume(t.state);
+                    t.reconsume();
                 },
             }
             break :next_state .BeforeName;
@@ -1559,15 +1512,15 @@ fn doctype(t: *Self, input: *[]const u21) !void {
 
     while (next_state) |state| {
         next_state = switch (state) {
-            .BeforeName => try beforeDoctypeName(t, input),
-            .Name => try doctypeName(t, input),
-            .AfterName => try afterDoctypeName(t, input),
+            .BeforeName => try beforeDoctypeName(t),
+            .Name => try doctypeName(t),
+            .AfterName => try afterDoctypeName(t),
         };
     }
 }
 
-fn beforeDoctypeName(t: *Self, input: *[]const u21) !?DoctypeState {
-    while (try t.nextInputChar(input)) |current_input_char| {
+fn beforeDoctypeName(t: *Self) !?DoctypeState {
+    while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             'A'...'Z' => |c| {
@@ -1597,8 +1550,8 @@ fn beforeDoctypeName(t: *Self, input: *[]const u21) !?DoctypeState {
     }
 }
 
-fn doctypeName(t: *Self, input: *[]const u21) !?DoctypeState {
-    while (try t.nextInputChar(input)) |current_input_char| {
+fn doctypeName(t: *Self) !?DoctypeState {
+    while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => return DoctypeState.AfterName,
             '>' => return try doctypeEnd(t),
@@ -1614,21 +1567,21 @@ fn doctypeName(t: *Self, input: *[]const u21) !?DoctypeState {
     }
 }
 
-fn afterDoctypeName(t: *Self, input: *[]const u21) !?DoctypeState {
-    while (try t.nextInputChar(input)) |current_input_char| {
+fn afterDoctypeName(t: *Self) !?DoctypeState {
+    while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             '>' => return try doctypeEnd(t),
             else => |c| {
-                if (caseInsensitiveEql(c, 'P') and t.consumeCharsIfCaseInsensitiveEql(input, "UBLIC")) {
-                    return afterDOCTYPEPublicOrSystemKeyword(t, input, .public);
-                } else if (caseInsensitiveEql(c, 'S') and t.consumeCharsIfCaseInsensitiveEql(input, "YSTEM")) {
-                    return afterDOCTYPEPublicOrSystemKeyword(t, input, .system);
+                if (caseInsensitiveEql(c, 'P') and t.consumeCharsIfCaseInsensitiveEql("UBLIC")) {
+                    return afterDOCTYPEPublicOrSystemKeyword(t, .public);
+                } else if (caseInsensitiveEql(c, 'S') and t.consumeCharsIfCaseInsensitiveEql("YSTEM")) {
+                    return afterDOCTYPEPublicOrSystemKeyword(t, .system);
                 } else {
                     try t.parseError(.InvalidCharacterSequenceAfterDOCTYPEName);
                     t.currentDOCTYPETokenForceQuirks();
-                    t.reconsume(t.state);
-                    return bogusDOCTYPE(t, input);
+                    t.reconsume();
+                    return bogusDOCTYPE(t);
                 }
             },
         }
@@ -1639,10 +1592,10 @@ fn afterDoctypeName(t: *Self, input: *[]const u21) !?DoctypeState {
 
 const PublicOrSystem = enum { public, system };
 
-fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_system: PublicOrSystem) !?DoctypeState {
+fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, public_or_system: PublicOrSystem) !?DoctypeState {
     // AfterDOCTYPEPublicKeyword
     // AfterDOCTYPESystemKeyword
-    if (try t.nextInputChar(input)) |current_input_char| {
+    if (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             '"', '\'' => |quote| {
@@ -1651,7 +1604,7 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_sy
                     .system => .MissingWhitespaceAfterDOCTYPESystemKeyword,
                 };
                 try t.parseError(err);
-                return doctypePublicOrSystemIdentifier(t, input, public_or_system, quote);
+                return doctypePublicOrSystemIdentifier(t, public_or_system, quote);
             },
             '>' => {
                 const err: ParseError = switch (public_or_system) {
@@ -1669,8 +1622,8 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_sy
                 };
                 try t.parseError(err);
                 t.currentDOCTYPETokenForceQuirks();
-                t.reconsume(t.state);
-                return bogusDOCTYPE(t, input);
+                t.reconsume();
+                return bogusDOCTYPE(t);
             },
         }
     } else {
@@ -1679,11 +1632,11 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_sy
 
     // BeforeDOCTYPEPublicIdentifier
     // BeforeDOCTYPESystemIdentifier
-    try skipHtmlWhitespace(t, input);
-    if (try t.nextInputChar(input)) |current_input_char| {
+    try skipHtmlWhitespace(t);
+    if (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => unreachable,
-            '"', '\'' => |quote| return doctypePublicOrSystemIdentifier(t, input, public_or_system, quote),
+            '"', '\'' => |quote| return doctypePublicOrSystemIdentifier(t, public_or_system, quote),
             '>' => {
                 const err: ParseError = switch (public_or_system) {
                     .public => .MissingDOCTYPEPublicIdentifier,
@@ -1700,8 +1653,8 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_sy
                 };
                 try t.parseError(err);
                 t.currentDOCTYPETokenForceQuirks();
-                t.reconsume(t.state);
-                return bogusDOCTYPE(t, input);
+                t.reconsume();
+                return bogusDOCTYPE(t);
             },
         }
     } else {
@@ -1709,7 +1662,7 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, input: *[]const u21, public_or_sy
     }
 }
 
-fn doctypePublicOrSystemIdentifier(t: *Self, input: *[]const u21, public_or_system: PublicOrSystem, quote: u21) Error!?DoctypeState {
+fn doctypePublicOrSystemIdentifier(t: *Self, public_or_system: PublicOrSystem, quote: u21) Error!?DoctypeState {
     // DOCTYPEPublicIdentifierDoubleQuoted
     // DOCTYPEPublicIdentifierSingleQuoted
     // DOCTYPESystemIdentifierDoubleQuoted
@@ -1725,13 +1678,13 @@ fn doctypePublicOrSystemIdentifier(t: *Self, input: *[]const u21, public_or_syst
         .public => appendDOCTYPEPublicIdentifier,
         .system => appendDOCTYPESystemIdentifier,
     };
-    while (try t.nextInputChar(input)) |current_input_char| {
+    while (try t.next()) |current_input_char| {
         if (current_input_char == quote) {
             const afterIdentifier = switch (public_or_system) {
                 .public => afterDOCTYPEPublicIdentifier,
                 .system => afterDOCTYPESystemIdentifier,
             };
-            return afterIdentifier(t, input);
+            return afterIdentifier(t);
         } else if (current_input_char == 0x00) {
             try t.parseError(.UnexpectedNullCharacter);
             try append(t, REPLACEMENT_CHARACTER);
@@ -1751,20 +1704,20 @@ fn doctypePublicOrSystemIdentifier(t: *Self, input: *[]const u21, public_or_syst
     }
 }
 
-fn afterDOCTYPEPublicIdentifier(t: *Self, input: *[]const u21) !?DoctypeState {
-    if (try t.nextInputChar(input)) |current_input_char| {
+fn afterDOCTYPEPublicIdentifier(t: *Self) !?DoctypeState {
+    if (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             '>' => return try doctypeEnd(t),
             '"', '\'' => |quote| {
                 try t.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
-                return doctypePublicOrSystemIdentifier(t, input, .system, quote);
+                return doctypePublicOrSystemIdentifier(t, .system, quote);
             },
             else => {
                 try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
                 t.currentDOCTYPETokenForceQuirks();
-                t.reconsume(t.state);
-                return bogusDOCTYPE(t, input);
+                t.reconsume();
+                return bogusDOCTYPE(t);
             },
         }
     } else {
@@ -1772,19 +1725,19 @@ fn afterDOCTYPEPublicIdentifier(t: *Self, input: *[]const u21) !?DoctypeState {
     }
 
     // BetweenDOCTYPEPublicAndSystemIdentifiers
-    try skipHtmlWhitespace(t, input);
-    if (try t.nextInputChar(input)) |current_input_char| {
+    try skipHtmlWhitespace(t);
+    if (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => unreachable,
             '>' => return try doctypeEnd(t),
             '"', '\'' => |quote| {
-                return doctypePublicOrSystemIdentifier(t, input, .system, quote);
+                return doctypePublicOrSystemIdentifier(t, .system, quote);
             },
             else => {
                 try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
                 t.currentDOCTYPETokenForceQuirks();
-                t.reconsume(t.state);
-                return bogusDOCTYPE(t, input);
+                t.reconsume();
+                return bogusDOCTYPE(t);
             },
         }
     } else {
@@ -1792,16 +1745,16 @@ fn afterDOCTYPEPublicIdentifier(t: *Self, input: *[]const u21) !?DoctypeState {
     }
 }
 
-fn afterDOCTYPESystemIdentifier(t: *Self, input: *[]const u21) !?DoctypeState {
-    try skipHtmlWhitespace(t, input);
-    if (try t.nextInputChar(input)) |current_input_char| {
+fn afterDOCTYPESystemIdentifier(t: *Self) !?DoctypeState {
+    try skipHtmlWhitespace(t);
+    if (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => unreachable,
             '>' => return try doctypeEnd(t),
             else => {
                 try t.parseError(.UnexpectedCharacterAfterDOCTYPESystemIdentifier);
-                t.reconsume(t.state);
-                return bogusDOCTYPE(t, input);
+                t.reconsume();
+                return bogusDOCTYPE(t);
             },
         }
     } else {
@@ -1823,8 +1776,8 @@ fn eofInDoctype(t: *Self) !?DoctypeState {
     return null;
 }
 
-fn bogusDOCTYPE(t: *Self, input: *[]const u21) !?DoctypeState {
-    while (try t.nextInputChar(input)) |current_input_char| switch (current_input_char) {
+fn bogusDOCTYPE(t: *Self) !?DoctypeState {
+    while (try t.next()) |current_input_char| switch (current_input_char) {
         '>' => {
             try t.emitDOCTYPE();
             t.setState(.Data);
@@ -1845,19 +1798,19 @@ const ScriptState = enum {
     DoubleEscaped,
 };
 
-fn scriptData(t: *Self, input: *[]const u21) !void {
+fn scriptData(t: *Self) !void {
     var next_state: ?ScriptState = .Normal;
     while (next_state) |state| {
         next_state = switch (state) {
-            .Normal => try scriptDataNormal(t, input),
-            .Escaped => try scriptDataEscaped(t, input),
-            .DoubleEscaped => try scriptDataDoubleEscaped(t, input),
+            .Normal => try scriptDataNormal(t),
+            .Escaped => try scriptDataEscaped(t),
+            .DoubleEscaped => try scriptDataDoubleEscaped(t),
         };
     }
 }
 
-fn scriptDataNormal(t: *Self, input: *[]const u21) !?ScriptState {
-    while (try t.nextInputChar(input)) |char| switch (char) {
+fn scriptDataNormal(t: *Self) !?ScriptState {
+    while (try t.next()) |char| switch (char) {
         0x00 => {
             try t.parseError(.UnexpectedNullCharacter);
             try t.emitCharacter(REPLACEMENT_CHARACTER);
@@ -1865,36 +1818,36 @@ fn scriptDataNormal(t: *Self, input: *[]const u21) !?ScriptState {
         else => try t.emitCharacter(char),
         '<' => {
             // ScriptDataLessThanSign
-            switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            switch (try t.nextIgnoreEof()) {
                 else => {
                     try t.emitCharacter('<');
-                    t.reconsume(.ScriptData);
+                    t.reconsumeInState(.ScriptData);
                     continue;
                 },
                 // ScriptDataEndTagOpen
                 '/' => {
-                    try nonDataEndTagOpen(t, input);
+                    try nonDataEndTagOpen(t);
                     if (t.state != .ScriptData) return null;
                 },
                 '!' => {
                     try t.emitString("<!");
 
                     // ScriptDataEscapeStart
-                    if ((try t.nextInputChar(input)) != @as(u21, '-')) {
-                        t.reconsume(.ScriptData);
+                    if ((try t.nextIgnoreEof()) != '-') {
+                        t.reconsumeInState(.ScriptData);
                         continue;
                     }
                     try t.emitCharacter('-');
 
                     // ScriptDataEscapeStartDash
-                    if ((try t.nextInputChar(input)) != @as(u21, '-')) {
-                        t.reconsume(.ScriptData);
+                    if ((try t.nextIgnoreEof()) != '-') {
+                        t.reconsumeInState(.ScriptData);
                         continue;
                     }
                     try t.emitCharacter('-');
 
                     // ScriptDataEscapedDashDash
-                    return try scriptDataEscapedOrDoubleEscapedDashDash(t, input, .Normal);
+                    return try scriptDataEscapedOrDoubleEscapedDashDash(t, .Normal);
                 },
             }
         },
@@ -1904,39 +1857,39 @@ fn scriptDataNormal(t: *Self, input: *[]const u21) !?ScriptState {
     }
 }
 
-fn scriptDataEscaped(t: *Self, input: *[]const u21) !?ScriptState {
-    while (try t.nextInputChar(input)) |current_input_char| {
+fn scriptDataEscaped(t: *Self) !?ScriptState {
+    while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '-' => {
                 try t.emitCharacter('-');
 
                 // ScriptDataEscapedDash
-                if ((try t.nextInputChar(input)) != @as(u21, '-')) {
-                    t.reconsume(.ScriptData);
+                if ((try t.nextIgnoreEof()) != '-') {
+                    t.reconsumeInState(.ScriptData);
                     continue;
                 }
                 try t.emitCharacter('-');
 
                 // ScriptDataEscapedDashDash
-                return try scriptDataEscapedOrDoubleEscapedDashDash(t, input, .Escaped);
+                return try scriptDataEscapedOrDoubleEscapedDashDash(t, .Escaped);
             },
             // ScriptDataEscapedLessThanSign
-            '<' => switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+            '<' => switch (try t.nextIgnoreEof()) {
                 '/' => {
-                    try nonDataEndTagOpen(t, input);
+                    try nonDataEndTagOpen(t);
                     if (t.state != .ScriptData) return null;
                 },
                 'A'...'Z', 'a'...'z' => {
                     t.clearTempBuffer();
                     try t.emitCharacter('<');
-                    t.reconsume(t.state);
+                    t.reconsume();
 
                     // ScriptDataDoubleEscapeStart
-                    return try scriptDataDoubleEscapeStartOrEnd(t, input, .Escaped);
+                    return try scriptDataDoubleEscapeStartOrEnd(t, .Escaped);
                 },
                 else => {
                     try t.emitCharacter('<');
-                    t.reconsume(.ScriptData);
+                    t.reconsumeInState(.ScriptData);
                 },
             },
             0x00 => {
@@ -1952,28 +1905,28 @@ fn scriptDataEscaped(t: *Self, input: *[]const u21) !?ScriptState {
     }
 }
 
-fn scriptDataDoubleEscaped(t: *Self, input: *[]const u21) !?ScriptState {
-    while (try t.nextInputChar(input)) |current_input_char| {
+fn scriptDataDoubleEscaped(t: *Self) !?ScriptState {
+    while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '-' => {
                 try t.emitCharacter('-');
 
                 // ScriptDataDoubleEscapedDash
-                if ((try t.nextInputChar(input)) != @as(u21, '-')) {
-                    t.reconsume(.ScriptData);
+                if ((try t.nextIgnoreEof()) != '-') {
+                    t.reconsumeInState(.ScriptData);
                     continue;
                 }
                 try t.emitCharacter('-');
 
                 // ScriptDataDoubleEscapedDashDash
-                return try scriptDataEscapedOrDoubleEscapedDashDash(t, input, .DoubleEscaped);
+                return try scriptDataEscapedOrDoubleEscapedDashDash(t, .DoubleEscaped);
             },
             '<' => {
                 try t.emitCharacter('<');
 
                 // ScriptDataDoubleEscapedLessThanSign
-                if ((try t.nextInputChar(input)) != @as(u21, '/')) {
-                    t.reconsume(.ScriptData);
+                if ((try t.nextIgnoreEof()) != '/') {
+                    t.reconsumeInState(.ScriptData);
                     continue;
                 }
 
@@ -1981,7 +1934,7 @@ fn scriptDataDoubleEscaped(t: *Self, input: *[]const u21) !?ScriptState {
                 try t.emitCharacter('/');
 
                 // ScriptDataDoubleEscapeEnd
-                return try scriptDataDoubleEscapeStartOrEnd(t, input, .DoubleEscaped);
+                return try scriptDataDoubleEscapeStartOrEnd(t, .DoubleEscaped);
             },
             0x00 => {
                 try t.parseError(.UnexpectedNullCharacter);
@@ -1996,9 +1949,9 @@ fn scriptDataDoubleEscaped(t: *Self, input: *[]const u21) !?ScriptState {
     }
 }
 
-fn scriptDataDoubleEscapeStartOrEnd(t: *Self, input: *[]const u21, script_state: ScriptState) !ScriptState {
+fn scriptDataDoubleEscapeStartOrEnd(t: *Self, script_state: ScriptState) !ScriptState {
     // TODO: Get rid of this use of the temp buffer
-    while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+    while (true) switch (try t.nextIgnoreEof()) {
         '\t', '\n', 0x0C, ' ', '/', '>' => |c| {
             try t.emitCharacter(c);
             if (t.tempBufferEql("script")) {
@@ -2020,21 +1973,21 @@ fn scriptDataDoubleEscapeStartOrEnd(t: *Self, input: *[]const u21, script_state:
             try t.emitCharacter(c);
         },
         else => {
-            t.reconsume(t.state);
+            t.reconsume();
             return script_state;
         },
     };
 }
 
-fn scriptDataEscapedOrDoubleEscapedDashDash(t: *Self, input: *[]const u21, script_state: ScriptState) !?ScriptState {
-    while (true) switch ((try t.nextInputChar(input)) orelse TREAT_AS_ANYTHING_ELSE) {
+fn scriptDataEscapedOrDoubleEscapedDashDash(t: *Self, script_state: ScriptState) !?ScriptState {
+    while (true) switch (try t.nextIgnoreEof()) {
         '-' => try t.emitCharacter('-'),
         '>' => {
             try t.emitCharacter('>');
             return .Normal;
         },
         else => {
-            t.reconsume(.ScriptData);
+            t.reconsumeInState(.ScriptData);
             const next_state: ScriptState = switch (script_state) {
                 .Normal, .Escaped => .Escaped,
                 .DoubleEscaped => .DoubleEscaped,

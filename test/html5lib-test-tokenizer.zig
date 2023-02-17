@@ -174,8 +174,6 @@ fn runTest(
     initial_state: TokenizerState,
     last_start_tag_name: []const u8,
 ) !void {
-    var input_mutable = input;
-
     var all_tokens = ArrayList(Token).init(allocator);
     defer {
         for (all_tokens.items) |*t| t.deinit(allocator);
@@ -185,11 +183,11 @@ fn runTest(
     var error_handler = ErrorHandler{ .report = ArrayList(ParseError).init(allocator) };
     defer error_handler.deinit();
 
-    var tokenizer = Tokenizer.initState(allocator, initial_state, &all_tokens, &error_handler);
+    var tokenizer = Tokenizer.initState(allocator, input,  initial_state, &all_tokens, &error_handler);
     defer tokenizer.deinit();
     tokenizer.last_start_tag_name = try allocator.dupe(u8, last_start_tag_name);
 
-    while (try tokenizer.run(&input_mutable)) {}
+    while (try tokenizer.run()) {}
 
     try std.testing.expect(all_tokens.items[all_tokens.items.len - 1] == .eof);
     std.testing.expectEqual(expected_tokens.len, all_tokens.items.len - 1) catch {
