@@ -75,13 +75,6 @@ current_tag_type: enum { Start, End } = undefined,
 last_start_tag_name: []u8 = &[_]u8{},
 generic_buffer: ArrayListUnmanaged(u8) = .{},
 current_attribute_value_result_location: ?*[]const u8 = null,
-current_doctype_name: ArrayListUnmanaged(u8) = .{},
-current_doctype_public_identifier: ArrayListUnmanaged(u8) = .{},
-current_doctype_system_identifier: ArrayListUnmanaged(u8) = .{},
-current_doctype_force_quirks: bool = false,
-current_doctype_name_is_missing: bool = true,
-current_doctype_public_identifier_is_missing: bool = true,
-current_doctype_system_identifier_is_missing: bool = true,
 current_comment_data: ArrayListUnmanaged(u8) = .{},
 temp_buffer: ArrayListUnmanaged(u21) = .{},
 adjusted_current_node_is_not_in_html_namespace: bool = false,
@@ -130,9 +123,6 @@ pub fn deinit(self: *Self) void {
     self.current_tag_attributes.deinit(self.allocator);
     self.allocator.free(self.last_start_tag_name);
     self.generic_buffer.deinit(self.allocator);
-    self.current_doctype_name.deinit(self.allocator);
-    self.current_doctype_public_identifier.deinit(self.allocator);
-    self.current_doctype_system_identifier.deinit(self.allocator);
     self.current_comment_data.deinit(self.allocator);
     self.temp_buffer.deinit(self.allocator);
 }
@@ -336,12 +326,6 @@ fn reconsumeInState(self: *Self, new_state: State) void {
     self.setState(new_state);
 }
 
-fn createDOCTYPEToken(self: *Self) void {
-    assert(self.current_doctype_name.items.len == 0);
-    assert(self.current_doctype_public_identifier.items.len == 0);
-    assert(self.current_doctype_system_identifier.items.len == 0);
-}
-
 fn createStartTagToken(self: *Self) void {
     assert(self.current_tag_name.items.len == 0);
     assert(self.current_tag_attributes.count() == 0);
@@ -373,22 +357,6 @@ fn isAppropriateEndTag(self: *Self) bool {
 
 fn makeCurrentTagSelfClosing(self: *Self) void {
     self.current_tag_self_closing = true;
-}
-
-fn currentDOCTYPETokenForceQuirks(self: *Self) void {
-    self.current_doctype_force_quirks = true;
-}
-
-fn markCurrentDOCTYPENameNotMissing(self: *Self) void {
-    self.current_doctype_name_is_missing = false;
-}
-
-fn markCurrentDOCTYPEPublicIdentifierNotMissing(self: *Self) void {
-    self.current_doctype_public_identifier_is_missing = false;
-}
-
-fn markCurrentDOCTYPESystemIdentifierNotMissing(self: *Self) void {
-    self.current_doctype_system_identifier_is_missing = false;
 }
 
 fn appendCurrentTagName(self: *Self, character: u21) !void {
@@ -438,24 +406,6 @@ fn finishAttributeValue(self: *Self) !void {
     }
 }
 
-fn appendDOCTYPEName(self: *Self, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.current_doctype_name.appendSlice(self.allocator, code_units[0..len]);
-}
-
-fn appendDOCTYPEPublicIdentifier(self: *Self, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.current_doctype_public_identifier.appendSlice(self.allocator, code_units[0..len]);
-}
-
-fn appendDOCTYPESystemIdentifier(self: *Self, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.current_doctype_system_identifier.appendSlice(self.allocator, code_units[0..len]);
-}
-
 fn appendComment(self: *Self, character: u21) !void {
     var code_units: [4]u8 = undefined;
     const len = try std.unicode.utf8Encode(character, &code_units);
@@ -482,31 +432,6 @@ fn appendTempBuffer(self: *Self, character: u21) !void {
 
 fn clearTempBuffer(self: *Self) void {
     self.temp_buffer.clearRetainingCapacity();
-}
-
-fn emitDOCTYPE(self: *Self) !void {
-    const token = try self.tokens.addOne();
-
-    const name = self.current_doctype_name.toOwnedSlice(self.allocator);
-    if (self.current_doctype_name_is_missing) assert(name.len == 0);
-
-    const public_identifier = self.current_doctype_public_identifier.toOwnedSlice(self.allocator);
-    if (self.current_doctype_public_identifier_is_missing) assert(public_identifier.len == 0);
-
-    const system_identifier = self.current_doctype_system_identifier.toOwnedSlice(self.allocator);
-    if (self.current_doctype_system_identifier_is_missing) assert(system_identifier.len == 0);
-
-    token.* = Token{ .doctype = .{
-        .name = if (self.current_doctype_name_is_missing) null else name,
-        .public_identifier = if (self.current_doctype_public_identifier_is_missing) null else public_identifier,
-        .system_identifier = if (self.current_doctype_system_identifier_is_missing) null else system_identifier,
-        .force_quirks = self.current_doctype_force_quirks,
-    } };
-
-    self.current_doctype_name_is_missing = true;
-    self.current_doctype_public_identifier_is_missing = true;
-    self.current_doctype_system_identifier_is_missing = true;
-    self.current_doctype_force_quirks = false;
 }
 
 fn emitCharacter(self: *Self, character: u21) !void {
@@ -699,12 +624,6 @@ fn processInput(t: *Self) !void {
     }
 }
 
-fn skipHtmlWhitespace(t: *Self) !void {
-    while (true) switch (try t.nextIgnoreEof()) {
-        '\t', '\n', 0x0C, ' ' => {},
-        else => return t.reconsume(),
-    };
-}
 
 const IsPartOfAnAttribute = enum { Yes, No };
 
@@ -1505,19 +1424,39 @@ const DoctypeState = enum {
     Eof,
 };
 
-fn doctype(t: *Self) !void {
-    t.createDOCTYPEToken();
+const DoctypeData = struct {
+    name: ?ArrayList(u8) = null,
+    public_identifier: ?ArrayList(u8) = null,
+    system_identifier: ?ArrayList(u8) = null,
+    force_quirks: bool = false,
 
-    switch (try doctypeStart(t)) {
-        .Done => try t.emitDOCTYPE(),
-        .Eof => {
-            try t.emitDOCTYPE();
-            try t.emitEOF();
-        },
+    fn deinit(doctype_data: *DoctypeData) void {
+        if (doctype_data.name) |name| name.deinit();
+        if (doctype_data.public_identifier) |public_identifier| public_identifier.deinit();
+        if (doctype_data.system_identifier) |system_identifier| system_identifier.deinit();
+    }
+};
+
+fn doctype(t: *Self) !void {
+    var doctype_data = DoctypeData{};
+    defer doctype_data.deinit();
+
+    const state = try doctypeStart(t, &doctype_data);
+
+    const doctype_token = Token{ .doctype = .{
+        .name = if (doctype_data.name) |*name| name.toOwnedSlice() else null,
+        .public_identifier = if (doctype_data.public_identifier) |*public_identifier| public_identifier.toOwnedSlice() else null,
+        .system_identifier = if (doctype_data.system_identifier) |*system_identifier| system_identifier.toOwnedSlice() else null,
+        .force_quirks = doctype_data.force_quirks,
+    } };
+    try t.tokens.append(doctype_token);
+
+    if (state == .Eof) {
+        try t.emitEOF();
     }
 }
 
-fn doctypeStart(t: *Self) !DoctypeState {
+fn doctypeStart(t: *Self, doctype_data: *DoctypeData) !DoctypeState {
     if (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
@@ -1527,75 +1466,77 @@ fn doctypeStart(t: *Self) !DoctypeState {
                 t.reconsume();
             },
         }
-        return try beforeDoctypeName(t);
+        return try beforeDoctypeName(t, doctype_data);
     } else {
-        return try eofInDoctype(t);
+        return try eofInDoctype(t, doctype_data);
     }
 }
 
-fn beforeDoctypeName(t: *Self) !DoctypeState {
+fn beforeDoctypeName(t: *Self, doctype_data: *DoctypeData) !DoctypeState {
     while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             '>' => {
                 try t.parseError(.MissingDOCTYPEName);
-                t.currentDOCTYPETokenForceQuirks();
+                doctype_data.force_quirks = true;
                 return try doctypeEnd(t);
             },
             else => {
                 t.reconsume();
-                return try doctypeName(t);
+                return try doctypeName(t, doctype_data);
             },
         }
     } else {
-        return try eofInDoctype(t);
+        return try eofInDoctype(t, doctype_data);
     }
 }
 
-fn doctypeName(t: *Self) !DoctypeState {
-    t.markCurrentDOCTYPENameNotMissing();
+fn doctypeName(t: *Self, doctype_data: *DoctypeData) !DoctypeState {
+    doctype_data.name = ArrayList(u8).init(t.allocator);
+    const doctype_name_data = &doctype_data.name.?;
+
     while (try t.next()) |current_input_char| {
         switch (current_input_char) {
-            '\t', '\n', 0x0C, ' ' => return afterDoctypeName(t),
+            '\t', '\n', 0x0C, ' ' => return afterDoctypeName(t, doctype_data),
             '>' => return try doctypeEnd(t),
-            'A'...'Z' => |c| try t.appendDOCTYPEName(toLowercase(c)),
+            'A'...'Z' => |c| try appendChar(doctype_name_data, toLowercase(c)),
             0x00 => {
                 try t.parseError(.UnexpectedNullCharacter);
-                try t.appendDOCTYPEName(REPLACEMENT_CHARACTER);
+                try appendChar(doctype_name_data, REPLACEMENT_CHARACTER);
             },
-            else => |c| try t.appendDOCTYPEName(c),
+            else => |c| try appendChar(doctype_name_data, c),
         }
     } else {
-        return try eofInDoctype(t);
+        return try eofInDoctype(t, doctype_data);
     }
 }
 
-fn afterDoctypeName(t: *Self) !DoctypeState {
+fn afterDoctypeName(t: *Self, doctype_data: *DoctypeData) !DoctypeState {
     while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             '>' => return try doctypeEnd(t),
             else => |c| {
                 if (caseInsensitiveEql(c, 'P') and t.consumeCharsIfCaseInsensitiveEql("UBLIC")) {
-                    return afterDOCTYPEPublicOrSystemKeyword(t, .public);
+                    return afterDOCTYPEPublicOrSystemKeyword(t, doctype_data, .public);
                 } else if (caseInsensitiveEql(c, 'S') and t.consumeCharsIfCaseInsensitiveEql("YSTEM")) {
-                    return afterDOCTYPEPublicOrSystemKeyword(t, .system);
+                    return afterDOCTYPEPublicOrSystemKeyword(t, doctype_data, .system);
                 } else {
                     try t.parseError(.InvalidCharacterSequenceAfterDOCTYPEName);
-                    t.currentDOCTYPETokenForceQuirks();
+                    doctype_data.force_quirks = true;
                     t.reconsume();
                     return bogusDOCTYPE(t);
                 }
             },
         }
     } else {
-        return try eofInDoctype(t);
+        return try eofInDoctype(t, doctype_data);
     }
 }
 
 const PublicOrSystem = enum { public, system };
 
-fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, public_or_system: PublicOrSystem) !DoctypeState {
+fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, doctype_data: *DoctypeData, public_or_system: PublicOrSystem) !DoctypeState {
     // AfterDOCTYPEPublicKeyword
     // AfterDOCTYPESystemKeyword
     if (try t.next()) |current_input_char| {
@@ -1607,7 +1548,7 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, public_or_system: PublicOrSystem)
                     .system => .MissingWhitespaceAfterDOCTYPESystemKeyword,
                 };
                 try t.parseError(err);
-                return doctypePublicOrSystemIdentifier(t, public_or_system, quote);
+                return doctypePublicOrSystemIdentifier(t, doctype_data, public_or_system, quote);
             },
             '>' => {
                 const err: ParseError = switch (public_or_system) {
@@ -1615,7 +1556,7 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, public_or_system: PublicOrSystem)
                     .system => .MissingDOCTYPESystemIdentifier,
                 };
                 try t.parseError(err);
-                t.currentDOCTYPETokenForceQuirks();
+                doctype_data.force_quirks = true;
                 return try doctypeEnd(t);
             },
             else => {
@@ -1624,29 +1565,28 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, public_or_system: PublicOrSystem)
                     .system => .MissingQuoteBeforeDOCTYPESystemIdentifier,
                 };
                 try t.parseError(err);
-                t.currentDOCTYPETokenForceQuirks();
+                doctype_data.force_quirks = true;
                 t.reconsume();
                 return bogusDOCTYPE(t);
             },
         }
     } else {
-        return try eofInDoctype(t);
+        return try eofInDoctype(t, doctype_data);
     }
 
     // BeforeDOCTYPEPublicIdentifier
     // BeforeDOCTYPESystemIdentifier
-    try skipHtmlWhitespace(t);
-    if (try t.next()) |current_input_char| {
+    while (try t.next()) |current_input_char| {
         switch (current_input_char) {
-            '\t', '\n', 0x0C, ' ' => unreachable,
-            '"', '\'' => |quote| return doctypePublicOrSystemIdentifier(t, public_or_system, quote),
+            '\t', '\n', 0x0C, ' ' => {},
+            '"', '\'' => |quote| return doctypePublicOrSystemIdentifier(t, doctype_data, public_or_system, quote),
             '>' => {
                 const err: ParseError = switch (public_or_system) {
                     .public => .MissingDOCTYPEPublicIdentifier,
                     .system => .MissingDOCTYPESystemIdentifier,
                 };
                 try t.parseError(err);
-                t.currentDOCTYPETokenForceQuirks();
+                doctype_data.force_quirks = true;
                 return try doctypeEnd(t);
             },
             else => {
@@ -1655,104 +1595,99 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, public_or_system: PublicOrSystem)
                     .system => .MissingQuoteBeforeDOCTYPESystemIdentifier,
                 };
                 try t.parseError(err);
-                t.currentDOCTYPETokenForceQuirks();
+                doctype_data.force_quirks = true;
                 t.reconsume();
                 return bogusDOCTYPE(t);
             },
         }
     } else {
-        return try eofInDoctype(t);
+        return try eofInDoctype(t, doctype_data);
     }
 }
 
-fn doctypePublicOrSystemIdentifier(t: *Self, public_or_system: PublicOrSystem, quote: u21) Error!DoctypeState {
+fn doctypePublicOrSystemIdentifier(t: *Self, doctype_data: *DoctypeData, public_or_system: PublicOrSystem, quote: u21) Error!DoctypeState {
     // DOCTYPEPublicIdentifierDoubleQuoted
     // DOCTYPEPublicIdentifierSingleQuoted
     // DOCTYPESystemIdentifierDoubleQuoted
     // DOCTYPESystemIdentifierSingleQuoted
 
-    const markNotMissing = switch (public_or_system) {
-        .public => markCurrentDOCTYPEPublicIdentifierNotMissing,
-        .system => markCurrentDOCTYPESystemIdentifierNotMissing,
+    const identifier_data_optional = switch (public_or_system) {
+        .public => &doctype_data.public_identifier,
+        .system => &doctype_data.system_identifier,
     };
-    markNotMissing(t);
+    identifier_data_optional.* = ArrayList(u8).init(t.allocator);
+    const identifier_data = &identifier_data_optional.*.?;
 
-    const append = switch (public_or_system) {
-        .public => appendDOCTYPEPublicIdentifier,
-        .system => appendDOCTYPESystemIdentifier,
-    };
     while (try t.next()) |current_input_char| {
         if (current_input_char == quote) {
             const afterIdentifier = switch (public_or_system) {
                 .public => afterDOCTYPEPublicIdentifier,
                 .system => afterDOCTYPESystemIdentifier,
             };
-            return afterIdentifier(t);
+            return afterIdentifier(t, doctype_data);
         } else if (current_input_char == 0x00) {
             try t.parseError(.UnexpectedNullCharacter);
-            try append(t, REPLACEMENT_CHARACTER);
+            try appendChar(identifier_data, REPLACEMENT_CHARACTER);
         } else if (current_input_char == '>') {
             const err: ParseError = switch (public_or_system) {
                 .public => .AbruptDOCTYPEPublicIdentifier,
                 .system => .AbruptDOCTYPESystemIdentifier,
             };
             try t.parseError(err);
-            t.currentDOCTYPETokenForceQuirks();
+            doctype_data.force_quirks = true;
             return try doctypeEnd(t);
         } else {
-            try append(t, current_input_char);
+            try appendChar(identifier_data, current_input_char);
         }
     } else {
-        return try eofInDoctype(t);
+        return try eofInDoctype(t, doctype_data);
     }
 }
 
-fn afterDOCTYPEPublicIdentifier(t: *Self) !DoctypeState {
+fn afterDOCTYPEPublicIdentifier(t: *Self, doctype_data: *DoctypeData) !DoctypeState {
     if (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             '>' => return try doctypeEnd(t),
             '"', '\'' => |quote| {
                 try t.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
-                return doctypePublicOrSystemIdentifier(t, .system, quote);
+                return doctypePublicOrSystemIdentifier(t, doctype_data, .system, quote);
             },
             else => {
                 try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
-                t.currentDOCTYPETokenForceQuirks();
+                doctype_data.force_quirks = true;
                 t.reconsume();
                 return bogusDOCTYPE(t);
             },
         }
     } else {
-        return try eofInDoctype(t);
+        return try eofInDoctype(t, doctype_data);
     }
 
     // BetweenDOCTYPEPublicAndSystemIdentifiers
-    try skipHtmlWhitespace(t);
-    if (try t.next()) |current_input_char| {
+    while (try t.next()) |current_input_char| {
         switch (current_input_char) {
-            '\t', '\n', 0x0C, ' ' => unreachable,
+            '\t', '\n', 0x0C, ' ' => {},
             '>' => return try doctypeEnd(t),
             '"', '\'' => |quote| {
-                return doctypePublicOrSystemIdentifier(t, .system, quote);
+                return doctypePublicOrSystemIdentifier(t, doctype_data, .system, quote);
             },
             else => {
                 try t.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
-                t.currentDOCTYPETokenForceQuirks();
+                doctype_data.force_quirks = true;
                 t.reconsume();
                 return bogusDOCTYPE(t);
             },
         }
     } else {
-        return try eofInDoctype(t);
+        return try eofInDoctype(t, doctype_data);
     }
 }
 
-fn afterDOCTYPESystemIdentifier(t: *Self) !DoctypeState {
-    try skipHtmlWhitespace(t);
-    if (try t.next()) |current_input_char| {
+fn afterDOCTYPESystemIdentifier(t: *Self, doctype_data: *DoctypeData) !DoctypeState {
+    while (try t.next()) |current_input_char| {
         switch (current_input_char) {
-            '\t', '\n', 0x0C, ' ' => unreachable,
+            '\t', '\n', 0x0C, ' ' => {},
             '>' => return try doctypeEnd(t),
             else => {
                 try t.parseError(.UnexpectedCharacterAfterDOCTYPESystemIdentifier);
@@ -1761,7 +1696,7 @@ fn afterDOCTYPESystemIdentifier(t: *Self) !DoctypeState {
             },
         }
     } else {
-        return try eofInDoctype(t);
+        return try eofInDoctype(t, doctype_data);
     }
 }
 
@@ -1770,9 +1705,9 @@ fn doctypeEnd(t: *Self) !DoctypeState {
     return .Done;
 }
 
-fn eofInDoctype(t: *Self) !DoctypeState {
+fn eofInDoctype(t: *Self, doctype_data: *DoctypeData) !DoctypeState {
     try t.parseError(.EOFInDOCTYPE);
-    t.currentDOCTYPETokenForceQuirks();
+    doctype_data.force_quirks = true;
     return .Eof;
 }
 
