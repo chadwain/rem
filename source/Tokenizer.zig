@@ -1501,62 +1501,50 @@ fn incorrectlyClosedComment(t: *Self) !CommentState {
 }
 
 const DoctypeState = enum {
-    BeforeName,
-    Name,
-    AfterName,
+    Done,
+    Eof,
 };
 
 fn doctype(t: *Self) !void {
     t.createDOCTYPEToken();
-    var next_state: ?DoctypeState = next_state: {
-        if (try t.next()) |current_input_char| {
-            switch (current_input_char) {
-                '\t', '\n', 0x0C, ' ' => {},
-                '>' => t.reconsume(),
-                else => {
-                    try t.parseError(.MissingWhitespaceBeforeDOCTYPEName);
-                    t.reconsume();
-                },
-            }
-            break :next_state .BeforeName;
-        } else {
-            break :next_state try eofInDoctype(t);
-        }
-    };
 
-    while (next_state) |state| {
-        next_state = switch (state) {
-            .BeforeName => try beforeDoctypeName(t),
-            .Name => try doctypeName(t),
-            .AfterName => try afterDoctypeName(t),
-        };
+    switch (try doctypeStart(t)) {
+        .Done => try t.emitDOCTYPE(),
+        .Eof => {
+            try t.emitDOCTYPE();
+            try t.emitEOF();
+        },
     }
 }
 
-fn beforeDoctypeName(t: *Self) !?DoctypeState {
+fn doctypeStart(t: *Self) !DoctypeState {
+    if (try t.next()) |current_input_char| {
+        switch (current_input_char) {
+            '\t', '\n', 0x0C, ' ' => {},
+            '>' => t.reconsume(),
+            else => {
+                try t.parseError(.MissingWhitespaceBeforeDOCTYPEName);
+                t.reconsume();
+            },
+        }
+        return try beforeDoctypeName(t);
+    } else {
+        return try eofInDoctype(t);
+    }
+}
+
+fn beforeDoctypeName(t: *Self) !DoctypeState {
     while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
-            'A'...'Z' => |c| {
-                t.markCurrentDOCTYPENameNotMissing();
-                try t.appendDOCTYPEName(toLowercase(c));
-                return DoctypeState.Name;
-            },
-            0x00 => {
-                try t.parseError(.UnexpectedNullCharacter);
-                t.markCurrentDOCTYPENameNotMissing();
-                try t.appendDOCTYPEName(REPLACEMENT_CHARACTER);
-                return DoctypeState.Name;
-            },
             '>' => {
                 try t.parseError(.MissingDOCTYPEName);
                 t.currentDOCTYPETokenForceQuirks();
                 return try doctypeEnd(t);
             },
-            else => |c| {
-                t.markCurrentDOCTYPENameNotMissing();
-                try t.appendDOCTYPEName(c);
-                return DoctypeState.Name;
+            else => {
+                t.reconsume();
+                return try doctypeName(t);
             },
         }
     } else {
@@ -1564,10 +1552,11 @@ fn beforeDoctypeName(t: *Self) !?DoctypeState {
     }
 }
 
-fn doctypeName(t: *Self) !?DoctypeState {
+fn doctypeName(t: *Self) !DoctypeState {
+    t.markCurrentDOCTYPENameNotMissing();
     while (try t.next()) |current_input_char| {
         switch (current_input_char) {
-            '\t', '\n', 0x0C, ' ' => return DoctypeState.AfterName,
+            '\t', '\n', 0x0C, ' ' => return afterDoctypeName(t),
             '>' => return try doctypeEnd(t),
             'A'...'Z' => |c| try t.appendDOCTYPEName(toLowercase(c)),
             0x00 => {
@@ -1581,7 +1570,7 @@ fn doctypeName(t: *Self) !?DoctypeState {
     }
 }
 
-fn afterDoctypeName(t: *Self) !?DoctypeState {
+fn afterDoctypeName(t: *Self) !DoctypeState {
     while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
@@ -1606,7 +1595,7 @@ fn afterDoctypeName(t: *Self) !?DoctypeState {
 
 const PublicOrSystem = enum { public, system };
 
-fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, public_or_system: PublicOrSystem) !?DoctypeState {
+fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, public_or_system: PublicOrSystem) !DoctypeState {
     // AfterDOCTYPEPublicKeyword
     // AfterDOCTYPESystemKeyword
     if (try t.next()) |current_input_char| {
@@ -1676,7 +1665,7 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, public_or_system: PublicOrSystem)
     }
 }
 
-fn doctypePublicOrSystemIdentifier(t: *Self, public_or_system: PublicOrSystem, quote: u21) Error!?DoctypeState {
+fn doctypePublicOrSystemIdentifier(t: *Self, public_or_system: PublicOrSystem, quote: u21) Error!DoctypeState {
     // DOCTYPEPublicIdentifierDoubleQuoted
     // DOCTYPEPublicIdentifierSingleQuoted
     // DOCTYPESystemIdentifierDoubleQuoted
@@ -1718,7 +1707,7 @@ fn doctypePublicOrSystemIdentifier(t: *Self, public_or_system: PublicOrSystem, q
     }
 }
 
-fn afterDOCTYPEPublicIdentifier(t: *Self) !?DoctypeState {
+fn afterDOCTYPEPublicIdentifier(t: *Self) !DoctypeState {
     if (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
@@ -1759,7 +1748,7 @@ fn afterDOCTYPEPublicIdentifier(t: *Self) !?DoctypeState {
     }
 }
 
-fn afterDOCTYPESystemIdentifier(t: *Self) !?DoctypeState {
+fn afterDOCTYPESystemIdentifier(t: *Self) !DoctypeState {
     try skipHtmlWhitespace(t);
     if (try t.next()) |current_input_char| {
         switch (current_input_char) {
@@ -1776,33 +1765,24 @@ fn afterDOCTYPESystemIdentifier(t: *Self) !?DoctypeState {
     }
 }
 
-fn doctypeEnd(t: *Self) !?DoctypeState {
-    try t.emitDOCTYPE();
+fn doctypeEnd(t: *Self) !DoctypeState {
     t.setState(.Data);
-    return null;
+    return .Done;
 }
 
-fn eofInDoctype(t: *Self) !?DoctypeState {
+fn eofInDoctype(t: *Self) !DoctypeState {
     try t.parseError(.EOFInDOCTYPE);
     t.currentDOCTYPETokenForceQuirks();
-    try t.emitDOCTYPE();
-    try t.emitEOF();
-    return null;
+    return .Eof;
 }
 
-fn bogusDOCTYPE(t: *Self) !?DoctypeState {
+fn bogusDOCTYPE(t: *Self) !DoctypeState {
     while (try t.next()) |current_input_char| switch (current_input_char) {
-        '>' => {
-            try t.emitDOCTYPE();
-            t.setState(.Data);
-            return null;
-        },
+        '>' => return try doctypeEnd(t),
         0x00 => try t.parseError(.UnexpectedNullCharacter),
         else => {},
     } else {
-        try t.emitDOCTYPE();
-        try t.emitEOF();
-        return null;
+        return .Eof;
     }
 }
 
