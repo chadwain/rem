@@ -466,6 +466,16 @@ fn appendCommentString(self: *Self, comptime string: []const u8) !void {
     try self.current_comment_data.appendSlice(self.allocator, string);
 }
 
+fn appendChar(data: *ArrayList(u8), character: u21) !void {
+    var code_units: [4]u8 = undefined;
+    const len = try std.unicode.utf8Encode(character, &code_units);
+    try data.appendSlice(code_units[0..len]);
+}
+
+fn appendString(data: *ArrayList(u8), string: []const u8) !void {
+    try data.appendSlice(string);
+}
+
 fn appendTempBuffer(self: *Self, character: u21) !void {
     try self.temp_buffer.append(self.allocator, character);
 }
@@ -519,6 +529,10 @@ fn emitComment(self: *Self) !void {
     const data = self.current_comment_data.toOwnedSlice(self.allocator);
     errdefer self.allocator.free(data);
     try self.tokens.append(Token{ .comment = .{ .data = data } });
+}
+
+fn emitCommentData(self: *Self, comment_data: []const u8) !void {
+    try self.tokens.append(Token{.comment = .{.data = comment_data}});
 }
 
 fn emitEOF(self: *Self) !void {
@@ -1336,49 +1350,60 @@ const CommentState = enum {
     Normal,
     EndDash,
     End,
+    Done,
+    Eof,
 };
 
 fn commentStart(t: *Self) !void {
-    var next_state: ?CommentState = next_state: {
+    var comment_data = ArrayList(u8).init(t.allocator);
+    errdefer comment_data.deinit();
+
+    var state: CommentState = state: {
         switch (try t.nextIgnoreEof()) {
             '-' => {
                 // CommentStartDash
-                switch ((try t.next()) orelse break :next_state try eofInComment(t)) {
-                    '-' => break :next_state .End,
-                    '>' => break :next_state try abruptCommentClose(t),
+                switch ((try t.next()) orelse break :state try eofInComment(t)) {
+                    '-' => break :state .End,
+                    '>' => break :state try abruptCommentClose(t),
                     else => {
-                        try t.appendComment('-');
+                        try comment_data.append('-');
                         t.reconsume();
-                        break :next_state .Normal;
+                        break :state .Normal;
                     },
                 }
             },
-            '>' => break :next_state try abruptCommentClose(t),
+            '>' => break :state try abruptCommentClose(t),
             else => {
                 t.reconsume();
-                break :next_state .Normal;
+                break :state .Normal;
             },
         }
     };
 
-    while (next_state) |state| {
-        next_state = switch (state) {
-            .Normal => try comment(t),
-            .EndDash => try commentEndDash(t),
-            .End => try commentEnd(t),
-        };
+    while (true) {
+        switch (state) {
+            .Normal => state = try comment(t, &comment_data),
+            .EndDash => state = try commentEndDash(t, &comment_data),
+            .End => state = try commentEnd(t, &comment_data),
+            .Done, .Eof => break,
+        }
+    }
+
+    try t.emitCommentData(comment_data.toOwnedSlice());
+    if (state == .Eof) {
+        try t.emitEOF();
     }
 }
 
-fn comment(t: *Self) !?CommentState {
+fn comment(t: *Self, comment_data: *ArrayList(u8)) !CommentState {
     while (try t.next()) |current_input_char| switch (current_input_char) {
         '<' => {
-            try t.appendComment('<');
+            try comment_data.append('<');
 
             // CommentLessThanSign
             while (true) switch (try t.nextIgnoreEof()) {
                 '!' => {
-                    try t.appendComment('!');
+                    try comment_data.append('!');
 
                     // CommentLessThanSignBang
                     if ((try t.nextIgnoreEof()) != '-') {
@@ -1400,7 +1425,7 @@ fn comment(t: *Self) !?CommentState {
                     t.reconsume();
                     return .End;
                 },
-                '<' => try t.appendComment('<'),
+                '<' => try comment_data.append('<'),
                 else => {
                     t.reconsume();
                     break;
@@ -1410,36 +1435,32 @@ fn comment(t: *Self) !?CommentState {
         '-' => return .EndDash,
         0x00 => {
             try t.parseError(.UnexpectedNullCharacter);
-            try t.appendComment(REPLACEMENT_CHARACTER);
+            try appendChar(comment_data, REPLACEMENT_CHARACTER);
         },
-        else => |c| try t.appendComment(c),
+        else => |c| try appendChar(comment_data, c),
     } else {
         return try eofInComment(t);
     }
 }
 
-fn commentEndDash(t: *Self) !?CommentState {
+fn commentEndDash(t: *Self, comment_data: *ArrayList(u8)) !CommentState {
     switch ((try t.next()) orelse return try eofInComment(t)) {
         '-' => return CommentState.End,
         else => {
-            try t.appendComment('-');
+            try comment_data.append('-');
             t.reconsume();
             return CommentState.Normal;
         },
     }
 }
 
-fn commentEnd(t: *Self) !?CommentState {
+fn commentEnd(t: *Self, comment_data: *ArrayList(u8)) !CommentState {
     while (try t.next()) |current_input_char| switch (current_input_char) {
-        '>' => {
-            try t.emitComment();
-            return null;
-        },
-        '!' => return try commentEndBang(t),
-        '-' => try t.appendComment('-'),
+        '>' => return .Done,
+        '!' => return try commentEndBang(t, comment_data),
+        '-' => try comment_data.append('-'),
         else => {
-            try t.appendComment('-');
-            try t.appendComment('-');
+            try comment_data.appendSlice("--");
             t.reconsume();
             return CommentState.Normal;
         },
@@ -1448,42 +1469,34 @@ fn commentEnd(t: *Self) !?CommentState {
     }
 }
 
-fn commentEndBang(t: *Self) !?CommentState {
+fn commentEndBang(t: *Self, comment_data: *ArrayList(u8)) !CommentState {
     switch ((try t.next()) orelse return try eofInComment(t)) {
         '-' => {
-            try t.appendComment('-');
-            try t.appendComment('-');
-            try t.appendComment('!');
+            try comment_data.appendSlice("--!");
             return CommentState.EndDash;
         },
         '>' => return incorrectlyClosedComment(t),
         else => {
-            try t.appendComment('-');
-            try t.appendComment('-');
-            try t.appendComment('!');
+            try comment_data.appendSlice("--!");
             t.reconsume();
             return CommentState.Normal;
         },
     }
 }
 
-fn eofInComment(t: *Self) !?CommentState {
+fn eofInComment(t: *Self) !CommentState {
     try t.parseError(.EOFInComment);
-    try t.emitComment();
-    try t.emitEOF();
-    return null;
+    return .Eof;
 }
 
-fn abruptCommentClose(t: *Self) !?CommentState {
+fn abruptCommentClose(t: *Self) !CommentState {
     try t.parseError(.AbruptClosingOfEmptyComment);
-    try t.emitComment();
-    return null;
+    return .Done;
 }
 
-fn incorrectlyClosedComment(t: *Self) !?CommentState {
+fn incorrectlyClosedComment(t: *Self) !CommentState {
     try t.parseError(.IncorrectlyClosedComment);
-    try t.emitComment();
-    return null;
+    return .Done;
 }
 
 const DoctypeState = enum {
