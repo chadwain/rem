@@ -532,7 +532,7 @@ fn emitComment(self: *Self) !void {
 }
 
 fn emitCommentData(self: *Self, comment_data: []const u8) !void {
-    try self.tokens.append(Token{.comment = .{.data = comment_data}});
+    try self.tokens.append(Token{ .comment = .{ .data = comment_data } });
 }
 
 fn emitEOF(self: *Self) !void {
@@ -1021,7 +1021,7 @@ fn endTagOpen(t: *Self) !void {
 fn markupDeclarationOpen(t: *Self) !void {
     if (t.consumeCharsIfEql("--")) {
         t.createCommentToken();
-        return commentStart(t);
+        return comment(t);
     } else if (t.consumeCharsIfCaseInsensitiveEql("DOCTYPE")) {
         return doctype(t);
     } else if (t.consumeCharsIfEql("[CDATA[")) {
@@ -1354,35 +1354,14 @@ const CommentState = enum {
     Eof,
 };
 
-fn commentStart(t: *Self) !void {
+fn comment(t: *Self) !void {
     var comment_data = ArrayList(u8).init(t.allocator);
     errdefer comment_data.deinit();
 
-    var state: CommentState = state: {
-        switch (try t.nextIgnoreEof()) {
-            '-' => {
-                // CommentStartDash
-                switch ((try t.next()) orelse break :state try eofInComment(t)) {
-                    '-' => break :state .End,
-                    '>' => break :state try abruptCommentClose(t),
-                    else => {
-                        try comment_data.append('-');
-                        t.reconsume();
-                        break :state .Normal;
-                    },
-                }
-            },
-            '>' => break :state try abruptCommentClose(t),
-            else => {
-                t.reconsume();
-                break :state .Normal;
-            },
-        }
-    };
-
+    var state = try commentStart(t, &comment_data);
     while (true) {
         switch (state) {
-            .Normal => state = try comment(t, &comment_data),
+            .Normal => state = try commentNormal(t, &comment_data),
             .EndDash => state = try commentEndDash(t, &comment_data),
             .End => state = try commentEnd(t, &comment_data),
             .Done, .Eof => break,
@@ -1395,7 +1374,29 @@ fn commentStart(t: *Self) !void {
     }
 }
 
-fn comment(t: *Self, comment_data: *ArrayList(u8)) !CommentState {
+fn commentStart(t: *Self, comment_data: *ArrayList(u8)) !CommentState {
+    switch (try t.nextIgnoreEof()) {
+        '-' => {
+            // CommentStartDash
+            switch ((try t.next()) orelse return try eofInComment(t)) {
+                '-' => return .End,
+                '>' => return try abruptCommentClose(t),
+                else => {
+                    try comment_data.append('-');
+                    t.reconsume();
+                    return .Normal;
+                },
+            }
+        },
+        '>' => return try abruptCommentClose(t),
+        else => {
+            t.reconsume();
+            return .Normal;
+        },
+    }
+}
+
+fn commentNormal(t: *Self, comment_data: *ArrayList(u8)) !CommentState {
     while (try t.next()) |current_input_char| switch (current_input_char) {
         '<' => {
             try comment_data.append('<');
