@@ -321,15 +321,6 @@ fn reconsume(self: *Self) void {
     self.input.reconsume = true;
 }
 
-fn reconsumeInState(self: *Self, new_state: State) void {
-    self.reconsume();
-    self.setState(new_state);
-}
-
-fn createCommentToken(self: *Self) void {
-    assert(self.current_comment_data.items.len == 0);
-}
-
 fn isAppropriateEndTag(t: *Self, tag_data: *const TagData) bool {
     // Looking at the tokenizer logic, it seems that is no way to reach this function without current_tag_name
     // having at least 1 ASCII character in it. So we don't have to worry about making sure it has non-zero length.
@@ -423,7 +414,7 @@ fn adjustedCurrentNodeIsNotInHtmlNamespace(self: *Self) bool {
 fn processInput(t: *Self) !void {
     switch (t.state) {
         .Data => {
-            if (try t.next()) |char| switch (char) {
+            while (try t.next()) |char| switch (char) {
                 '&' => try characterReference(t, null),
                 '<' => return tagOpen(t),
                 0x00 => {
@@ -446,7 +437,7 @@ fn processInput(t: *Self) !void {
                     // RAWTEXTLessThanSign
                     if ((try t.nextIgnoreEof()) != '/') {
                         try t.emitCharacter('<');
-                        t.reconsumeInState(.RAWTEXT);
+                        t.reconsume();
                         continue;
                     }
 
@@ -480,7 +471,7 @@ fn processInput(t: *Self) !void {
                         // RCDATALessThanSign
                         if ((try t.nextIgnoreEof()) != '/') {
                             try t.emitCharacter('<');
-                            t.reconsumeInState(.RCDATA);
+                            t.reconsume();
                             continue;
                         }
 
@@ -785,7 +776,6 @@ fn flushCharacterReference(t: *Self, tag_data_optional: ?*TagData) !void {
 
 fn markupDeclarationOpen(t: *Self) !void {
     if (t.consumeCharsIfEql("--")) {
-        t.createCommentToken();
         return comment(t);
     } else if (t.consumeCharsIfCaseInsensitiveEql("DOCTYPE")) {
         return doctype(t);
@@ -794,32 +784,31 @@ fn markupDeclarationOpen(t: *Self) !void {
             t.setState(.CDATASection);
         } else {
             try t.parseError(.CDATAInHtmlContent);
-            t.createCommentToken();
-            try t.appendCommentString("[CDATA[");
+            for ("[CDATA[") |_| t.back();
             return bogusComment(t);
         }
     } else {
         try t.parseError(.IncorrectlyOpenedComment);
-        t.createCommentToken();
         return bogusComment(t);
     }
 }
 
 fn bogusComment(t: *Self) !void {
+    var comment_data = ArrayListUnmanaged(u8){};
+    defer comment_data.deinit(t.allocator);
+
     while (try t.next()) |char| switch (char) {
-        '>' => {
-            try t.emitComment();
-            return t.setState(.Data);
-        },
+        '>' => break,
         0x00 => {
             try t.parseError(.UnexpectedNullCharacter);
-            try t.appendComment(REPLACEMENT_CHARACTER);
+            try appendCharUnmanaged(&comment_data, t.allocator, REPLACEMENT_CHARACTER);
         },
-        else => |c| try t.appendComment(c),
+        else => |c| try appendCharUnmanaged(&comment_data, t.allocator, c),
     } else {
-        try t.emitComment();
-        try t.emitEOF();
+        t.back();
     }
+
+    try t.emitCommentData(comment_data.toOwnedSlice(t.allocator));
 }
 
 const TagData = struct {
@@ -936,14 +925,13 @@ fn tagOpen(t: *Self) !void {
         },
         '?' => {
             try t.parseError(.UnexpectedQuestionMarkInsteadOfTagName);
-            t.createCommentToken();
             t.reconsume();
             return bogusComment(t);
         },
         else => {
             try t.parseError(.InvalidFirstCharacterOfTagName);
             try t.emitCharacter('<');
-            t.reconsumeInState(.Data);
+            return t.reconsume();
         },
     } else {
         try t.parseError(.EOFBeforeTagName);
@@ -959,13 +947,9 @@ fn endTagOpen(t: *Self) !void {
                 t.reconsume();
                 return tagName(t, .End);
             },
-            '>' => {
-                try t.parseError(.MissingEndTagName);
-                t.setState(.Data);
-            },
+            '>' => try t.parseError(.MissingEndTagName),
             else => {
                 try t.parseError(.InvalidFirstCharacterOfTagName);
-                t.createCommentToken();
                 t.reconsume();
                 return bogusComment(t);
             },
@@ -1034,10 +1018,7 @@ fn tagName(t: *Self, start_or_end: TagData.StartOrEnd) !void {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => return attribute(t, &tag_data),
             '/' => return selfClosingStartTag(t, &tag_data),
-            '>' => {
-                try emitTag(t, &tag_data);
-                return t.setState(.Data);
-            },
+            '>' => return try emitTag(t, &tag_data),
             'A'...'Z' => |c| try tag_data.appendName(toLowercase(c)),
             0x00 => {
                 try t.parseError(.UnexpectedNullCharacter);
@@ -1259,7 +1240,6 @@ const CommentState = enum {
     EndDash,
     End,
     Done,
-    Eof,
 };
 
 fn comment(t: *Self) !void {
@@ -1272,14 +1252,11 @@ fn comment(t: *Self) !void {
             .Normal => state = try commentNormal(t, &comment_data),
             .EndDash => state = try commentEndDash(t, &comment_data),
             .End => state = try commentEnd(t, &comment_data),
-            .Done, .Eof => break,
+            .Done => break,
         }
     }
 
     try t.emitCommentData(comment_data.toOwnedSlice());
-    if (state == .Eof) {
-        try t.emitEOF();
-    }
 }
 
 fn commentStart(t: *Self, comment_data: *ArrayList(u8)) !CommentState {
@@ -1395,7 +1372,8 @@ fn commentEndBang(t: *Self, comment_data: *ArrayList(u8)) !CommentState {
 
 fn eofInComment(t: *Self) !CommentState {
     try t.parseError(.EOFInComment);
-    return .Eof;
+    t.back();
+    return .Done;
 }
 
 fn abruptCommentClose(t: *Self) !CommentState {
@@ -1468,7 +1446,7 @@ fn beforeDoctypeName(t: *Self, doctype_data: *DoctypeData) !DoctypeState {
             '>' => {
                 try t.parseError(.MissingDOCTYPEName);
                 doctype_data.force_quirks = true;
-                return try doctypeEnd(t);
+                return DoctypeState.Done;
             },
             else => {
                 t.reconsume();
@@ -1487,7 +1465,7 @@ fn doctypeName(t: *Self, doctype_data: *DoctypeData) !DoctypeState {
     while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => return afterDoctypeName(t, doctype_data),
-            '>' => return try doctypeEnd(t),
+            '>' => return DoctypeState.Done,
             'A'...'Z' => |c| try appendChar(doctype_name_data, toLowercase(c)),
             0x00 => {
                 try t.parseError(.UnexpectedNullCharacter);
@@ -1504,7 +1482,7 @@ fn afterDoctypeName(t: *Self, doctype_data: *DoctypeData) !DoctypeState {
     while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
-            '>' => return try doctypeEnd(t),
+            '>' => return DoctypeState.Done,
             else => |c| {
                 if (caseInsensitiveEql(c, 'P') and t.consumeCharsIfCaseInsensitiveEql("UBLIC")) {
                     return afterDOCTYPEPublicOrSystemKeyword(t, doctype_data, .public);
@@ -1546,7 +1524,7 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, doctype_data: *DoctypeData, publi
                 };
                 try t.parseError(err);
                 doctype_data.force_quirks = true;
-                return try doctypeEnd(t);
+                return DoctypeState.Done;
             },
             else => {
                 const err: ParseError = switch (public_or_system) {
@@ -1576,7 +1554,7 @@ fn afterDOCTYPEPublicOrSystemKeyword(t: *Self, doctype_data: *DoctypeData, publi
                 };
                 try t.parseError(err);
                 doctype_data.force_quirks = true;
-                return try doctypeEnd(t);
+                return DoctypeState.Done;
             },
             else => {
                 const err: ParseError = switch (public_or_system) {
@@ -1624,7 +1602,7 @@ fn doctypePublicOrSystemIdentifier(t: *Self, doctype_data: *DoctypeData, public_
             };
             try t.parseError(err);
             doctype_data.force_quirks = true;
-            return try doctypeEnd(t);
+            return DoctypeState.Done;
         } else {
             try appendChar(identifier_data, current_input_char);
         }
@@ -1637,7 +1615,7 @@ fn afterDOCTYPEPublicIdentifier(t: *Self, doctype_data: *DoctypeData) !DoctypeSt
     if (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
-            '>' => return try doctypeEnd(t),
+            '>' => return DoctypeState.Done,
             '"', '\'' => |quote| {
                 try t.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
                 return doctypePublicOrSystemIdentifier(t, doctype_data, .system, quote);
@@ -1657,7 +1635,7 @@ fn afterDOCTYPEPublicIdentifier(t: *Self, doctype_data: *DoctypeData) !DoctypeSt
     while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
-            '>' => return try doctypeEnd(t),
+            '>' => return DoctypeState.Done,
             '"', '\'' => |quote| {
                 return doctypePublicOrSystemIdentifier(t, doctype_data, .system, quote);
             },
@@ -1677,7 +1655,7 @@ fn afterDOCTYPESystemIdentifier(t: *Self, doctype_data: *DoctypeData) !DoctypeSt
     while (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
-            '>' => return try doctypeEnd(t),
+            '>' => return DoctypeState.Done,
             else => {
                 try t.parseError(.UnexpectedCharacterAfterDOCTYPESystemIdentifier);
                 t.reconsume();
@@ -1689,11 +1667,6 @@ fn afterDOCTYPESystemIdentifier(t: *Self, doctype_data: *DoctypeData) !DoctypeSt
     }
 }
 
-fn doctypeEnd(t: *Self) !DoctypeState {
-    t.setState(.Data);
-    return .Done;
-}
-
 fn eofInDoctype(t: *Self, doctype_data: *DoctypeData) !DoctypeState {
     try t.parseError(.EOFInDOCTYPE);
     doctype_data.force_quirks = true;
@@ -1702,7 +1675,7 @@ fn eofInDoctype(t: *Self, doctype_data: *DoctypeData) !DoctypeState {
 
 fn bogusDOCTYPE(t: *Self) !DoctypeState {
     while (try t.next()) |current_input_char| switch (current_input_char) {
-        '>' => return try doctypeEnd(t),
+        '>' => return DoctypeState.Done,
         0x00 => try t.parseError(.UnexpectedNullCharacter),
         else => {},
     } else {
@@ -1739,7 +1712,7 @@ fn scriptDataNormal(t: *Self) !?ScriptState {
             switch (try t.nextIgnoreEof()) {
                 else => {
                     try t.emitCharacter('<');
-                    t.reconsumeInState(.ScriptData);
+                    t.reconsume();
                     continue;
                 },
                 // ScriptDataEndTagOpen
@@ -1752,14 +1725,14 @@ fn scriptDataNormal(t: *Self) !?ScriptState {
 
                     // ScriptDataEscapeStart
                     if ((try t.nextIgnoreEof()) != '-') {
-                        t.reconsumeInState(.ScriptData);
+                        t.reconsume();
                         continue;
                     }
                     try t.emitCharacter('-');
 
                     // ScriptDataEscapeStartDash
                     if ((try t.nextIgnoreEof()) != '-') {
-                        t.reconsumeInState(.ScriptData);
+                        t.reconsume();
                         continue;
                     }
                     try t.emitCharacter('-');
@@ -1783,7 +1756,7 @@ fn scriptDataEscaped(t: *Self) !?ScriptState {
 
                 // ScriptDataEscapedDash
                 if ((try t.nextIgnoreEof()) != '-') {
-                    t.reconsumeInState(.ScriptData);
+                    t.reconsume();
                     continue;
                 }
                 try t.emitCharacter('-');
@@ -1807,7 +1780,7 @@ fn scriptDataEscaped(t: *Self) !?ScriptState {
                 },
                 else => {
                     try t.emitCharacter('<');
-                    t.reconsumeInState(.ScriptData);
+                    t.reconsume();
                 },
             },
             0x00 => {
@@ -1831,7 +1804,7 @@ fn scriptDataDoubleEscaped(t: *Self) !?ScriptState {
 
                 // ScriptDataDoubleEscapedDash
                 if ((try t.nextIgnoreEof()) != '-') {
-                    t.reconsumeInState(.ScriptData);
+                    t.reconsume();
                     continue;
                 }
                 try t.emitCharacter('-');
@@ -1844,7 +1817,7 @@ fn scriptDataDoubleEscaped(t: *Self) !?ScriptState {
 
                 // ScriptDataDoubleEscapedLessThanSign
                 if ((try t.nextIgnoreEof()) != '/') {
-                    t.reconsumeInState(.ScriptData);
+                    t.reconsume();
                     continue;
                 }
 
@@ -1905,7 +1878,7 @@ fn scriptDataEscapedOrDoubleEscapedDashDash(t: *Self, script_state: ScriptState)
             return .Normal;
         },
         else => {
-            t.reconsumeInState(.ScriptData);
+            t.reconsume();
             const next_state: ScriptState = switch (script_state) {
                 .Normal, .Escaped => .Escaped,
                 .DoubleEscaped => .DoubleEscaped,
