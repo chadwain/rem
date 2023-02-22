@@ -326,84 +326,17 @@ fn reconsumeInState(self: *Self, new_state: State) void {
     self.setState(new_state);
 }
 
-fn createStartTagToken(self: *Self) void {
-    assert(self.current_tag_name.items.len == 0);
-    assert(self.current_tag_attributes.count() == 0);
-    self.current_tag_type = .Start;
-}
-
-fn createEndTagToken(self: *Self) void {
-    assert(self.current_tag_name.items.len == 0);
-    assert(self.current_tag_attributes.count() == 0);
-    self.current_tag_type = .End;
-}
-
-fn createAttribute(self: *Self) void {
-    assert(self.generic_buffer.items.len == 0);
-}
-
 fn createCommentToken(self: *Self) void {
     assert(self.current_comment_data.items.len == 0);
 }
 
-fn isAppropriateEndTag(self: *Self) bool {
+fn isAppropriateEndTag(t: *Self, tag_data: *const TagData) bool {
     // Looking at the tokenizer logic, it seems that is no way to reach this function without current_tag_name
     // having at least 1 ASCII character in it. So we don't have to worry about making sure it has non-zero length.
     //
     // Notice that this gets called from the states that end in "TagName", and that those states
     // can only be reached by reconsuming an ASCII character from an associated "TagOpen" state.
-    return std.mem.eql(u8, self.last_start_tag_name, self.current_tag_name.items);
-}
-
-fn makeCurrentTagSelfClosing(self: *Self) void {
-    self.current_tag_self_closing = true;
-}
-
-fn appendCurrentTagName(self: *Self, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.current_tag_name.appendSlice(self.allocator, code_units[0..len]);
-}
-
-fn resetCurrentTagName(self: *Self) void {
-    self.current_tag_name.clearRetainingCapacity();
-}
-
-fn appendCurrentAttributeName(self: *Self, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.generic_buffer.appendSlice(self.allocator, code_units[0..len]);
-}
-
-fn appendCurrentAttributeValue(self: *Self, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try self.generic_buffer.appendSlice(self.allocator, code_units[0..len]);
-}
-
-fn finishAttributeName(self: *Self) !void {
-    const get_result = try self.current_tag_attributes.getOrPut(self.allocator, self.generic_buffer.items);
-    errdefer if (!get_result.found_existing) self.current_tag_attributes.removeByPtr(get_result.key_ptr);
-
-    defer self.generic_buffer.clearRetainingCapacity();
-    if (get_result.found_existing) {
-        try self.parseError(.DuplicateAttribute);
-    } else {
-        get_result.key_ptr.* = try self.allocator.dupe(u8, self.generic_buffer.items);
-        get_result.value_ptr.* = "";
-        self.current_attribute_value_result_location = get_result.value_ptr;
-    }
-}
-
-fn finishAttributeValue(self: *Self) !void {
-    const value = try self.allocator.dupe(u8, self.generic_buffer.items);
-    self.generic_buffer.clearRetainingCapacity();
-    if (self.current_attribute_value_result_location) |ptr| {
-        ptr.* = value;
-        self.current_attribute_value_result_location = null;
-    } else {
-        self.allocator.free(value);
-    }
+    return std.mem.eql(u8, t.last_start_tag_name, tag_data.name.items);
 }
 
 fn appendComment(self: *Self, character: u21) !void {
@@ -420,6 +353,12 @@ fn appendChar(data: *ArrayList(u8), character: u21) !void {
     var code_units: [4]u8 = undefined;
     const len = try std.unicode.utf8Encode(character, &code_units);
     try data.appendSlice(code_units[0..len]);
+}
+
+fn appendCharUnmanaged(data: *ArrayListUnmanaged(u8), allocator: Allocator, character: u21) !void {
+    var code_units: [4]u8 = undefined;
+    const len = try std.unicode.utf8Encode(character, &code_units);
+    try data.appendSlice(allocator, code_units[0..len]);
 }
 
 fn appendString(data: *ArrayList(u8), string: []const u8) !void {
@@ -465,44 +404,6 @@ fn emitEOF(self: *Self) !void {
     try self.tokens.append(Token{ .eof = {} });
 }
 
-fn emitCurrentTag(self: *Self) !void {
-    const name = self.current_tag_name.toOwnedSlice(self.allocator);
-    errdefer self.allocator.free(name);
-    switch (self.current_tag_type) {
-        .Start => {
-            self.last_start_tag_name = try self.allocator.realloc(self.last_start_tag_name, name.len);
-            std.mem.copy(u8, self.last_start_tag_name, name);
-            try self.tokens.append(Token{ .start_tag = .{
-                .name = name,
-                .attributes = self.current_tag_attributes,
-                .self_closing = self.current_tag_self_closing,
-            } });
-            self.current_tag_attributes = .{};
-        },
-        .End => {
-            // TODO: Don't store any attributes in the first place
-            if (self.current_tag_attributes.count() > 0) {
-                var iterator = self.current_tag_attributes.iterator();
-                while (iterator.next()) |attr| {
-                    self.allocator.free(attr.key_ptr.*);
-                    self.allocator.free(attr.value_ptr.*);
-                }
-                self.current_tag_attributes.clearRetainingCapacity();
-                try self.parseError(.EndTagWithAttributes);
-            }
-            if (self.current_tag_self_closing) {
-                try self.parseError(.EndTagWithTrailingSolidus);
-            }
-            try self.tokens.append(Token{ .end_tag = .{
-                .name = name,
-            } });
-        },
-    }
-
-    self.current_tag_self_closing = false;
-    self.current_tag_type = undefined;
-}
-
 fn parseError(self: *Self, err: ParseError) !void {
     try self.error_handler.sendError(err);
 }
@@ -523,7 +424,7 @@ fn processInput(t: *Self) !void {
     switch (t.state) {
         .Data => {
             if (try t.next()) |char| switch (char) {
-                '&' => try characterReference(t, IsPartOfAnAttribute.No),
+                '&' => try characterReference(t, null),
                 '<' => return tagOpen(t),
                 0x00 => {
                     try t.parseError(.UnexpectedNullCharacter);
@@ -569,7 +470,7 @@ fn processInput(t: *Self) !void {
         .RCDATA => {
             while (try t.next()) |char| {
                 switch (char) {
-                    '&' => try characterReference(t, IsPartOfAnAttribute.No),
+                    '&' => try characterReference(t, null),
                     0x00 => {
                         try t.parseError(.UnexpectedNullCharacter);
                         try t.emitCharacter(REPLACEMENT_CHARACTER);
@@ -624,33 +525,30 @@ fn processInput(t: *Self) !void {
     }
 }
 
-
-const IsPartOfAnAttribute = enum { Yes, No };
-
-fn characterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
+fn characterReference(t: *Self, tag_data: ?*TagData) !void {
     t.clearTempBuffer();
     try t.appendTempBuffer('&');
     switch (try t.nextIgnoreEof()) {
         '0'...'9', 'A'...'Z', 'a'...'z' => {
             t.back();
-            return namedCharacterReference(t, is_part_of_an_attribute);
+            return namedCharacterReference(t, tag_data);
         },
         '#' => {
             try t.appendTempBuffer('#');
-            return numericCharacterReference(t, is_part_of_an_attribute);
+            return numericCharacterReference(t, tag_data);
         },
         else => {
             t.back();
-            return flushCharacterReference(t, is_part_of_an_attribute);
+            return flushCharacterReference(t, tag_data);
         },
     }
 }
 
-fn namedCharacterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
+fn namedCharacterReference(t: *Self, tag_data: ?*TagData) !void {
     const chars = try t.findNamedCharacterReference();
     const match_found = chars[0] != null;
     if (match_found) {
-        const historical_reasons = if (is_part_of_an_attribute == .Yes and t.tempBufferLast() != ';')
+        const historical_reasons = if (tag_data != null and t.tempBufferLast() != ';')
             switch (try t.peekIgnoreEof()) {
                 '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
                 else => false,
@@ -659,7 +557,7 @@ fn namedCharacterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttribut
             false;
 
         if (historical_reasons) {
-            return t.flushCharacterReference(is_part_of_an_attribute);
+            return flushCharacterReference(t, tag_data);
         } else {
             if (t.tempBufferLast() != ';') {
                 try t.parseError(.MissingSemicolonAfterCharacterReference);
@@ -667,11 +565,11 @@ fn namedCharacterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttribut
             t.clearTempBuffer();
             try t.appendTempBuffer(chars[0].?);
             if (chars[1]) |c| try t.appendTempBuffer(c);
-            return t.flushCharacterReference(is_part_of_an_attribute);
+            return flushCharacterReference(t, tag_data);
         }
     } else {
-        try t.flushCharacterReference(is_part_of_an_attribute);
-        return ambiguousAmpersand(t, is_part_of_an_attribute);
+        try flushCharacterReference(t, tag_data);
+        return ambiguousAmpersand(t, tag_data);
     }
 }
 
@@ -713,21 +611,22 @@ fn findNamedCharacterReference(self: *Self) !named_characters_data.Value {
     return last_matched_named_character_value;
 }
 
-fn ambiguousAmpersand(t: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
+fn ambiguousAmpersand(t: *Self, tag_data: ?*TagData) !void {
     while (true) switch (try t.nextIgnoreEof()) {
-        '0'...'9', 'A'...'Z', 'a'...'z' => |c| switch (is_part_of_an_attribute) {
-            .Yes => try t.appendCurrentAttributeValue(c),
-            .No => try t.emitCharacter(c),
-        },
-        ';' => {
-            try t.parseError(.UnknownNamedCharacterReference);
-            return t.reconsume();
-        },
-        else => return t.reconsume(),
+        //'0'...'9', 'A'...'Z', 'a'...'z' => |c| switch (is_part_of_an_attribute) {
+        //    .Yes => try t.appendCurrentAttributeValue(c),
+        //    .No => try t.emitCharacter(c),
+        //},
+        '0'...'9', 'A'...'Z', 'a'...'z' => |c| try t.appendTempBuffer(c),
+        ';' => break try t.parseError(.UnknownNamedCharacterReference),
+        else => break,
     };
+
+    try flushCharacterReference(t, tag_data);
+    t.reconsume();
 }
 
-fn numericCharacterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
+fn numericCharacterReference(t: *Self, tag_data: ?*TagData) !void {
     var character_reference_code: u21 = 0;
     switch (try t.nextIgnoreEof()) {
         'x', 'X' => |x| {
@@ -750,7 +649,7 @@ fn numericCharacterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttrib
                         },
                     };
                 },
-                else => return noDigitsInNumericCharacterReference(t, is_part_of_an_attribute),
+                else => return noDigitsInNumericCharacterReference(t, tag_data),
             }
         },
         // DecimalCharacterReferenceStart
@@ -767,7 +666,7 @@ fn numericCharacterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttrib
                 },
             };
         },
-        else => return noDigitsInNumericCharacterReference(t, is_part_of_an_attribute),
+        else => return noDigitsInNumericCharacterReference(t, tag_data),
     }
 
     // NumericCharacterReferenceEnd
@@ -858,83 +757,30 @@ fn numericCharacterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttrib
     }
     t.clearTempBuffer();
     try t.appendTempBuffer(character_reference_code);
-    try t.flushCharacterReference(is_part_of_an_attribute);
+    try flushCharacterReference(t, tag_data);
 }
 
 fn characterReferenceCodeAddDigit(character_reference_code: *u21, comptime base: comptime_int, digit: u21) void {
     character_reference_code.* = character_reference_code.* *| base +| digit;
 }
 
-fn noDigitsInNumericCharacterReference(t: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
+fn noDigitsInNumericCharacterReference(t: *Self, tag_data: ?*TagData) !void {
     try t.parseError(.AbsenceOfDigitsInNumericCharacterReference);
-    try t.flushCharacterReference(is_part_of_an_attribute);
+    try flushCharacterReference(t, tag_data);
     t.reconsume();
 }
 
-fn flushCharacterReference(self: *Self, is_part_of_an_attribute: IsPartOfAnAttribute) !void {
-    switch (is_part_of_an_attribute) {
-        .Yes => for (self.temp_buffer.items) |character| {
-            var code_units: [4]u8 = undefined;
-            const len = try std.unicode.utf8Encode(character, &code_units);
-            try self.generic_buffer.appendSlice(self.allocator, code_units[0..len]);
-        },
-        .No => for (self.temp_buffer.items) |character| {
-            try self.emitCharacter(character);
-        },
-    }
-}
-
-fn tagOpen(t: *Self) !void {
-    if (try t.next()) |char| switch (char) {
-        '!' => return markupDeclarationOpen(t),
-        '/' => return endTagOpen(t),
-        'A'...'Z', 'a'...'z' => {
-            t.createStartTagToken();
-            t.reconsume();
-            return tagName(t);
-        },
-        '?' => {
-            try t.parseError(.UnexpectedQuestionMarkInsteadOfTagName);
-            t.createCommentToken();
-            t.reconsume();
-            return bogusComment(t);
-        },
-        else => {
-            try t.parseError(.InvalidFirstCharacterOfTagName);
-            try t.emitCharacter('<');
-            t.reconsumeInState(.Data);
-        },
-    } else {
-        try t.parseError(.EOFBeforeTagName);
-        try t.emitCharacter('<');
-        try t.emitEOF();
-    }
-}
-
-fn endTagOpen(t: *Self) !void {
-    if (try t.next()) |char| {
-        switch (char) {
-            'A'...'Z', 'a'...'z' => {
-                t.createEndTagToken();
-                t.reconsume();
-                return tagName(t);
-            },
-            '>' => {
-                try t.parseError(.MissingEndTagName);
-                t.setState(.Data);
-            },
-            else => {
-                try t.parseError(.InvalidFirstCharacterOfTagName);
-                t.createCommentToken();
-                t.reconsume();
-                return bogusComment(t);
-            },
+fn flushCharacterReference(t: *Self, tag_data_optional: ?*TagData) !void {
+    if (tag_data_optional) |tag_data| {
+        for (t.temp_buffer.items) |character| {
+            try tag_data.appendCurrentAttributeValue(character);
         }
     } else {
-        try t.parseError(.EOFBeforeTagName);
-        try t.emitString("</");
-        try t.emitEOF();
+        for (t.temp_buffer.items) |character| {
+            try t.emitCharacter(character);
+        }
     }
+    t.clearTempBuffer();
 }
 
 fn markupDeclarationOpen(t: *Self) !void {
@@ -976,13 +822,166 @@ fn bogusComment(t: *Self) !void {
     }
 }
 
+const TagData = struct {
+    name: ArrayListUnmanaged(u8) = .{},
+    attributes: Attributes = .{},
+    current_attribute_value_result_location: ?*[]const u8 = undefined,
+    buffer: ArrayListUnmanaged(u8) = .{},
+    self_closing: bool = false,
+    start_or_end: StartOrEnd,
+    allocator: Allocator,
+
+    const StartOrEnd = enum { Start, End };
+
+    fn init(start_or_end: StartOrEnd, allocator: Allocator) TagData {
+        return .{ .start_or_end = start_or_end, .allocator = allocator };
+    }
+
+    fn deinit(tag_data: *TagData) void {
+        tag_data.name.deinit(tag_data.allocator);
+        tag_data.buffer.deinit(tag_data.allocator);
+        var iterator = tag_data.attributes.iterator();
+        while (iterator.next()) |attr| {
+            tag_data.allocator.free(attr.key_ptr.*);
+            tag_data.allocator.free(attr.value_ptr.*);
+        }
+        tag_data.attributes.deinit(tag_data.allocator);
+    }
+
+    fn appendName(tag_data: *TagData, char: u21) !void {
+        try appendCharUnmanaged(&tag_data.name, tag_data.allocator, char);
+    }
+
+    fn appendCurrentAttributeName(tag_data: *TagData, char: u21) !void {
+        try appendCharUnmanaged(&tag_data.buffer, tag_data.allocator, char);
+    }
+
+    fn appendCurrentAttributeValue(tag_data: *TagData, char: u21) !void {
+        try appendCharUnmanaged(&tag_data.buffer, tag_data.allocator, char);
+    }
+
+    fn finishAttributeName(tag_data: *TagData, t: *Self) !void {
+        const attribute_name = tag_data.buffer.toOwnedSlice(tag_data.allocator);
+        errdefer tag_data.allocator.free(attribute_name);
+
+        const get_result = try tag_data.attributes.getOrPut(tag_data.allocator, attribute_name);
+
+        if (get_result.found_existing) {
+            try t.parseError(.DuplicateAttribute);
+            tag_data.allocator.free(attribute_name);
+            tag_data.current_attribute_value_result_location = null;
+        } else {
+            get_result.value_ptr.* = "";
+            tag_data.current_attribute_value_result_location = get_result.value_ptr;
+        }
+    }
+
+    fn finishAttributeValue(tag_data: *TagData) void {
+        const attribute_value = tag_data.buffer.toOwnedSlice(tag_data.allocator);
+        if (tag_data.current_attribute_value_result_location) |ptr| {
+            ptr.* = attribute_value;
+        } else {
+            tag_data.allocator.free(attribute_value);
+        }
+        tag_data.current_attribute_value_result_location = undefined;
+    }
+};
+
+fn emitTag(t: *Self, tag_data: *TagData) !void {
+    const name = tag_data.name.toOwnedSlice(tag_data.allocator);
+    errdefer tag_data.allocator.free(name);
+
+    switch (tag_data.start_or_end) {
+        .Start => {
+            t.last_start_tag_name = try t.allocator.realloc(t.last_start_tag_name, name.len);
+            std.mem.copy(u8, t.last_start_tag_name, name);
+            const token = Token{ .start_tag = .{
+                .name = name,
+                .attributes = tag_data.attributes,
+                .self_closing = tag_data.self_closing,
+            } };
+            tag_data.attributes = .{};
+            try t.tokens.append(token);
+        },
+        .End => {
+            // TODO: Don't store any attributes in the first place
+            if (tag_data.attributes.count() > 0) {
+                var iterator = tag_data.attributes.iterator();
+                while (iterator.next()) |attr| {
+                    tag_data.allocator.free(attr.key_ptr.*);
+                    tag_data.allocator.free(attr.value_ptr.*);
+                }
+                tag_data.attributes.clearRetainingCapacity();
+                try t.parseError(.EndTagWithAttributes);
+            }
+
+            if (tag_data.self_closing) {
+                try t.parseError(.EndTagWithTrailingSolidus);
+            }
+
+            try t.tokens.append(Token{ .end_tag = .{
+                .name = name,
+            } });
+        },
+    }
+}
+
+fn tagOpen(t: *Self) !void {
+    if (try t.next()) |char| switch (char) {
+        '!' => return markupDeclarationOpen(t),
+        '/' => return endTagOpen(t),
+        'A'...'Z', 'a'...'z' => {
+            t.reconsume();
+            return tagName(t, .Start);
+        },
+        '?' => {
+            try t.parseError(.UnexpectedQuestionMarkInsteadOfTagName);
+            t.createCommentToken();
+            t.reconsume();
+            return bogusComment(t);
+        },
+        else => {
+            try t.parseError(.InvalidFirstCharacterOfTagName);
+            try t.emitCharacter('<');
+            t.reconsumeInState(.Data);
+        },
+    } else {
+        try t.parseError(.EOFBeforeTagName);
+        try t.emitCharacter('<');
+        try t.emitEOF();
+    }
+}
+
+fn endTagOpen(t: *Self) !void {
+    if (try t.next()) |char| {
+        switch (char) {
+            'A'...'Z', 'a'...'z' => {
+                t.reconsume();
+                return tagName(t, .End);
+            },
+            '>' => {
+                try t.parseError(.MissingEndTagName);
+                t.setState(.Data);
+            },
+            else => {
+                try t.parseError(.InvalidFirstCharacterOfTagName);
+                t.createCommentToken();
+                t.reconsume();
+                return bogusComment(t);
+            },
+        }
+    } else {
+        try t.parseError(.EOFBeforeTagName);
+        try t.emitString("</");
+        try t.emitEOF();
+    }
+}
+
 fn nonDataEndTagOpen(t: *Self) !void {
-    t.clearTempBuffer();
     switch (try t.nextIgnoreEof()) {
         'A'...'Z', 'a'...'z' => {
-            t.createEndTagToken();
             t.reconsume();
-            return endTagName(t);
+            return nonDataEndTagName(t);
         },
         else => {
             try t.emitString("</");
@@ -991,70 +990,60 @@ fn nonDataEndTagOpen(t: *Self) !void {
     }
 }
 
-fn endTagName(t: *Self) !void {
+fn nonDataEndTagName(t: *Self) !void {
+    var tag_data = TagData.init(.End, t.allocator);
+    defer tag_data.deinit();
+
     while (try t.next()) |char| {
         switch (char) {
             '\t', '\n', 0x0C, ' ' => {
-                if (t.isAppropriateEndTag()) {
-                    return attribute(t);
+                if (t.isAppropriateEndTag(&tag_data)) {
+                    return attribute(t, &tag_data);
                 }
                 break;
             },
             '/' => {
-                if (t.isAppropriateEndTag()) {
-                    return selfClosingStartTag(t);
+                if (t.isAppropriateEndTag(&tag_data)) {
+                    return selfClosingStartTag(t, &tag_data);
                 }
                 break;
             },
             '>' => {
-                if (t.isAppropriateEndTag()) {
-                    t.setState(.Data);
-                    try t.emitCurrentTag();
-                    return;
+                if (t.isAppropriateEndTag(&tag_data)) {
+                    try emitTag(t, &tag_data);
+                    return t.setState(.Data);
                 }
                 break;
             },
-            'A'...'Z' => |c| {
-                try t.appendCurrentTagName(toLowercase(c));
-                try t.appendTempBuffer(c);
-            },
-            'a'...'z' => |c| {
-                try t.appendCurrentTagName(c);
-                try t.appendTempBuffer(c);
-            },
+            'A'...'Z' => |c| try tag_data.appendName(toLowercase(c)),
+            'a'...'z' => |c| try tag_data.appendName(c),
             else => break,
         }
     }
 
-    t.resetCurrentTagName();
     try t.emitString("</");
-    try t.emitTempBufferCharacters();
+    for (tag_data.name.items) |c| try t.emitCharacter(c);
     t.reconsume();
 }
 
-const AttributeState = enum {
-    BeforeName,
-    Name,
-    AfterName,
-    Value,
-    Slash,
-};
+fn tagName(t: *Self, start_or_end: TagData.StartOrEnd) !void {
+    var tag_data = TagData.init(start_or_end, t.allocator);
+    defer tag_data.deinit();
 
-fn tagName(t: *Self) !void {
     while (try t.next()) |current_input_char| {
         switch (current_input_char) {
-            '\t', '\n', 0x0C, ' ' => return attribute(t),
-            '/' => return selfClosingStartTag(t),
+            '\t', '\n', 0x0C, ' ' => return attribute(t, &tag_data),
+            '/' => return selfClosingStartTag(t, &tag_data),
             '>' => {
-                try t.emitCurrentTag();
+                try emitTag(t, &tag_data);
                 return t.setState(.Data);
             },
-            'A'...'Z' => |c| try t.appendCurrentTagName(toLowercase(c)),
+            'A'...'Z' => |c| try tag_data.appendName(toLowercase(c)),
             0x00 => {
                 try t.parseError(.UnexpectedNullCharacter);
-                try t.appendCurrentTagName(REPLACEMENT_CHARACTER);
+                try tag_data.appendName(REPLACEMENT_CHARACTER);
             },
-            else => |c| try t.appendCurrentTagName(c),
+            else => |c| try tag_data.appendName(c),
         }
     } else {
         try t.parseError(.EOFInTag);
@@ -1062,85 +1051,91 @@ fn tagName(t: *Self) !void {
     }
 }
 
-fn attribute(t: *Self) !void {
-    return attributeLoop(t, .BeforeName);
+const AttributeState = enum {
+    BeforeName,
+    Name,
+    Value,
+    Slash,
+    Done,
+    Eof,
+};
+
+fn attribute(t: *Self, tag_data: *TagData) !void {
+    return attributeLoop(t, tag_data, .BeforeName);
 }
 
-fn selfClosingStartTag(t: *Self) !void {
-    return attributeLoop(t, .Slash);
+fn selfClosingStartTag(t: *Self, tag_data: *TagData) !void {
+    return attributeLoop(t, tag_data, .Slash);
 }
 
-fn attributeLoop(t: *Self, initial_state: AttributeState) !void {
-    var next_state: ?AttributeState = initial_state;
-    while (next_state) |state| {
-        next_state = switch (state) {
-            .BeforeName => try beforeAttributeName(t),
-            .Name => try attributeName(t),
-            .AfterName => try afterAttributeName(t),
-            .Value => try beforeAttributeValue(t),
-            .Slash => try attributeSlash(t),
-        };
+fn attributeLoop(t: *Self, tag_data: *TagData, initial_state: AttributeState) !void {
+    var state: AttributeState = initial_state;
+    while (true) {
+        switch (state) {
+            .BeforeName => state = try beforeAttributeName(t, tag_data),
+            .Name => state = try attributeName(t, tag_data),
+            .Value => state = try beforeAttributeValue(t, tag_data),
+            .Slash => state = try attributeSlash(t, tag_data),
+            .Done => break try emitTag(t, tag_data),
+            .Eof => break try t.emitEOF(),
+        }
     }
 }
 
-fn beforeAttributeName(t: *Self) !AttributeState {
+fn beforeAttributeName(t: *Self, tag_data: *TagData) !AttributeState {
     // Make end-of-file (null) be handled the same as '>'
     while (true) switch ((try t.next()) orelse '>') {
         '\t', '\n', 0x0C, ' ' => {},
         '/', '>' => {
             t.reconsume();
-            return .AfterName;
+            return try afterAttributeName(t);
         },
         '=' => {
             try t.parseError(.UnexpectedEqualsSignBeforeAttributeName);
-            t.createAttribute();
-            try t.appendCurrentAttributeName('=');
+            try tag_data.appendCurrentAttributeName('=');
             return .Name;
         },
         else => {
-            t.createAttribute();
             t.reconsume();
             return .Name;
         },
     };
 }
 
-fn attributeName(t: *Self) !AttributeState {
+fn attributeName(t: *Self, tag_data: *TagData) !AttributeState {
     // Make end-of-file (null) be handled the same as '>'
     while (true) switch ((try t.next()) orelse '>') {
         '\t', '\n', 0x0C, ' ', '/', '>' => {
-            try t.finishAttributeName();
+            try tag_data.finishAttributeName(t);
             t.reconsume();
-            return .AfterName;
+            return try afterAttributeName(t);
         },
         '=' => {
-            try t.finishAttributeName();
-            t.setState(t.state);
+            try tag_data.finishAttributeName(t);
             return .Value;
         },
-        'A'...'Z' => |c| try t.appendCurrentAttributeName(toLowercase(c)),
+        'A'...'Z' => |c| try tag_data.appendCurrentAttributeName(toLowercase(c)),
         0x00 => {
             try t.parseError(.UnexpectedNullCharacter);
-            try t.appendCurrentAttributeName(REPLACEMENT_CHARACTER);
+            try tag_data.appendCurrentAttributeName(REPLACEMENT_CHARACTER);
         },
         '"', '\'', '<' => |c| {
             try t.parseError(.UnexpectedCharacterInAttributeName);
-            try t.appendCurrentAttributeName(c);
+            try tag_data.appendCurrentAttributeName(c);
         },
-        else => |c| try t.appendCurrentAttributeName(c),
+        else => |c| try tag_data.appendCurrentAttributeName(c),
     };
 }
 
-fn afterAttributeName(t: *Self) !?AttributeState {
+fn afterAttributeName(t: *Self) !AttributeState {
     while (true) {
         if (try t.next()) |current_input_char| {
             switch (current_input_char) {
                 '\t', '\n', 0x0C, ' ' => {},
                 '/' => return .Slash,
                 '=' => return .Value,
-                '>' => return try attributeEnd(t),
+                '>' => return attributeEnd(t),
                 else => {
-                    t.createAttribute();
                     t.reconsume();
                     return AttributeState.Name;
                 },
@@ -1151,25 +1146,25 @@ fn afterAttributeName(t: *Self) !?AttributeState {
     }
 }
 
-fn beforeAttributeValue(t: *Self) !?AttributeState {
+fn beforeAttributeValue(t: *Self, tag_data: *TagData) !AttributeState {
     while (true) switch (try t.nextIgnoreEof()) {
         '\t', '\n', 0x0C, ' ' => {},
-        '"' => return attributeValueQuoted(t, .Double),
-        '\'' => return attributeValueQuoted(t, .Single),
+        '"' => return attributeValueQuoted(t, tag_data, .Double),
+        '\'' => return attributeValueQuoted(t, tag_data, .Single),
         '>' => {
             try t.parseError(.MissingAttributeValue);
-            return try attributeEnd(t);
+            return attributeEnd(t);
         },
         else => {
             t.reconsume();
-            return attributeValueUnquoted(t);
+            return attributeValueUnquoted(t, tag_data);
         },
     };
 }
 
 const QuoteStyle = enum { Single, Double };
 
-fn attributeValueQuoted(t: *Self, comptime quote_style: QuoteStyle) !?AttributeState {
+fn attributeValueQuoted(t: *Self, tag_data: *TagData, comptime quote_style: QuoteStyle) !AttributeState {
     const quote = switch (quote_style) {
         .Single => '\'',
         .Double => '"',
@@ -1177,16 +1172,13 @@ fn attributeValueQuoted(t: *Self, comptime quote_style: QuoteStyle) !?AttributeS
 
     while (try t.next()) |current_input_char| {
         switch (current_input_char) {
-            quote => {
-                try t.finishAttributeValue();
-                break;
-            },
-            '&' => try characterReference(t, IsPartOfAnAttribute.Yes),
+            quote => break tag_data.finishAttributeValue(),
+            '&' => try characterReference(t, tag_data),
             0x00 => {
                 try t.parseError(.UnexpectedNullCharacter);
-                try t.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
+                try tag_data.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
             },
-            else => |c| try t.appendCurrentAttributeValue(c),
+            else => |c| try tag_data.appendCurrentAttributeValue(c),
         }
     } else {
         return try eofInTag(t);
@@ -1197,7 +1189,7 @@ fn attributeValueQuoted(t: *Self, comptime quote_style: QuoteStyle) !?AttributeS
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => return AttributeState.BeforeName,
             '/' => return AttributeState.Slash,
-            '>' => return try attributeEnd(t),
+            '>' => return attributeEnd(t),
             else => {
                 try t.parseError(.MissingWhitespaceBetweenAttributes);
                 t.reconsume();
@@ -1209,38 +1201,37 @@ fn attributeValueQuoted(t: *Self, comptime quote_style: QuoteStyle) !?AttributeS
     }
 }
 
-fn attributeValueUnquoted(t: *Self) !?AttributeState {
+fn attributeValueUnquoted(t: *Self, tag_data: *TagData) !AttributeState {
     while (try t.next()) |current_input_char| switch (current_input_char) {
         '\t', '\n', 0x0C, ' ' => {
-            try t.finishAttributeValue();
-            t.setState(t.state);
+            tag_data.finishAttributeValue();
             return AttributeState.BeforeName;
         },
-        '&' => try characterReference(t, IsPartOfAnAttribute.Yes),
+        '&' => try characterReference(t, tag_data),
         '>' => {
-            try t.finishAttributeValue();
-            return try attributeEnd(t);
+            tag_data.finishAttributeValue();
+            return attributeEnd(t);
         },
         0x00 => {
             try t.parseError(.UnexpectedNullCharacter);
-            try t.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
+            try tag_data.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
         },
         '"', '\'', '<', '=', '`' => |c| {
             try t.parseError(.UnexpectedCharacterInUnquotedAttributeValue);
-            try t.appendCurrentAttributeValue(c);
+            try tag_data.appendCurrentAttributeValue(c);
         },
-        else => |c| try t.appendCurrentAttributeValue(c),
+        else => |c| try tag_data.appendCurrentAttributeValue(c),
     } else {
         return try eofInTag(t);
     }
 }
 
-fn attributeSlash(t: *Self) !?AttributeState {
+fn attributeSlash(t: *Self, tag_data: *TagData) !AttributeState {
     if (try t.next()) |current_input_char| {
         switch (current_input_char) {
             '>' => {
-                t.makeCurrentTagSelfClosing();
-                return try attributeEnd(t);
+                tag_data.self_closing = true;
+                return attributeEnd(t);
             },
             else => {
                 try t.parseError(.UnexpectedSolidusInTag);
@@ -1253,16 +1244,14 @@ fn attributeSlash(t: *Self) !?AttributeState {
     }
 }
 
-fn attributeEnd(t: *Self) !?AttributeState {
-    try t.emitCurrentTag();
+fn attributeEnd(t: *Self) AttributeState {
     t.setState(.Data);
-    return null;
+    return .Done;
 }
 
-fn eofInTag(t: *Self) !?AttributeState {
+fn eofInTag(t: *Self) !AttributeState {
     try t.parseError(.EOFInTag);
-    try t.emitEOF();
-    return null;
+    return .Eof;
 }
 
 const CommentState = enum {
