@@ -68,14 +68,8 @@ const TREAT_AS_ANYTHING_ELSE = '\u{FFFF}';
 
 state: State = .Data,
 input: InputStream,
-current_tag_name: ArrayListUnmanaged(u8) = .{},
-current_tag_attributes: Attributes = .{},
-current_tag_self_closing: bool = false,
-current_tag_type: enum { Start, End } = undefined,
 last_start_tag_name: []u8 = &[_]u8{},
 generic_buffer: ArrayListUnmanaged(u8) = .{},
-current_attribute_value_result_location: ?*[]const u8 = null,
-current_comment_data: ArrayListUnmanaged(u8) = .{},
 temp_buffer: ArrayListUnmanaged(u21) = .{},
 adjusted_current_node_is_not_in_html_namespace: bool = false,
 
@@ -114,16 +108,8 @@ pub fn initState(
 
 /// Free the memory owned by the tokenizer.
 pub fn deinit(self: *Self) void {
-    self.current_tag_name.deinit(self.allocator);
-    var attr_it = self.current_tag_attributes.iterator();
-    while (attr_it.next()) |entry| {
-        self.allocator.free(entry.key_ptr.*);
-        self.allocator.free(entry.value_ptr.*);
-    }
-    self.current_tag_attributes.deinit(self.allocator);
     self.allocator.free(self.last_start_tag_name);
     self.generic_buffer.deinit(self.allocator);
-    self.current_comment_data.deinit(self.allocator);
     self.temp_buffer.deinit(self.allocator);
 }
 
@@ -483,34 +469,19 @@ fn processInput(t: *Self) !void {
             }
         },
         .ScriptData => return scriptData(t),
-        .CDATASection => while (true) {
-            if (try t.next()) |char| switch (char) {
+        .CDATASection =>  {
+            while (try t.next()) |char| switch (char) {
                 ']' => {
-                    // CDATASectionBracket
-                    if ((try t.nextIgnoreEof()) != ']') {
+                    if (consumeCharsIfEql(t, "]>")) {
+                        return t.setState(.Data);
+                    } else {
                         try t.emitCharacter(']');
-                        t.back();
-                        continue;
-                    }
-
-                    // CDATASectionEnd
-                    while (true) {
-                        switch (try t.nextIgnoreEof()) {
-                            ']' => try t.emitCharacter(']'),
-                            '>' => return t.setState(.Data),
-                            else => {
-                                try t.emitString("]]");
-                                t.back();
-                                break;
-                            },
-                        }
                     }
                 },
                 else => |c| try t.emitCharacter(c),
             } else {
                 try t.parseError(.EOFInCDATA);
                 try t.emitEOF();
-                return;
             }
         },
     }
