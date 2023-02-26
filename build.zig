@@ -48,20 +48,20 @@ pub fn build(builder: *std.build.Builder) void {
     const example_step = builder.step("example", "Run an example program");
     example_step.dependOn(&example_run.step);
 
-    const run_generate_character_reference_data = genCharacterReferenceDataRunStep(builder);
-    const generate_character_reference_data_step = builder.step("generate-character-reference-data", "Generate the named character reference data");
-    generate_character_reference_data_step.dependOn(&run_generate_character_reference_data.step);
+    const run_generate_named_characters = genNamedCharactersRunStep(builder);
+    const generate_named_characters_step = builder.step("generate-named-characters", "Generate the named character reference data");
+    generate_named_characters_step.dependOn(&run_generate_named_characters.step);
 }
 
-fn genCharacterReferenceDataRunStep(builder: *std.build.Builder) *std.build.RunStep {
+fn genNamedCharactersRunStep(builder: *std.build.Builder) *std.build.RunStep {
     const json_data = builder.pathFromRoot("tools/character_reference_data.json");
-    const path = builder.pathFromRoot("source/character_reference_data.zig");
-    const generate_character_reference_data = builder.addExecutable(
-        "generate_character_reference_data",
-        "tools/generate_character_reference_data.zig",
+    const path = builder.pathFromRoot("source/named_characters.zig");
+    const generate_named_characters = builder.addExecutable(
+        "generate_named_characters",
+        "tools/generate_named_characters.zig",
     );
-    generate_character_reference_data.setBuildMode(.Debug);
-    const run_generate_character_reference_data = generate_character_reference_data.run();
-    run_generate_character_reference_data.addArgs(&.{ json_data, path });
-    return run_generate_character_reference_data;
+    generate_named_characters.setBuildMode(.Debug);
+    const run_generate_named_characters = generate_named_characters.run();
+    run_generate_named_characters.addArgs(&.{ json_data, path });
+    return run_generate_named_characters;
 }

@@ -48,7 +48,7 @@ test "Tokenizer usage" {
 
 const Self = @This();
 const rem = @import("../rem.zig");
-const named_characters_data = @import("./character_reference_data.zig");
+const named_characters = @import("./named_characters.zig");
 const Token = rem.token.Token;
 const Attributes = rem.token.TokenStartTag.Attributes;
 const ParseError = rem.Parser.ParseError;
@@ -469,7 +469,7 @@ fn processInput(t: *Self) !void {
             }
         },
         .ScriptData => return scriptData(t),
-        .CDATASection =>  {
+        .CDATASection => {
             while (try t.next()) |char| switch (char) {
                 ']' => {
                     if (consumeCharsIfEql(t, "]>")) {
@@ -535,30 +535,30 @@ fn namedCharacterReference(t: *Self, tag_data: ?*TagData) !void {
     }
 }
 
-fn findNamedCharacterReference(self: *Self) !named_characters_data.Value {
-    var node = named_characters_data.root;
+fn findNamedCharacterReference(self: *Self) !named_characters.Value {
+    var last_index_with_value = named_characters.root_index;
+    var entry = named_characters.root_index.entry();
     var character_reference_consumed_codepoints_count: usize = 1;
-    var last_matched_named_character_value = named_characters_data.Value{ null, null };
+
     while (true) {
         const character = self.nextNoErrorCheck() orelse {
             self.back();
             break;
         };
         try self.appendTempBuffer(character);
-        const key_index = node.find(character) orelse break;
+        const child_index = entry.findChild(character) orelse break;
+        entry = child_index.entry();
 
-        if (node.child(key_index)) |c_node| {
-            const new_value = node.value(key_index);
-            if (new_value[0] != null) {
+        if (entry.has_children) {
+            if (entry.has_value) {
                 // Partial match found.
                 character_reference_consumed_codepoints_count = self.temp_buffer.items.len;
-                last_matched_named_character_value = new_value;
+                last_index_with_value = child_index;
             }
-            node = c_node;
         } else {
             // Complete match found.
             character_reference_consumed_codepoints_count = self.temp_buffer.items.len;
-            last_matched_named_character_value = node.value(key_index);
+            last_index_with_value = child_index;
             break;
         }
     }
@@ -570,7 +570,7 @@ fn findNamedCharacterReference(self: *Self) !named_characters_data.Value {
 
     // There is no need to check the consumed characters for errors (controls, surrogates, noncharacters)
     // beacuse we've just determined that they form a valid character reference.
-    return last_matched_named_character_value;
+    return last_index_with_value.value();
 }
 
 fn ambiguousAmpersand(t: *Self, tag_data: ?*TagData) !void {
