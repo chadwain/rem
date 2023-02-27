@@ -257,24 +257,13 @@ pub fn deinit(self: *Self) void {
 /// Runs the tokenization and tree construction steps to completion.
 pub fn run(self: *Self) !void {
     const tokens: *ArrayList(Token) = self.tokenizer.tokens;
-    while (self.tokenizer.run() catch |err| switch (err) {
-        error.AbortParsing => blk: {
-            self.abort();
-            break :blk false;
-        },
-        error.OutOfMemory,
-        error.Utf8CannotEncodeSurrogateHalf,
-        error.CodepointTooLarge,
-        => |e| return e,
-    }) {
+    var tokenizer_run_frame = async self.tokenizer.run();
+    while (self.tokenizer.frame) |frame| {
         if (tokens.items.len > 0) {
             var constructor_result: TreeConstructor.RunResult = undefined;
             for (tokens.items) |*token, i| {
                 constructor_result = self.constructor.run(token.*) catch |err| switch (err) {
-                    error.AbortParsing => {
-                        self.abort();
-                        break;
-                    },
+                    error.AbortParsing => return self.abort(),
                     error.OutOfMemory,
                     error.Utf8CannotEncodeSurrogateHalf,
                     error.CodepointTooLarge,
@@ -289,6 +278,15 @@ pub fn run(self: *Self) !void {
             if (constructor_result.new_tokenizer_state) |state| self.tokenizer.setState(state);
             self.tokenizer.setAdjustedCurrentNodeIsNotInHtmlNamespace(constructor_result.adjusted_current_node_is_not_in_html_namespace);
         }
+        resume frame;
+    } else {
+        nosuspend await tokenizer_run_frame catch |err| switch (err) {
+            error.AbortParsing => self.abort(),
+            error.OutOfMemory,
+            error.Utf8CannotEncodeSurrogateHalf,
+            error.CodepointTooLarge,
+            => |e| return e,
+        };
     }
 }
 

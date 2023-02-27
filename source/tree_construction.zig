@@ -55,7 +55,8 @@ test "Tree constructor usage" {
     var constructor = TreeConstructor.init(&dom, document, allocator, &error_handler, .{});
     defer constructor.deinit();
 
-    while (try tokenizer.run()) {
+    var tokenizer_run_frame = async tokenizer.run();
+    while (tokenizer.frame) |frame| {
         if (tokens.items.len > 0) {
             var constructor_result: TreeConstructor.RunResult = undefined;
             for (tokens.items) |*token| {
@@ -67,7 +68,9 @@ test "Tree constructor usage" {
             if (constructor_result.new_tokenizer_state) |state| tokenizer.setState(state);
             tokenizer.setAdjustedCurrentNodeIsNotInHtmlNamespace(constructor_result.adjusted_current_node_is_not_in_html_namespace);
         }
+        resume frame;
     }
+    try nosuspend await tokenizer_run_frame;
 }
 
 // TODO: Use decoded Unicode codepoints ([]u21) for everything

@@ -187,7 +187,8 @@ fn runTest(
     defer tokenizer.deinit();
     tokenizer.last_start_tag_name = try allocator.dupe(u8, last_start_tag_name);
 
-    while (try tokenizer.run()) {}
+    _ = async tokenizer.run();
+    while (tokenizer.frame) |frame| resume frame;
 
     try std.testing.expect(all_tokens.items[all_tokens.items.len - 1] == .eof);
     std.testing.expectEqual(expected_tokens.len, all_tokens.items.len - 1) catch {

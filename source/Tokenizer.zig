@@ -21,7 +21,9 @@ test "Tokenizer usage" {
     var tokenizer = init(allocator, input, &all_tokens, &error_handler);
     defer tokenizer.deinit();
 
-    while (try tokenizer.run()) {}
+    var run_frame = async tokenizer.run();
+    while (tokenizer.frame) |frame| resume frame;
+    try nosuspend await run_frame;
 
     const expected_tokens = &[8]Token{
         .{ .doctype = .{ .name = null, .public_identifier = null, .system_identifier = null, .force_quirks = true } },
@@ -68,6 +70,7 @@ const TREAT_AS_ANYTHING_ELSE = '\u{FFFF}';
 
 state: State = .Data,
 input: InputStream,
+frame: ?anyframe = null,
 last_start_tag_name: []u8 = &[_]u8{},
 generic_buffer: ArrayListUnmanaged(u8) = .{},
 temp_buffer: ArrayListUnmanaged(u21) = .{},
@@ -114,19 +117,21 @@ pub fn deinit(self: *Self) void {
 }
 
 /// Runs the tokenizer on the given input.
-/// The tokenizer will consume 1 or more characters from input.
-/// It will shrink input by the amount of characters consumed.
-/// It will output 0 or more tokens to the token sink and 0 or more parse errors to the parse error sink.
+/// On each iteration, it will output 0 or more tokens to the token sink and 0 or more parse errors to the parse error sink.
 /// The memory taken up by these tokens and parse errors are owned by the user.
 ///
-/// Between every call to this function, the user must:
+/// Between every suspension of this function, the user must:
 ///     1. Change the tokenizer's state via setState, if appropriate.
 ///     2. Call setAdjustedCurrentNodeIsNotInHtmlNamespace with an appropriate value.
 ///     3. Change the input stream, if appropriate.
-pub fn run(self: *Self) !bool {
-    if (self.reached_eof) return false;
-    try processInput(self);
-    return true;
+pub fn run(self: *Self) !void {
+    defer self.frame = null;
+    while (!self.reached_eof) {
+        try processInput(self);
+        suspend {
+            self.frame = @frame();
+        }
+    }
 }
 
 pub fn setState(self: *Self, new_state: State) void {
