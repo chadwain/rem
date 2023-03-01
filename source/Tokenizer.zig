@@ -308,25 +308,6 @@ fn reconsume(tokenizer: *Tokenizer) void {
     tokenizer.input.reconsume = true;
 }
 
-fn isAppropriateEndTag(tokenizer: *Tokenizer, tag_data: *const TagData) bool {
-    // Looking at the tokenizer logic, it seems that is no way to reach this function without current_tag_name
-    // having at least 1 ASCII character in it. So we don't have to worry about making sure it has non-zero length.
-    //
-    // Notice that this gets called from the states that end in "TagName", and that those states
-    // can only be reached by reconsuming an ASCII character from an associated "TagOpen" state.
-    return std.mem.eql(u8, tokenizer.last_start_tag_name, tag_data.name.items);
-}
-
-fn appendComment(tokenizer: *Tokenizer, character: u21) !void {
-    var code_units: [4]u8 = undefined;
-    const len = try std.unicode.utf8Encode(character, &code_units);
-    try tokenizer.current_comment_data.appendSlice(tokenizer.allocator, code_units[0..len]);
-}
-
-fn appendCommentString(tokenizer: *Tokenizer, comptime string: []const u8) !void {
-    try tokenizer.current_comment_data.appendSlice(tokenizer.allocator, string);
-}
-
 fn appendChar(data: *ArrayList(u8), character: u21) !void {
     var code_units: [4]u8 = undefined;
     const len = try std.unicode.utf8Encode(character, &code_units);
@@ -339,10 +320,6 @@ fn appendCharUnmanaged(data: *ArrayListUnmanaged(u8), allocator: Allocator, char
     try data.appendSlice(allocator, code_units[0..len]);
 }
 
-fn appendString(data: *ArrayList(u8), string: []const u8) !void {
-    try data.appendSlice(string);
-}
-
 fn emitCharacter(tokenizer: *Tokenizer, character: u21) !void {
     try tokenizer.tokens.append(Token{ .character = .{ .data = character } });
 }
@@ -351,16 +328,6 @@ fn emitString(tokenizer: *Tokenizer, comptime string: []const u8) !void {
     for (rem.util.utf8DecodeStringComptime(string)) |character| {
         try emitCharacter(tokenizer, character);
     }
-}
-
-fn emitComment(tokenizer: *Tokenizer) !void {
-    const data = tokenizer.current_comment_data.toOwnedSlice(tokenizer.allocator);
-    errdefer tokenizer.allocator.free(data);
-    try tokenizer.tokens.append(Token{ .comment = .{ .data = data } });
-}
-
-fn emitCommentData(tokenizer: *Tokenizer, comment_data: []const u8) !void {
-    try tokenizer.tokens.append(Token{ .comment = .{ .data = comment_data } });
 }
 
 fn emitEOF(tokenizer: *Tokenizer) !void {
@@ -757,7 +724,7 @@ fn bogusComment(tokenizer: *Tokenizer) !void {
         tokenizer.back();
     }
 
-    try tokenizer.emitCommentData(comment_data.toOwnedSlice(tokenizer.allocator));
+    try tokenizer.emitComment(&comment_data);
 }
 
 const TagData = struct {
@@ -956,6 +923,10 @@ fn nonDataEndTagName(tokenizer: *Tokenizer) !void {
     try tokenizer.emitString("</");
     for (tag_data.name.items) |c| try tokenizer.emitCharacter(c);
     tokenizer.reconsume();
+}
+
+fn isAppropriateEndTag(tokenizer: *Tokenizer, tag_data: *const TagData) bool {
+    return std.mem.eql(u8, tokenizer.last_start_tag_name, tag_data.name.items);
 }
 
 fn tagName(tokenizer: *Tokenizer, start_or_end: TagData.StartOrEnd) !void {
@@ -1189,8 +1160,8 @@ const CommentState = enum {
 };
 
 fn comment(tokenizer: *Tokenizer) !void {
-    var comment_data = ArrayList(u8).init(tokenizer.allocator);
-    errdefer comment_data.deinit();
+    var comment_data = ArrayListUnmanaged(u8){};
+    errdefer comment_data.deinit(tokenizer.allocator);
 
     var state = try commentStart(tokenizer, &comment_data);
     while (true) {
@@ -1202,10 +1173,10 @@ fn comment(tokenizer: *Tokenizer) !void {
         }
     }
 
-    try tokenizer.emitCommentData(comment_data.toOwnedSlice());
+    try tokenizer.emitComment(&comment_data);
 }
 
-fn commentStart(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !CommentState {
+fn commentStart(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !CommentState {
     switch (try tokenizer.nextIgnoreEof()) {
         '-' => {
             // CommentStartDash
@@ -1213,7 +1184,7 @@ fn commentStart(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !CommentSta
                 '-' => return .End,
                 '>' => return try abruptCommentClose(tokenizer),
                 else => {
-                    try comment_data.append('-');
+                    try comment_data.append(tokenizer.allocator, '-');
                     tokenizer.reconsume();
                     return .Normal;
                 },
@@ -1227,15 +1198,15 @@ fn commentStart(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !CommentSta
     }
 }
 
-fn commentNormal(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !CommentState {
+fn commentNormal(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !CommentState {
     while (try tokenizer.next()) |current_input_char| switch (current_input_char) {
         '<' => {
-            try comment_data.append('<');
+            try comment_data.append(tokenizer.allocator, '<');
 
             // CommentLessThanSign
             while (true) switch (try tokenizer.nextIgnoreEof()) {
                 '!' => {
-                    try comment_data.append('!');
+                    try comment_data.append(tokenizer.allocator, '!');
 
                     // CommentLessThanSignBang
                     if ((try tokenizer.nextIgnoreEof()) != '-') {
@@ -1257,7 +1228,7 @@ fn commentNormal(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !CommentSt
                     tokenizer.reconsume();
                     return .End;
                 },
-                '<' => try comment_data.append('<'),
+                '<' => try comment_data.append(tokenizer.allocator, '<'),
                 else => {
                     tokenizer.reconsume();
                     break;
@@ -1267,32 +1238,32 @@ fn commentNormal(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !CommentSt
         '-' => return .EndDash,
         0x00 => {
             try tokenizer.parseError(.UnexpectedNullCharacter);
-            try appendChar(comment_data, REPLACEMENT_CHARACTER);
+            try appendCharUnmanaged(comment_data, tokenizer.allocator, REPLACEMENT_CHARACTER);
         },
-        else => |c| try appendChar(comment_data, c),
+        else => |c| try appendCharUnmanaged(comment_data, tokenizer.allocator, c),
     } else {
         return try eofInComment(tokenizer);
     }
 }
 
-fn commentEndDash(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !CommentState {
+fn commentEndDash(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !CommentState {
     switch ((try tokenizer.next()) orelse return try eofInComment(tokenizer)) {
         '-' => return CommentState.End,
         else => {
-            try comment_data.append('-');
+            try comment_data.append(tokenizer.allocator, '-');
             tokenizer.reconsume();
             return CommentState.Normal;
         },
     }
 }
 
-fn commentEnd(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !CommentState {
+fn commentEnd(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !CommentState {
     while (try tokenizer.next()) |current_input_char| switch (current_input_char) {
         '>' => return .Done,
         '!' => return try commentEndBang(tokenizer, comment_data),
-        '-' => try comment_data.append('-'),
+        '-' => try comment_data.append(tokenizer.allocator, '-'),
         else => {
-            try comment_data.appendSlice("--");
+            try comment_data.appendSlice(tokenizer.allocator, "--");
             tokenizer.reconsume();
             return CommentState.Normal;
         },
@@ -1301,19 +1272,24 @@ fn commentEnd(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !CommentState
     }
 }
 
-fn commentEndBang(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !CommentState {
+fn commentEndBang(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !CommentState {
     switch ((try tokenizer.next()) orelse return try eofInComment(tokenizer)) {
         '-' => {
-            try comment_data.appendSlice("--!");
+            try comment_data.appendSlice(tokenizer.allocator, "--!");
             return CommentState.EndDash;
         },
         '>' => return incorrectlyClosedComment(tokenizer),
         else => {
-            try comment_data.appendSlice("--!");
+            try comment_data.appendSlice(tokenizer.allocator, "--!");
             tokenizer.reconsume();
             return CommentState.Normal;
         },
     }
+}
+
+fn emitComment(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !void {
+    const owned = comment_data.toOwnedSlice(tokenizer.allocator);
+    try tokenizer.tokens.append(Token{ .comment = .{ .data = owned } });
 }
 
 fn eofInComment(tokenizer: *Tokenizer) !CommentState {
