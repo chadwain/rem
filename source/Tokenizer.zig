@@ -201,6 +201,10 @@ fn nextIgnoreEof(tokenizer: *Tokenizer) !u21 {
     return char orelse TREAT_AS_ANYTHING_ELSE;
 }
 
+fn nextIgnoreEofNoErrorCheck(tokenizer: *Tokenizer) u21 {
+    return tokenizer.nextNoErrorCheck() orelse TREAT_AS_ANYTHING_ELSE;
+}
+
 fn peekIgnoreEof(tokenizer: *Tokenizer) !u21 {
     const char = try tokenizer.nextIgnoreEof();
     tokenizer.back();
@@ -438,31 +442,29 @@ fn processInput(tokenizer: *Tokenizer) !void {
 }
 
 fn characterReference(tokenizer: *Tokenizer, tag_data: ?*TagData) !void {
-    var buffer = ArrayListUnmanaged(u21){};
-    defer buffer.deinit(tokenizer.allocator);
-    try buffer.append(tokenizer.allocator, '&');
+    var num_consumed_chars: usize = 1;
 
-    switch (try tokenizer.nextIgnoreEof()) {
+    switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
         '0'...'9', 'A'...'Z', 'a'...'z' => {
             tokenizer.back();
-            return namedCharacterReference(tokenizer, tag_data, &buffer);
+            return namedCharacterReference(tokenizer, tag_data, &num_consumed_chars);
         },
         '#' => {
-            try buffer.append(tokenizer.allocator, '#');
-            return numericCharacterReference(tokenizer, tag_data, &buffer);
+            num_consumed_chars += 1;
+            return numericCharacterReference(tokenizer, tag_data, &num_consumed_chars);
         },
         else => {
             tokenizer.back();
-            return flushCharacterReference(tokenizer, tag_data, &buffer);
+            return flushCharacterReference(tokenizer, tag_data, &num_consumed_chars);
         },
     }
 }
 
-fn namedCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, buffer: *ArrayListUnmanaged(u21)) !void {
-    const chars = try findNamedCharacterReference(tokenizer, buffer);
-    const match_found = chars[0] != null;
+fn namedCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *usize) !void {
+    const result = try findNamedCharacterReference(tokenizer, num_consumed_chars);
+    const match_found = result.chars[0] != null;
     if (match_found) {
-        const historical_reasons = if (tag_data != null and buffer.items[buffer.items.len - 1] != ';')
+        const dont_emit_chars = if (tag_data != null and !result.ends_with_semicolon)
             switch (try tokenizer.peekIgnoreEof()) {
                 '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
                 else => false,
@@ -470,113 +472,120 @@ fn namedCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, buffer: *
         else
             false;
 
-        if (historical_reasons) {
-            return flushCharacterReference(tokenizer, tag_data, buffer);
+        if (dont_emit_chars) {
+            return flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
         } else {
-            if (buffer.items[buffer.items.len - 1] != ';') {
+            if (!result.ends_with_semicolon) {
                 try tokenizer.parseError(.MissingSemicolonAfterCharacterReference);
             }
-            buffer.clearRetainingCapacity();
-            try buffer.append(tokenizer.allocator, chars[0].?);
-            if (chars[1]) |c| try buffer.append(tokenizer.allocator, c);
-            return flushCharacterReference(tokenizer, tag_data, buffer);
+            try characterReferenceEmitCharacter(tokenizer, tag_data, result.chars[0].?);
+            if (result.chars[1]) |second| try characterReferenceEmitCharacter(tokenizer, tag_data, second);
         }
     } else {
-        try flushCharacterReference(tokenizer, tag_data, buffer);
-        return ambiguousAmpersand(tokenizer, tag_data, buffer);
+        try flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
+        return ambiguousAmpersand(tokenizer, tag_data);
     }
 }
 
-fn findNamedCharacterReference(tokenizer: *Tokenizer, buffer: *ArrayListUnmanaged(u21)) !named_characters.Value {
+const FindNamdCharacterReferenceResult = struct {
+    chars: named_characters.Value,
+    ends_with_semicolon: bool,
+};
+
+fn findNamedCharacterReference(tokenizer: *Tokenizer, num_consumed_chars: *usize) !FindNamdCharacterReferenceResult {
     var last_index_with_value = named_characters.root_index;
+    var ends_with_semicolon: bool = false;
+
     var entry = named_characters.root_index.entry();
-    var character_reference_consumed_codepoints_count: usize = 1;
+    var num_pending_chars: usize = 0;
 
     while (true) {
         const character = tokenizer.nextNoErrorCheck() orelse {
             tokenizer.back();
             break;
         };
-        try buffer.append(tokenizer.allocator, character);
+        num_pending_chars += 1;
         const child_index = entry.findChild(character) orelse break;
         entry = child_index.entry();
 
         if (entry.has_children) {
             if (entry.has_value) {
                 // Partial match found.
-                character_reference_consumed_codepoints_count = buffer.items.len;
+                num_consumed_chars.* += num_pending_chars;
+                num_pending_chars = 0;
                 last_index_with_value = child_index;
+                ends_with_semicolon = character == ';';
             }
         } else {
             // Complete match found.
-            character_reference_consumed_codepoints_count = buffer.items.len;
+            num_consumed_chars.* += num_pending_chars;
+            num_pending_chars = 0;
             last_index_with_value = child_index;
+            ends_with_semicolon = character == ';';
             break;
         }
     }
 
-    while (buffer.items.len > character_reference_consumed_codepoints_count) {
+    while (num_pending_chars > 0) : (num_pending_chars -= 1) {
         tokenizer.back();
-        buffer.items.len -= 1;
     }
 
     // There is no need to check the consumed characters for errors (controls, surrogates, noncharacters)
     // beacuse we've just determined that they form a valid character reference.
-    return last_index_with_value.value();
+    return FindNamdCharacterReferenceResult{ .chars = last_index_with_value.value(), .ends_with_semicolon = ends_with_semicolon };
 }
 
-fn ambiguousAmpersand(tokenizer: *Tokenizer, tag_data: ?*TagData, buffer: *ArrayListUnmanaged(u21)) !void {
-    while (true) switch (try tokenizer.nextIgnoreEof()) {
-        '0'...'9', 'A'...'Z', 'a'...'z' => |c| try buffer.append(tokenizer.allocator, c),
+fn ambiguousAmpersand(tokenizer: *Tokenizer, tag_data: ?*TagData) !void {
+    while (true) switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+        '0'...'9', 'A'...'Z', 'a'...'z' => |c| try characterReferenceEmitCharacter(tokenizer, tag_data, c),
         ';' => break try tokenizer.parseError(.UnknownNamedCharacterReference),
         else => break,
     };
 
-    try flushCharacterReference(tokenizer, tag_data, buffer);
-    tokenizer.reconsume();
+    tokenizer.back();
 }
 
-fn numericCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, buffer: *ArrayListUnmanaged(u21)) !void {
+fn numericCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *usize) !void {
     var character_reference_code: u21 = 0;
-    switch (try tokenizer.nextIgnoreEof()) {
-        'x', 'X' => |x| {
-            try buffer.append(tokenizer.allocator, x);
+    switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+        'x', 'X' => {
+            num_consumed_chars.* += 1;
 
             // HexadecimalCharacterReferenceStart
-            switch (try tokenizer.nextIgnoreEof()) {
+            switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
                 '0'...'9', 'A'...'F', 'a'...'f' => {
-                    tokenizer.reconsume();
+                    tokenizer.back();
 
                     // HexadecimalCharacterReference
-                    while (true) switch (try tokenizer.nextIgnoreEof()) {
+                    while (true) switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
                         '0'...'9' => |c| characterReferenceCodeAddDigit(&character_reference_code, 16, decimalCharToNumber(c)),
                         'A'...'F' => |c| characterReferenceCodeAddDigit(&character_reference_code, 16, upperHexCharToNumber(c)),
                         'a'...'f' => |c| characterReferenceCodeAddDigit(&character_reference_code, 16, lowerHexCharToNumber(c)),
                         ';' => break,
                         else => {
                             try tokenizer.parseError(.MissingSemicolonAfterCharacterReference);
-                            break tokenizer.reconsume();
+                            break tokenizer.back();
                         },
                     };
                 },
-                else => return noDigitsInNumericCharacterReference(tokenizer, tag_data, buffer),
+                else => return noDigitsInNumericCharacterReference(tokenizer, tag_data, num_consumed_chars),
             }
         },
         // DecimalCharacterReferenceStart
         '0'...'9' => {
-            tokenizer.reconsume();
+            tokenizer.back();
 
             // DecimalCharacterReference
-            while (true) switch (try tokenizer.nextIgnoreEof()) {
+            while (true) switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
                 '0'...'9' => |c| characterReferenceCodeAddDigit(&character_reference_code, 10, decimalCharToNumber(c)),
                 ';' => break,
                 else => {
                     try tokenizer.parseError(.MissingSemicolonAfterCharacterReference);
-                    break tokenizer.reconsume();
+                    break tokenizer.back();
                 },
             };
         },
-        else => return noDigitsInNumericCharacterReference(tokenizer, tag_data, buffer),
+        else => return noDigitsInNumericCharacterReference(tokenizer, tag_data, num_consumed_chars),
     }
 
     // NumericCharacterReferenceEnd
@@ -666,32 +675,38 @@ fn numericCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, buffer:
         else => {},
     }
 
-    buffer.clearRetainingCapacity();
-    try buffer.append(tokenizer.allocator, character_reference_code);
-    try flushCharacterReference(tokenizer, tag_data, buffer);
+    try characterReferenceEmitCharacter(tokenizer, tag_data, character_reference_code);
 }
 
 fn characterReferenceCodeAddDigit(character_reference_code: *u21, comptime base: comptime_int, digit: u21) void {
     character_reference_code.* = character_reference_code.* *| base +| digit;
 }
 
-fn noDigitsInNumericCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, buffer: *ArrayListUnmanaged(u21)) !void {
+fn noDigitsInNumericCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *const usize) !void {
     try tokenizer.parseError(.AbsenceOfDigitsInNumericCharacterReference);
-    try flushCharacterReference(tokenizer, tag_data, buffer);
-    tokenizer.reconsume();
+    tokenizer.back();
+    try flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
 }
 
-fn flushCharacterReference(tokenizer: *Tokenizer, tag_data_optional: ?*TagData, buffer: *ArrayListUnmanaged(u21)) !void {
-    if (tag_data_optional) |tag_data| {
-        for (buffer.items) |character| {
-            try tag_data.appendCurrentAttributeValue(character);
-        }
-    } else {
-        for (buffer.items) |character| {
-            try tokenizer.emitCharacter(character);
-        }
+fn flushCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *const usize) !void {
+    var i = num_consumed_chars.*;
+    while (i > 0) : (i -= 1) {
+        tokenizer.back();
     }
-    buffer.clearRetainingCapacity();
+
+    i = num_consumed_chars.*;
+    while (i > 0) : (i -= 1) {
+        const character = tokenizer.nextNoErrorCheck().?;
+        try characterReferenceEmitCharacter(tokenizer, tag_data, character);
+    }
+}
+
+fn characterReferenceEmitCharacter(tokenizer: *Tokenizer, tag_data: ?*TagData, character: u21) !void {
+    if (tag_data) |td| {
+        try td.appendCurrentAttributeValue(character);
+    } else {
+        try tokenizer.emitCharacter(character);
+    }
 }
 
 fn markupDeclarationOpen(tokenizer: *Tokenizer) !void {
@@ -711,24 +726,6 @@ fn markupDeclarationOpen(tokenizer: *Tokenizer) !void {
         try tokenizer.parseError(.IncorrectlyOpenedComment);
         return bogusComment(tokenizer);
     }
-}
-
-fn bogusComment(tokenizer: *Tokenizer) !void {
-    var comment_data = ArrayListUnmanaged(u8){};
-    defer comment_data.deinit(tokenizer.allocator);
-
-    while (try tokenizer.next()) |char| switch (char) {
-        '>' => break,
-        0x00 => {
-            try tokenizer.parseError(.UnexpectedNullCharacter);
-            try appendCharUnmanaged(&comment_data, tokenizer.allocator, REPLACEMENT_CHARACTER);
-        },
-        else => |c| try appendCharUnmanaged(&comment_data, tokenizer.allocator, c),
-    } else {
-        tokenizer.back();
-    }
-
-    try tokenizer.emitComment(&comment_data);
 }
 
 const TagData = struct {
@@ -1165,7 +1162,7 @@ const CommentState = enum {
 
 fn comment(tokenizer: *Tokenizer) !void {
     var comment_data = ArrayListUnmanaged(u8){};
-    errdefer comment_data.deinit(tokenizer.allocator);
+    defer comment_data.deinit(tokenizer.allocator);
 
     var state = try commentStart(tokenizer, &comment_data);
     while (true) {
@@ -1289,6 +1286,24 @@ fn commentEndBang(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) 
             return CommentState.Normal;
         },
     }
+}
+
+fn bogusComment(tokenizer: *Tokenizer) !void {
+    var comment_data = ArrayListUnmanaged(u8){};
+    defer comment_data.deinit(tokenizer.allocator);
+
+    while (try tokenizer.next()) |char| switch (char) {
+        '>' => break,
+        0x00 => {
+            try tokenizer.parseError(.UnexpectedNullCharacter);
+            try appendCharUnmanaged(&comment_data, tokenizer.allocator, REPLACEMENT_CHARACTER);
+        },
+        else => |c| try appendCharUnmanaged(&comment_data, tokenizer.allocator, c),
+    } else {
+        tokenizer.back();
+    }
+
+    try tokenizer.emitComment(&comment_data);
 }
 
 fn emitComment(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !void {
