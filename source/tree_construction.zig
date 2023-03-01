@@ -111,6 +111,7 @@ pub const TreeConstructor = struct {
     frameset_ok: FramesetOk = .ok,
     foster_parenting: bool = false,
     new_tokenizer_state: ?Tokenizer.State = null,
+    new_tokenizer_start_tag_name: []const u8 = undefined,
 
     const FramesetOk = enum {
         ok,
@@ -124,6 +125,7 @@ pub const TreeConstructor = struct {
 
     pub const RunResult = struct {
         new_tokenizer_state: ?Tokenizer.State = null,
+        new_tokenizer_start_tag_name: []const u8 = undefined,
         adjusted_current_node_is_not_in_html_namespace: bool = undefined,
     };
 
@@ -173,7 +175,9 @@ pub const TreeConstructor = struct {
         }
 
         result.new_tokenizer_state = self.new_tokenizer_state;
+        result.new_tokenizer_start_tag_name = self.new_tokenizer_start_tag_name;
         self.new_tokenizer_state = null;
+        self.new_tokenizer_start_tag_name = undefined;
 
         result.adjusted_current_node_is_not_in_html_namespace = self.open_elements.items.len > 0 and
             adjustedCurrentNode(self).namespace() != .html;
@@ -340,8 +344,9 @@ fn stop(c: *TreeConstructor) void {
     // std.debug.print("Stopped parsing.", .{});
 }
 
-fn setTokenizerState(c: *TreeConstructor, state: Tokenizer.State) void {
+fn setTokenizerState(c: *TreeConstructor, state: Tokenizer.State, element_type: ElementType) void {
     c.new_tokenizer_state = state;
+    c.new_tokenizer_start_tag_name = element_type.toLocalName().?;
 }
 
 fn dispatcher(c: *TreeConstructor, token: Token) !void {
@@ -666,7 +671,7 @@ fn inHeadStartTagScript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
     try c.open_elements.append(c.allocator, element);
 
     // Step 8
-    setTokenizerState(c, .ScriptData);
+    setTokenizerState(c, .ScriptData, .html_script);
 
     // Step 9
     // Step 10
@@ -1033,7 +1038,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     // TODO: Once a start tag with the tag name "plaintext" has been seen, that will be
                     // the last token ever seen other than character tokens (and the end-of-file token),
                     // because there is no way to switch out of the PLAINTEXT state.
-                    setTokenizerState(c, .PLAINTEXT);
+                    setTokenizerState(c, .PLAINTEXT, .html_plaintext);
                 },
                 .html_button => {
                     if (hasElementInScope(c, ElementType.html_button)) {
@@ -1144,7 +1149,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 .html_textarea => {
                     _ = try insertHtmlElementForTheToken(c, start_tag, token_element_type);
                     c.ignore_next_lf_token = true;
-                    setTokenizerState(c, .RCDATA);
+                    setTokenizerState(c, .RCDATA, .html_textarea);
                     c.frameset_ok = .not_ok;
                     changeToAndSetOriginalInsertionMode(c, .Text, c.insertion_mode);
                 },
@@ -2746,8 +2751,8 @@ fn acknowledgeSelfClosingFlag(c: *TreeConstructor) void {
 fn textParsingAlgorithm(variant: enum { RAWTEXT, RCDATA }, c: *TreeConstructor, start_tag: TokenStartTag, element_type: ElementType) !void {
     _ = try insertHtmlElementForTheToken(c, start_tag, element_type);
     switch (variant) {
-        .RAWTEXT => setTokenizerState(c, .RAWTEXT),
-        .RCDATA => setTokenizerState(c, .RCDATA),
+        .RAWTEXT => setTokenizerState(c, .RAWTEXT, element_type),
+        .RCDATA => setTokenizerState(c, .RCDATA, element_type),
     }
     changeToAndSetOriginalInsertionMode(c, .Text, c.insertion_mode);
 }

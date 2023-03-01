@@ -71,7 +71,7 @@ const TREAT_AS_ANYTHING_ELSE = '\u{FFFF}';
 state: State = .Data,
 input: InputStream,
 frame: ?anyframe = null,
-last_start_tag_name: []u8 = &[_]u8{},
+last_start_tag_name: []const u8 = undefined,
 adjusted_current_node_is_not_in_html_namespace: bool = false,
 
 reached_eof: bool = false,
@@ -109,7 +109,7 @@ pub fn initState(
 
 /// Free the memory owned by the tokenizer.
 pub fn deinit(tokenizer: *Tokenizer) void {
-    tokenizer.allocator.free(tokenizer.last_start_tag_name);
+    _ = tokenizer;
 }
 
 /// Runs the tokenizer on the given input.
@@ -132,6 +132,10 @@ pub fn run(tokenizer: *Tokenizer) !void {
 
 pub fn setState(tokenizer: *Tokenizer, new_state: State) void {
     tokenizer.state = new_state;
+}
+
+pub fn setLastStartTagName(tokenizer: *Tokenizer, name: []const u8) void {
+    tokenizer.last_start_tag_name = name;
 }
 
 pub fn setAdjustedCurrentNodeIsNotInHtmlNamespace(tokenizer: *Tokenizer, value: bool) void {
@@ -798,8 +802,6 @@ fn emitTag(tokenizer: *Tokenizer, tag_data: *TagData) !void {
 
     switch (tag_data.start_or_end) {
         .Start => {
-            tokenizer.last_start_tag_name = try tokenizer.allocator.realloc(tokenizer.last_start_tag_name, name.len);
-            std.mem.copy(u8, tokenizer.last_start_tag_name, name);
             const token = Token{ .start_tag = .{
                 .name = name,
                 .attributes = tag_data.attributes,
@@ -823,6 +825,8 @@ fn emitTag(tokenizer: *Tokenizer, tag_data: *TagData) !void {
             if (tag_data.self_closing) {
                 try tokenizer.parseError(.EndTagWithTrailingSolidus);
             }
+
+            tokenizer.last_start_tag_name = undefined;
 
             try tokenizer.tokens.append(Token{ .end_tag = .{
                 .name = name,

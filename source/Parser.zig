@@ -275,7 +275,10 @@ pub fn run(self: *Self) !void {
             }
             tokens.clearRetainingCapacity();
 
-            if (constructor_result.new_tokenizer_state) |state| self.tokenizer.setState(state);
+            if (constructor_result.new_tokenizer_state) |state| {
+                self.tokenizer.setState(state);
+                self.tokenizer.setLastStartTagName(constructor_result.new_tokenizer_start_tag_name);
+            }
             self.tokenizer.setAdjustedCurrentNodeIsNotInHtmlNamespace(constructor_result.adjusted_current_node_is_not_in_html_namespace);
         }
         resume frame;

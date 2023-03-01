@@ -185,7 +185,7 @@ fn runTest(
 
     var tokenizer = Tokenizer.initState(allocator, input,  initial_state, &all_tokens, &error_handler);
     defer tokenizer.deinit();
-    tokenizer.last_start_tag_name = try allocator.dupe(u8, last_start_tag_name);
+    tokenizer.setLastStartTagName(last_start_tag_name);
 
     _ = async tokenizer.run();
     while (tokenizer.frame) |frame| resume frame;
