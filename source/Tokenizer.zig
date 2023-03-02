@@ -159,7 +159,7 @@ fn undo(tokenizer: *Tokenizer) void {
     }
 
     const previous = tokenizer.input.chars[tokenizer.input.position - 1];
-    if (previous == '\n' and tokenizer.input.position > 2 and tokenizer.input.chars[tokenizer.input.position - 2] == '\r') {
+    if (previous == '\n' and tokenizer.input.position >= 2 and tokenizer.input.chars[tokenizer.input.position - 2] == '\r') {
         tokenizer.input.position -= 2;
     } else {
         tokenizer.input.position -= 1;
