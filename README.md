@@ -6,7 +6,7 @@ rem is an HTML5 parser written in [Zig](https://ziglang.org).
 - [x] An HTML5 parser consisting of a tokenizer (complete) and a tree constructor (works "well enough")
 - [x] A minimal DOM implementation
 - [x] HTML fragment parsing
-- [x] Tested by [html5lib-tests](https://github.com/chwayne/html5lib-tests)
+- [x] Tested by [html5lib-tests](https://github.com/chadwain/html5lib-tests)
 
 ### Things to be improved
 - [ ] Better DOM functionality
@@ -24,9 +24,8 @@ rem is still a work in progress. Not all the features of a fully-capable HTML5 p
 ## Get the code
 Clone the repository like this:
 ```
-git clone --recursive --config core.autocrlf=false https://github.com/chwayne/rem.git
+git clone --recursive --config core.autocrlf=false https://github.com/chadwain/rem.git
 ```
-There is also a [GitLab mirror](https://gitlab.com/chwayne/rem).
 
 There are no dependencies other than a Zig compiler. You should use the latest version of Zig that is available.
 
@@ -82,7 +81,7 @@ The expected results are as follows:
 
 ## License
 ### GPL-3.0-only
-Copyright (C) 2021-2022 Chadwain Holness
+Copyright (C) 2021-2023 Chadwain Holness
 
 rem is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 3.
 
