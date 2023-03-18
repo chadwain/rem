@@ -156,14 +156,14 @@ fn render(node: *Node, al: Allocator) ![]u8 {
         \\    .fields = &.{
         \\        .{
         \\            .name = "0",
-        \\            .type = ?u21,
+        \\            .field_type = ?u21,
         \\            .default_value = null,
         \\            .is_comptime = false,
         \\            .alignment = @alignOf(?u21),
         \\        },
         \\        .{
         \\            .name = "1",
-        \\            .type = ?u21,
+        \\            .field_type = ?u21,
         \\            .default_value = null,
         \\            .is_comptime = false,
         \\            .alignment = @alignOf(?u21),

@@ -27,7 +27,7 @@ Clone the repository like this:
 git clone --recursive --config core.autocrlf=false https://github.com/chadwain/rem.git
 ```
 
-There are no dependencies other than a Zig compiler. You should use the latest version of Zig that is available.
+There are no dependencies other than a Zig compiler. Note that this library is only compatible with Zig version 0.10.1.
 
 ## Use the code
 Here's an example of using the parser. You can see the output of this program by running `zig build example`.
