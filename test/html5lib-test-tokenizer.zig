@@ -38,6 +38,7 @@ const Token = rem.token.Token;
 const AttributeSet = rem.token.AttributeSet;
 const Tokenizer = rem.Tokenizer;
 const TokenizerState = Tokenizer.State;
+const LastStartTag = Tokenizer.LastStartTag;
 const ParseError = rem.Parser.ParseError;
 const ErrorHandler = rem.Parser.ErrorHandler;
 
@@ -150,10 +151,13 @@ fn runTestFile(file_path: []const u8) !void {
             }
         };
         defer expected_errors.deinit();
-        const last_start_tag_name = if (test_obj.Object.get("lastStartTag")) |lastStartTagObj| lastStartTagObj.String else "";
+        const last_start_tag = blk: {
+            const string = if (test_obj.Object.get("lastStartTag")) |lastStartTagObj| lastStartTagObj.String else break :blk null;
+            break :blk LastStartTag.fromString(string) orelse std.debug.panic("Unrecognized value for last_start_tag_name: \"{s}\"", .{string});
+        };
 
         for (states[0..num_states]) |state| {
-            runTest(gpa_allocator, input, expected_tokens.items, expected_errors.items, state, last_start_tag_name) catch |err| {
+            runTest(gpa_allocator, input, expected_tokens.items, expected_errors.items, state, last_start_tag) catch |err| {
                 std.debug.print("Test \"{s}\" with initial state \"{s}\" failed\nInput: \"{s}\"\n", .{ description, @tagName(state), input_raw });
                 return err;
             };
@@ -172,7 +176,7 @@ fn runTest(
     expected_tokens: []Token,
     expected_errors: []ErrorInfo,
     initial_state: TokenizerState,
-    last_start_tag_name: []const u8,
+    last_start_tag: ?LastStartTag,
 ) !void {
     var all_tokens = ArrayList(Token).init(allocator);
     defer {
@@ -185,7 +189,8 @@ fn runTest(
 
     var tokenizer = Tokenizer.initState(allocator, input,  initial_state, &all_tokens, &error_handler);
     defer tokenizer.deinit();
-    tokenizer.setLastStartTagName(last_start_tag_name);
+
+    if (last_start_tag) |lst| tokenizer.setLastStartTag(lst);
 
     _ = async tokenizer.run();
     while (tokenizer.frame) |frame| resume frame;

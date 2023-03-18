@@ -111,7 +111,7 @@ pub const TreeConstructor = struct {
     frameset_ok: FramesetOk = .ok,
     foster_parenting: bool = false,
     new_tokenizer_state: ?Tokenizer.State = null,
-    new_tokenizer_start_tag_name: []const u8 = undefined,
+    new_tokenizer_last_start_tag: Tokenizer.LastStartTag = undefined,
 
     const FramesetOk = enum {
         ok,
@@ -125,7 +125,7 @@ pub const TreeConstructor = struct {
 
     pub const RunResult = struct {
         new_tokenizer_state: ?Tokenizer.State = null,
-        new_tokenizer_start_tag_name: []const u8 = undefined,
+        new_tokenizer_last_start_tag: Tokenizer.LastStartTag = undefined,
         adjusted_current_node_is_not_in_html_namespace: bool = undefined,
     };
 
@@ -175,9 +175,9 @@ pub const TreeConstructor = struct {
         }
 
         result.new_tokenizer_state = self.new_tokenizer_state;
-        result.new_tokenizer_start_tag_name = self.new_tokenizer_start_tag_name;
+        result.new_tokenizer_last_start_tag = self.new_tokenizer_last_start_tag;
         self.new_tokenizer_state = null;
-        self.new_tokenizer_start_tag_name = undefined;
+        self.new_tokenizer_last_start_tag = undefined;
 
         result.adjusted_current_node_is_not_in_html_namespace = self.open_elements.items.len > 0 and
             adjustedCurrentNode(self).namespace() != .html;
@@ -344,9 +344,9 @@ fn stop(c: *TreeConstructor) void {
     // std.debug.print("Stopped parsing.", .{});
 }
 
-fn setTokenizerState(c: *TreeConstructor, state: Tokenizer.State, element_type: ElementType) void {
+fn setTokenizerState(c: *TreeConstructor, state: Tokenizer.State, comptime element_type: ElementType) void {
     c.new_tokenizer_state = state;
-    c.new_tokenizer_start_tag_name = element_type.toLocalName().?;
+    c.new_tokenizer_last_start_tag = comptime Tokenizer.LastStartTag.fromString(element_type.toLocalName().?).?;
 }
 
 fn dispatcher(c: *TreeConstructor, token: Token) !void {
@@ -569,7 +569,8 @@ fn inHead(c: *TreeConstructor, token: Token) !void {
                 .html_meta => try inHeadStartTagMeta(c, start_tag),
                 .html_title => try inHeadStartTagTitle(c, start_tag),
                 .html_noscript => try inHeadStartTagNoscript(c, start_tag),
-                .html_noframes, .html_style => try inHeadStartTagNoframesStyle(c, start_tag, token_element_type),
+                .html_noframes => try inHeadStartTagNoframesStyle(c, start_tag, .html_noframes),
+                .html_style => try inHeadStartTagNoframesStyle(c, start_tag, .html_style),
                 .html_script => try inHeadStartTagScript(c, start_tag),
                 .html_template => try inHeadStartTagTemplate(c, start_tag),
                 .html_head => {
@@ -641,7 +642,7 @@ fn inHeadStartTagTitle(c: *TreeConstructor, start_tag: TokenStartTag) !void {
     try textParsingAlgorithm(.RCDATA, c, start_tag, .html_title);
 }
 
-fn inHeadStartTagNoframesStyle(c: *TreeConstructor, start_tag: TokenStartTag, element_type: ElementType) !void {
+fn inHeadStartTagNoframesStyle(c: *TreeConstructor, start_tag: TokenStartTag, comptime element_type: ElementType) !void {
     try textParsingAlgorithm(.RAWTEXT, c, start_tag, element_type);
 }
 
@@ -731,7 +732,8 @@ fn inHeadNoscript(c: *TreeConstructor, token: Token) !void {
                 .html_html => try inBodyStartTagHtml(c, start_tag),
                 .html_basefont, .html_bgsound, .html_link => try inHeadStartTagBaseBasefontBgsoundLink(c, start_tag, token_element_type),
                 .html_meta => try inHeadStartTagMeta(c, start_tag),
-                .html_noframes, .html_style => try inHeadStartTagNoframesStyle(c, start_tag, token_element_type),
+                .html_noframes => try inHeadStartTagNoframesStyle(c, start_tag, .html_noframes),
+                .html_style => try inHeadStartTagNoframesStyle(c, start_tag, .html_style),
                 .html_head, .html_noscript => {
                     try parseError(c, .TreeConstructionError);
                     // Ignore the token.
@@ -818,7 +820,8 @@ fn afterHead(c: *TreeConstructor, token: Token) !void {
                     switch (token_element_type) {
                         .html_base, .html_basefont, .html_bgsound, .html_link => try inHeadStartTagBaseBasefontBgsoundLink(c, start_tag, token_element_type),
                         .html_meta => try inHeadStartTagMeta(c, start_tag),
-                        .html_noframes, .html_style => try inHeadStartTagNoframesStyle(c, start_tag, token_element_type),
+                        .html_noframes => try inHeadStartTagNoframesStyle(c, start_tag, .html_noframes),
+                        .html_style => try inHeadStartTagNoframesStyle(c, start_tag, .html_style),
                         .html_script => try inHeadStartTagScript(c, start_tag),
                         .html_template => try inHeadStartTagTemplate(c, start_tag),
                         .html_title => try inHeadStartTagTitle(c, start_tag),
@@ -871,7 +874,8 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 .html_html => try inBodyStartTagHtml(c, start_tag),
                 .html_base, .html_basefont, .html_bgsound, .html_link => try inHeadStartTagBaseBasefontBgsoundLink(c, start_tag, token_element_type),
                 .html_meta => try inHeadStartTagMeta(c, start_tag),
-                .html_noframes, .html_style => try inHeadStartTagNoframesStyle(c, start_tag, token_element_type),
+                .html_noframes => try inHeadStartTagNoframesStyle(c, start_tag, .html_noframes),
+                .html_style => try inHeadStartTagNoframesStyle(c, start_tag, .html_style),
                 .html_script => try inHeadStartTagScript(c, start_tag),
                 .html_template => try inHeadStartTagTemplate(c, start_tag),
                 .html_title => try inHeadStartTagTitle(c, start_tag),
@@ -1160,13 +1164,13 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                     }
                     try reconstructActiveFormattingElements(c);
                     c.frameset_ok = .not_ok;
-                    try textParsingAlgorithm(.RAWTEXT, c, start_tag, token_element_type);
+                    try textParsingAlgorithm(.RAWTEXT, c, start_tag, .html_xmp);
                 },
                 .html_iframe => {
                     c.frameset_ok = .not_ok;
-                    try textParsingAlgorithm(.RAWTEXT, c, start_tag, token_element_type);
+                    try textParsingAlgorithm(.RAWTEXT, c, start_tag, .html_iframe);
                 },
-                .html_noembed => try textParsingAlgorithm(.RAWTEXT, c, start_tag, token_element_type),
+                .html_noembed => try textParsingAlgorithm(.RAWTEXT, c, start_tag, .html_noembed),
                 .html_noscript => try inBodyStartTagNoscript(c, start_tag),
                 .html_select => {
                     try reconstructActiveFormattingElements(c);
@@ -1653,7 +1657,7 @@ fn inTable(c: *TreeConstructor, token: Token) !void {
                         reprocess(c);
                     }
                 },
-                .html_style => try inHeadStartTagNoframesStyle(c, start_tag, token_element_type),
+                .html_style => try inHeadStartTagNoframesStyle(c, start_tag, .html_style),
                 .html_script => try inHeadStartTagScript(c, start_tag),
                 .html_template => try inHeadStartTagTemplate(c, start_tag),
                 .html_input => {
@@ -2281,7 +2285,8 @@ fn inTemplate(c: *TreeConstructor, token: Token) !void {
             if (ElementType.fromStringHtml(start_tag.name)) |token_element_type| switch (token_element_type) {
                 .html_base, .html_basefont, .html_bgsound, .html_link => try inHeadStartTagBaseBasefontBgsoundLink(c, start_tag, token_element_type),
                 .html_meta => try inHeadStartTagMeta(c, start_tag),
-                .html_noframes, .html_style => try inHeadStartTagNoframesStyle(c, start_tag, token_element_type),
+                .html_noframes => try inHeadStartTagNoframesStyle(c, start_tag, .html_noframes),
+                .html_style => try inHeadStartTagNoframesStyle(c, start_tag, .html_style),
                 .html_script => try inHeadStartTagScript(c, start_tag),
                 .html_template => try inHeadStartTagTemplate(c, start_tag),
                 .html_title => try inHeadStartTagTitle(c, start_tag),
@@ -2392,7 +2397,7 @@ fn inFrameset(c: *TreeConstructor, token: Token) !void {
                     _ = c.open_elements.pop();
                     acknowledgeSelfClosingFlag(c);
                 },
-                .html_noframes => try inHeadStartTagNoframesStyle(c, start_tag, token_element_type),
+                .html_noframes => try inHeadStartTagNoframesStyle(c, start_tag, .html_noframes),
                 else => try inFramesetAnythingElse(c),
             } else {
                 try inFramesetAnythingElse(c);
@@ -2748,7 +2753,9 @@ fn acknowledgeSelfClosingFlag(c: *TreeConstructor) void {
     c.self_closing_flag_acknowledged = true;
 }
 
-fn textParsingAlgorithm(variant: enum { RAWTEXT, RCDATA }, c: *TreeConstructor, start_tag: TokenStartTag, element_type: ElementType) !void {
+const RawtextOrRcdata = enum { RAWTEXT, RCDATA };
+
+fn textParsingAlgorithm(variant: RawtextOrRcdata, c: *TreeConstructor, start_tag: TokenStartTag, comptime element_type: ElementType) !void {
     _ = try insertHtmlElementForTheToken(c, start_tag, element_type);
     switch (variant) {
         .RAWTEXT => setTokenizerState(c, .RAWTEXT, element_type),

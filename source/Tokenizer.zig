@@ -23,7 +23,7 @@ state: State = .Data,
 eof: bool = false,
 input: InputStream,
 frame: ?anyframe = null,
-last_start_tag_name: []const u8 = undefined,
+last_start_tag: LastStartTag = undefined,
 adjusted_current_node_is_not_in_html_namespace: bool = false,
 allocator: Allocator,
 
@@ -93,8 +93,8 @@ pub fn setState(tokenizer: *Tokenizer, new_state: State) void {
     tokenizer.state = new_state;
 }
 
-pub fn setLastStartTagName(tokenizer: *Tokenizer, name: []const u8) void {
-    tokenizer.last_start_tag_name = name;
+pub fn setLastStartTag(tokenizer: *Tokenizer, last_start_tag: LastStartTag) void {
+    tokenizer.last_start_tag = last_start_tag;
 }
 
 pub fn setAdjustedCurrentNodeIsNotInHtmlNamespace(tokenizer: *Tokenizer, value: bool) void {
@@ -118,6 +118,38 @@ pub const State = enum {
     Eof,
 };
 
+/// The list of all possible start tags which, when processed in the tree construction phase,
+/// may cause the tokenizer to switch to the RCDATA, RAWTEXT, ScriptData, or PLAINTEXT states.
+pub const LastStartTag = enum {
+    iframe,
+    noembed,
+    noframes,
+    noscript,
+    plaintext,
+    script,
+    style,
+    textarea,
+    title,
+    xmp,
+
+    pub fn fromString(string: []const u8) ?LastStartTag {
+        const map = std.ComptimeStringMap(LastStartTag, .{
+            .{ "iframe", .iframe },
+            .{ "noembed", .noembed },
+            .{ "noframes", .noframes },
+            .{ "noscript", .noscript },
+            .{ "plaintext", .plaintext },
+            .{ "style", .style },
+            .{ "textarea", .textarea },
+            .{ "title", .title },
+            .{ "script", .script },
+            .{ "xmp", .xmp },
+        });
+
+        return map.get(string);
+    }
+};
+
 const InputStream = struct {
     chars: []const u21,
     position: usize = 0,
@@ -135,7 +167,9 @@ fn next(tokenizer: *Tokenizer) !?u21 {
 }
 
 fn nextNoErrorCheck(tokenizer: *Tokenizer) ?u21 {
-    if (tokenizer.input.position >= tokenizer.input.chars.len) {
+    std.debug.assert(tokenizer.input.position <= tokenizer.input.chars.len);
+
+    if (tokenizer.input.position == tokenizer.input.chars.len) {
         tokenizer.input.eof = true;
         return null;
     }
@@ -415,7 +449,7 @@ fn emitTag(tokenizer: *Tokenizer, tag_data: *TagData) !void {
                 try tokenizer.parseError(.EndTagWithTrailingSolidus);
             }
 
-            tokenizer.last_start_tag_name = undefined;
+            tokenizer.last_start_tag = undefined;
 
             try tokenizer.tokens.append(Token{ .end_tag = .{
                 .name = name,
@@ -540,7 +574,7 @@ fn nonDataEndTagName(tokenizer: *Tokenizer) !void {
 }
 
 fn isAppropriateEndTag(tokenizer: *Tokenizer, tag_data: *const TagData) bool {
-    return std.mem.eql(u8, tokenizer.last_start_tag_name, tag_data.name.items);
+    return tokenizer.last_start_tag == LastStartTag.fromString(tag_data.name.items);
 }
 
 const AttributeState = enum {
@@ -742,6 +776,7 @@ fn eofInTag(tokenizer: *Tokenizer) !?AttributeState {
 }
 
 fn characterReference(tokenizer: *Tokenizer, tag_data: ?*TagData) !void {
+    // By assumption, the '&' character has just been consumed.
     var num_consumed_chars: usize = 1;
 
     switch (tokenizer.nextIgnoreEofNoErrorCheck()) {

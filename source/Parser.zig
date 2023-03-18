@@ -277,7 +277,7 @@ pub fn run(self: *Self) !void {
 
             if (constructor_result.new_tokenizer_state) |state| {
                 self.tokenizer.setState(state);
-                self.tokenizer.setLastStartTagName(constructor_result.new_tokenizer_start_tag_name);
+                self.tokenizer.setLastStartTag(constructor_result.new_tokenizer_last_start_tag);
             }
             self.tokenizer.setAdjustedCurrentNodeIsNotInHtmlNamespace(constructor_result.adjusted_current_node_is_not_in_html_namespace);
         }
