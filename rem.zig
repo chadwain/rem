@@ -1,4 +1,4 @@
-// Copyright (C) 2021-2022 Chadwain Holness
+// Copyright (C) 2021-2023 Chadwain Holness
 //
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
