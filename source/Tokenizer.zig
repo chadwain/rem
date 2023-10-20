@@ -799,13 +799,11 @@ fn namedCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consu
     const result = try findNamedCharacterReference(tokenizer, num_consumed_chars);
     const match_found = result.chars[0] != null;
     if (match_found) {
-        const dont_emit_chars = if (tag_data != null and !result.ends_with_semicolon)
-            switch (tokenizer.peekIgnoreEof()) {
-                '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
-                else => false,
-            }
-        else
-            false;
+        const is_alphanumeric_or_equal = switch (tokenizer.peekIgnoreEof()) {
+            '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
+            else => false,
+        };
+        const dont_emit_chars = (tag_data != null and !result.ends_with_semicolon and is_alphanumeric_or_equal);
 
         if (dont_emit_chars) {
             return flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
@@ -866,7 +864,7 @@ fn findNamedCharacterReference(tokenizer: *Tokenizer, num_consumed_chars: *usize
     }
 
     // There is no need to check the consumed characters for errors (controls, surrogates, noncharacters)
-    // beacuse we've just determined that they form a valid character reference.
+    // because we've just determined that they form a valid character reference.
     return FindNamedCharacterReferenceResult{ .chars = last_index_with_value.value(), .ends_with_semicolon = ends_with_semicolon };
 }
 
@@ -1863,9 +1861,9 @@ test "Tokenizer usage" {
         .EndTagWithAttributes,
     };
 
-    try std.testing.expectEqual(@as(usize, 8), all_tokens.items.len);
-    for (all_tokens.items) |token, i| {
-        try std.testing.expect(token.eql(expected_tokens[i]));
+    try std.testing.expectEqual(expected_tokens.len, all_tokens.items.len);
+    for (expected_tokens) |expected, i| {
+        try std.testing.expect(expected.eql(all_tokens.items[i]));
     }
     try std.testing.expectEqualSlices(ParseError, expected_parse_errors, error_handler.report.items);
 }
