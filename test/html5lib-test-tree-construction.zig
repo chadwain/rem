@@ -14,13 +14,13 @@ const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
 const rem = @import("rem");
-const Dom = rem.dom.Dom;
-const Document = rem.dom.Document;
-const DocumentType = rem.dom.DocumentType;
-const Element = rem.dom.Element;
-const ElementType = rem.dom.ElementType;
-const ElementAttributesKey = rem.dom.ElementAttributesKey;
-const CharacterData = rem.dom.CharacterData;
+const Dom = rem.Dom;
+const Document = Dom.Document;
+const DocumentType = Dom.DocumentType;
+const Element = Dom.Element;
+const ElementType = Dom.ElementType;
+const ElementAttributesKey = Dom.ElementAttributesKey;
+const CharacterData = Dom.CharacterData;
 
 const Tokenizer = rem.Tokenizer;
 const TreeConstructor = rem.tree_construction.TreeConstructor;
@@ -370,7 +370,7 @@ fn parseDom(lines: *std.mem.SplitIterator(u8), context_element_type: ?ElementTyp
 
                 break :blk try dom.makeDoctype(name, public_id, system_id);
             } else try dom.makeDoctype(name, null, null);
-            try rem.dom.mutation.documentAppendDocumentType(&dom, document, doctype, .Suppress);
+            try Dom.mutation.documentAppendDocumentType(&dom, document, doctype, .Suppress);
         } else if (startsWith(data, "<!-- ")) {
             // comment
             var comment: []const u8 = data[0..0];
@@ -387,12 +387,12 @@ fn parseDom(lines: *std.mem.SplitIterator(u8), context_element_type: ?ElementTyp
             const cdata = try dom.makeCdata(comment, .comment);
             if (depth == 0) {
                 if (fragment_context) |e| {
-                    try rem.dom.mutation.elementAppend(&dom, e, .{ .cdata = cdata }, .Suppress);
+                    try Dom.mutation.elementAppend(&dom, e, .{ .cdata = cdata }, .Suppress);
                 } else {
-                    try rem.dom.mutation.documentAppendCdata(&dom, document, cdata, .Suppress);
+                    try Dom.mutation.documentAppendCdata(&dom, document, cdata, .Suppress);
                 }
             } else {
-                try rem.dom.mutation.elementAppend(&dom, stack.items[depth - 1], .{ .cdata = cdata }, .Suppress);
+                try Dom.mutation.elementAppend(&dom, stack.items[depth - 1], .{ .cdata = cdata }, .Suppress);
             }
         } else if (startsWith(data, "<?")) {
             // processing instruction
@@ -435,12 +435,12 @@ fn parseDom(lines: *std.mem.SplitIterator(u8), context_element_type: ?ElementTyp
 
             if (depth == 0) {
                 if (fragment_context) |e| {
-                    try rem.dom.mutation.elementAppend(&dom, e, .{ .element = element }, .Suppress);
+                    try Dom.mutation.elementAppend(&dom, e, .{ .element = element }, .Suppress);
                 } else {
-                    try rem.dom.mutation.documentAppendElement(&dom, document, element, .Suppress);
+                    try Dom.mutation.documentAppendElement(&dom, document, element, .Suppress);
                 }
             } else {
-                try rem.dom.mutation.elementAppend(&dom, stack.items[stack.items.len - 1], .{ .element = element }, .Suppress);
+                try Dom.mutation.elementAppend(&dom, stack.items[stack.items.len - 1], .{ .element = element }, .Suppress);
             }
             try stack.append(element);
         } else if (data[0] == '"') {
@@ -458,9 +458,9 @@ fn parseDom(lines: *std.mem.SplitIterator(u8), context_element_type: ?ElementTyp
 
             const cdata = try dom.makeCdata(text, .text);
             if (depth == 0) {
-                try rem.dom.mutation.elementAppend(&dom, fragment_context.?, .{ .cdata = cdata }, .Suppress);
+                try Dom.mutation.elementAppend(&dom, fragment_context.?, .{ .cdata = cdata }, .Suppress);
             } else {
-                try rem.dom.mutation.elementAppend(&dom, stack.items[stack.items.len - 1], .{ .cdata = cdata }, .Suppress);
+                try Dom.mutation.elementAppend(&dom, stack.items[stack.items.len - 1], .{ .cdata = cdata }, .Suppress);
             }
         } else if (eql(data, "content")) {
             // template contents

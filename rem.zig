@@ -5,7 +5,7 @@
 
 pub const token = @import("source/token.zig");
 pub const Tokenizer = @import("source/Tokenizer.zig");
-pub const dom = @import("source/dom.zig");
+pub const Dom = @import("source/Dom.zig");
 pub const tree_construction = @import("source/tree_construction.zig");
 pub const Parser = @import("source/Parser.zig");
 pub const util = @import("source/util.zig");

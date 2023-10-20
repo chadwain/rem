@@ -39,8 +39,9 @@ const AttributeSet = rem.token.AttributeSet;
 const Tokenizer = rem.Tokenizer;
 const TokenizerState = Tokenizer.State;
 const LastStartTag = Tokenizer.LastStartTag;
-const ParseError = rem.Parser.ParseError;
-const ErrorHandler = rem.Parser.ErrorHandler;
+const Parser = rem.Parser;
+const ParseError = Parser.ParseError;
+const ErrorHandler = Parser.ErrorHandler;
 
 test "content model flags" {
     try runTestFile("test/html5lib-tests/tokenizer/contentModelFlags.test");
@@ -184,16 +185,10 @@ fn runTest(
         all_tokens.deinit();
     }
 
-    var error_handler = ErrorHandler{ .report = ArrayList(ParseError).init(allocator) };
-    defer error_handler.deinit();
+    var parser = try Parser.initTokenizerOnly(input, allocator, .report, initial_state, last_start_tag);
+    defer parser.deinitTokenizerOnly();
 
-    var tokenizer = Tokenizer.initState(allocator, input,  initial_state, &all_tokens, &error_handler);
-    defer tokenizer.deinit();
-
-    if (last_start_tag) |lst| tokenizer.setLastStartTag(lst);
-
-    _ = async tokenizer.run();
-    while (tokenizer.frame) |frame| resume frame;
+    try parser.runTokenizerOnly(&all_tokens);
 
     try std.testing.expect(all_tokens.items[all_tokens.items.len - 1] == .eof);
     std.testing.expectEqual(expected_tokens.len, all_tokens.items.len - 1) catch {
@@ -210,18 +205,20 @@ fn runTest(
         };
     }
 
-    std.testing.expectEqual(expected_errors.len, error_handler.report.items.len) catch {
+    const all_errors = parser.errors();
+
+    std.testing.expectEqual(expected_errors.len, all_errors.len) catch {
         std.debug.print(
             "Unequal number of parse errors\n Expected {}: {any}\n Actual {}: {any}\n",
-            .{ expected_errors.len, expected_errors, error_handler.report.items.len, error_handler.report.items },
+            .{ expected_errors.len, expected_errors, all_errors.len, all_errors },
         );
         return error.UnequalNumberOfParseErrors;
     };
     for (expected_errors) |err, i| {
-        testing.expectEqualSlices(u8, err.id, ErrorInfo.errorToSpecId(error_handler.report.items[i])) catch {
+        testing.expectEqualSlices(u8, err.id, ErrorInfo.errorToSpecId(all_errors[i])) catch {
             std.debug.print(
                 "Mismatched parse errors\n Expected: {s}\n Actual: {s}\n",
-                .{ err.id, ErrorInfo.errorToSpecId(error_handler.report.items[i]) },
+                .{ err.id, ErrorInfo.errorToSpecId(all_errors[i]) },
             );
             return error.MismatchedParseErrors;
         };

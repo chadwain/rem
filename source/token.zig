@@ -4,11 +4,12 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const rem = @import("../rem.zig");
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
-pub const TokenDOCTYPE = struct {
+pub const TokenDoctype = struct {
     name: ?[]const u8,
     public_identifier: ?[]const u8,
     system_identifier: ?[]const u8,
@@ -17,7 +18,7 @@ pub const TokenDOCTYPE = struct {
 
 pub const TokenStartTag = struct {
     name: []const u8,
-    attributes: TokenStartTag.Attributes,
+    attributes: Attributes,
     self_closing: bool,
 
     pub const Attributes = StringHashMapUnmanaged([]const u8);
@@ -35,18 +36,25 @@ pub const TokenCharacter = struct {
     data: u21,
 };
 
-pub const TokenEOF = void;
+pub const TokenEof = void;
 
 pub const Token = union(enum) {
-    doctype: TokenDOCTYPE,
-    start_tag: TokenStartTag,
-    end_tag: TokenEndTag,
-    comment: TokenComment,
-    character: TokenCharacter,
-    eof: TokenEOF,
+    doctype: Doctype,
+    start_tag: StartTag,
+    end_tag: EndTag,
+    comment: Comment,
+    character: Character,
+    eof: Eof,
 
-    pub fn deinit(self: *Token, allocator: Allocator) void {
-        switch (self.*) {
+    pub const Doctype = TokenDoctype;
+    pub const StartTag = TokenStartTag;
+    pub const EndTag = TokenEndTag;
+    pub const Comment = TokenComment;
+    pub const Character = TokenCharacter;
+    pub const Eof = TokenEof;
+
+    pub fn deinit(token: *Token, allocator: Allocator) void {
+        switch (token.*) {
             .doctype => |d| {
                 if (d.name) |name| allocator.free(name);
                 if (d.public_identifier) |public_identifier| allocator.free(public_identifier);
@@ -67,61 +75,7 @@ pub const Token = union(enum) {
             .comment => |c| {
                 allocator.free(c.data);
             },
-            .character => {},
-            .eof => {},
-        }
-    }
-
-    pub fn copy(self: Token, allocator: Allocator) !Token {
-        switch (self) {
-            .doctype => |d| {
-                const name = if (d.name) |s| try allocator.dupe(u8, s) else null;
-                errdefer if (name) |s| allocator.free(s);
-                const public_identifier = if (d.public_identifier) |s| try allocator.dupe(u8, s) else null;
-                errdefer if (public_identifier) |s| allocator.free(s);
-                const system_identifier = if (d.system_identifier) |s| try allocator.dupe(u8, s) else null;
-                errdefer if (system_identifier) |s| allocator.free(s);
-                return Token{ .doctype = .{
-                    .name = name,
-                    .public_identifier = public_identifier,
-                    .system_identifier = system_identifier,
-                    .force_quirks = d.force_quirks,
-                } };
-            },
-            .start_tag => |st| {
-                const name = try allocator.dupe(u8, st.name);
-                errdefer allocator.free(name);
-
-                var attributes = TokenStartTag.Attributes{};
-                errdefer {
-                    var iterator = attributes.iterator();
-                    while (iterator.next()) |attr| {
-                        allocator.free(attr.key_ptr.*);
-                        allocator.free(attr.value_ptr.*);
-                    }
-                    attributes.deinit(allocator);
-                }
-
-                var iterator = st.attributes.iterator();
-                while (iterator.next()) |attr| {
-                    const key = try allocator.dupe(u8, attr.key_ptr.*);
-                    errdefer allocator.free(key);
-                    const value = try allocator.dupe(u8, attr.value_ptr.*);
-                    errdefer allocator.free(value);
-                    try attributes.putNoClobber(allocator, key, value);
-                }
-
-                return Token{ .start_tag = .{ .name = name, .attributes = attributes, .self_closing = st.self_closing } };
-            },
-            .end_tag => |et| {
-                const name = try allocator.dupe(u8, et.name);
-                return Token{ .end_tag = .{ .name = name } };
-            },
-            .comment => |c| {
-                const data = try allocator.dupe(u8, c.data);
-                return Token{ .comment = .{ .data = data } };
-            },
-            .character, .eof => return self,
+            .character, .eof => {},
         }
     }
 

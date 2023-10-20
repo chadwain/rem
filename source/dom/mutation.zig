@@ -10,12 +10,12 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 const rem = @import("../../rem.zig");
-const Dom = rem.dom.Dom;
-const Document = rem.dom.Document;
-const DocumentType = rem.dom.DocumentType;
-const Element = rem.dom.Element;
-const CharacterData = rem.dom.CharacterData;
-const ElementOrCharacterData = rem.dom.ElementOrCharacterData;
+const Dom = rem.Dom;
+const Document = Dom.Document;
+const DocumentType = Dom.DocumentType;
+const Element = Dom.Element;
+const CharacterData = Dom.CharacterData;
+const ElementOrCharacterData = Dom.ElementOrCharacterData;
 
 pub const SuppressMutationEvents = enum { Suppress, NoSuppress };
 

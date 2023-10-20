@@ -17,7 +17,7 @@ pub fn main() !void {
     const decoded_input = &rem.util.utf8DecodeStringComptime(input);
 
     // Create the DOM in which the parsed Document will be created.
-    var dom = rem.dom.Dom{ .allocator = allocator };
+    var dom = rem.Dom{ .allocator = allocator };
     defer dom.deinit();
 
     // Create the HTML parser.

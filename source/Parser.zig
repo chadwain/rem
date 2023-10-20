@@ -7,26 +7,34 @@
 //! It handles the execution and the passing of messages between the two objects.
 
 const rem = @import("../rem.zig");
+const Dom = @import("./Dom.zig");
+const Document = Dom.Document;
+const Element = Dom.Element;
 
-const Dom = rem.dom.Dom;
-const Document = rem.dom.Document;
-const Element = rem.dom.Element;
-
-const Token = rem.token.Token;
-const Tokenizer = rem.Tokenizer;
-const tree_construction = rem.tree_construction;
+const Token = @import("./token.zig").Token;
+const Tokenizer = @import("./Tokenizer.zig");
+const tree_construction = @import("./tree_construction.zig");
 const TreeConstructor = tree_construction.TreeConstructor;
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const ArrayList = std.ArrayList;
+const ArrayListUnmanaged = std.ArrayListUnmanaged;
 
-tokenizer: Tokenizer,
+input_stream: InputStream,
+tokenizer_initial_state: Tokenizer.State,
+tokenizer_initial_last_start_tag: ?Tokenizer.LastStartTag,
 constructor: TreeConstructor,
 allocator: Allocator,
+error_handler: ErrorHandler,
 
 const Self = @This();
+
+const InputStream = struct {
+    text: []const u21,
+    position: usize = 0,
+    eof: bool = false,
+};
 
 pub const ParseError = enum {
     SurrogateInInputStream,
@@ -96,23 +104,31 @@ pub const OnError = enum {
 pub const ErrorHandler = union(OnError) {
     ignore,
     abort: ?ParseError,
-    report: ArrayList(ParseError),
+    report: ArrayListUnmanaged(ParseError),
 
-    pub fn sendError(self: *@This(), err: ParseError) !void {
-        switch (self.*) {
+    fn init(on_error: OnError) ErrorHandler {
+        return switch (on_error) {
+            .ignore => .ignore,
+            .abort => .{ .abort = null },
+            .report => .{ .report = .{} },
+        };
+    }
+
+    fn deinit(error_handler: *ErrorHandler, allocator: Allocator) void {
+        switch (error_handler.*) {
+            .ignore, .abort => {},
+            .report => |*list| list.deinit(allocator),
+        }
+    }
+
+    fn sendError(error_handler: *ErrorHandler, allocator: Allocator, err: ParseError) !void {
+        switch (error_handler.*) {
             .ignore => {},
             .abort => |*the_error| {
                 the_error.* = err;
                 return error.AbortParsing;
             },
-            .report => |*list| try list.append(err),
-        }
-    }
-
-    pub fn deinit(self: *@This()) void {
-        switch (self.*) {
-            .ignore, .abort => {},
-            .report => |list| list.deinit(),
+            .report => |*list| try list.append(allocator, err),
         }
     }
 };
@@ -128,24 +144,13 @@ pub fn init(
 ) !Self {
     const document = try dom.makeDocument();
 
-    const token_sink = try allocator.create(ArrayList(Token));
-    errdefer allocator.destroy(token_sink);
-    token_sink.* = ArrayList(Token).init(allocator);
-    errdefer token_sink.deinit();
-
-    const error_handler = try allocator.create(ErrorHandler);
-    errdefer allocator.destroy(error_handler);
-    error_handler.* = switch (on_error) {
-        .ignore => .ignore,
-        .abort => .{ .abort = null },
-        .report => .{ .report = ArrayList(ParseError).init(allocator) },
-    };
-    errdefer error_handler.deinit();
-
     return Self{
-        .tokenizer = Tokenizer.init(allocator, input, token_sink, error_handler),
-        .constructor = TreeConstructor.init(dom, document, allocator, error_handler, .{ .scripting = scripting }),
+        .input_stream = InputStream{ .text = input },
+        .tokenizer_initial_state = .Data,
+        .tokenizer_initial_last_start_tag = null,
+        .constructor = TreeConstructor.init(dom, document, allocator, .{ .scripting = scripting }),
         .allocator = allocator,
+        .error_handler = ErrorHandler.init(on_error),
     };
 }
 
@@ -178,33 +183,22 @@ pub fn initFragment(
         else => .Data,
     };
 
-    const token_sink = try allocator.create(ArrayList(Token));
-    errdefer allocator.destroy(token_sink);
-    token_sink.* = ArrayList(Token).init(allocator);
-    errdefer token_sink.deinit();
-
-    const error_handler = try allocator.create(ErrorHandler);
-    errdefer allocator.destroy(error_handler);
-    error_handler.* = switch (on_error) {
-        .ignore => .ignore,
-        .abort => .{ .abort = null },
-        .report => .{ .report = ArrayList(ParseError).init(allocator) },
-    };
-    errdefer error_handler.deinit();
-
     var result = Self{
-        .tokenizer = Tokenizer.initState(allocator, input, initial_state, token_sink, error_handler),
-        .constructor = TreeConstructor.init(dom, document, allocator, error_handler, .{
+        .input_stream = InputStream{ .text = input },
+        .tokenizer_initial_state = initial_state,
+        .tokenizer_initial_last_start_tag = null,
+        .constructor = TreeConstructor.init(dom, document, allocator, .{
             .fragment_context = context,
             .scripting = scripting,
         }),
         // Step 12
         .allocator = allocator,
+        .error_handler = ErrorHandler.init(on_error),
     };
 
     // Steps 5-7
     const html = try dom.makeElement(.html_html);
-    try rem.dom.mutation.documentAppendElement(dom, document, html, .Suppress);
+    try Dom.mutation.documentAppendElement(dom, document, html, .Suppress);
     try result.constructor.open_elements.append(result.constructor.allocator, html);
 
     // Step 8
@@ -216,7 +210,7 @@ pub fn initFragment(
     const should_be_html_integration_point = if (context.element_type == .mathml_annotation_xml) blk: {
         const eql = rem.util.eqlIgnoreCase2;
         const encoding = context.getAttribute(.{ .prefix = .none, .namespace = .none, .local_name = "encoding" }) orelse break :blk false;
-        break :blk eql(encoding, "text/html") or eql(encoding, "application/xhtml+xml");
+        break :blk eql("text/html", encoding) or eql("application/xhtml+xml", encoding);
     } else false;
     if (should_be_html_integration_point) try dom.registerHtmlIntegrationPoint(context);
 
@@ -245,41 +239,34 @@ pub fn initFragment(
 
 /// Frees the memory associated with the parser.
 pub fn deinit(self: *Self) void {
-    for (self.tokenizer.tokens.items) |*t| t.deinit(self.allocator);
-    self.tokenizer.tokens.deinit();
-    self.tokenizer.error_handler.deinit();
-    self.allocator.destroy(self.tokenizer.tokens);
-    self.allocator.destroy(self.tokenizer.error_handler);
-    self.tokenizer.deinit();
     self.constructor.deinit();
+    self.error_handler.deinit(self.allocator);
 }
 
 /// Runs the tokenization and tree construction steps to completion.
 pub fn run(self: *Self) !void {
-    const tokens: *ArrayList(Token) = self.tokenizer.tokens;
-    var tokenizer_run_frame = async self.tokenizer.run();
-    while (self.tokenizer.frame) |frame| {
-        if (tokens.items.len > 0) {
+    var tokenizer_status: *Tokenizer.Status = undefined;
+    var tokenizer_run_frame = async Tokenizer.run(self, self.tokenizer_initial_state, self.tokenizer_initial_last_start_tag, &tokenizer_status);
+    while (tokenizer_status.frame) |frame| {
+        if (tokenizer_status.tokens.items.len > 0) {
             var constructor_result: TreeConstructor.RunResult = undefined;
-            for (tokens.items) |*token, i| {
+            for (tokenizer_status.tokens.items) |*token, i| {
                 constructor_result = self.constructor.run(token.*) catch |err| switch (err) {
-                    error.AbortParsing => return self.abort(),
+                    error.AbortParsing => @panic("TODO abort parsing"),
                     error.OutOfMemory,
                     error.Utf8CannotEncodeSurrogateHalf,
                     error.CodepointTooLarge,
-                    => |e| return e,
+                    => @panic("TODO Handle errors in parsing"),
                     error.DomException => @panic("TODO Handle DOM Exceptions"),
                 };
-                token.deinit(self.tokenizer.allocator);
-                assert(constructor_result.new_tokenizer_state == null or i == tokens.items.len - 1);
+                token.deinit(self.allocator);
+                assert(constructor_result.new_tokenizer_state == null or i == tokenizer_status.tokens.items.len - 1);
             }
-            tokens.clearRetainingCapacity();
 
             if (constructor_result.new_tokenizer_state) |state| {
-                self.tokenizer.setState(state);
-                self.tokenizer.setLastStartTag(constructor_result.new_tokenizer_last_start_tag);
+                tokenizer_status.setState(state, constructor_result.new_tokenizer_last_start_tag);
             }
-            self.tokenizer.setAdjustedCurrentNodeIsNotInHtmlNamespace(constructor_result.adjusted_current_node_is_not_in_html_namespace);
+            tokenizer_status.setAdjustedCurrentNodeIsNotInHtmlNamespace(constructor_result.adjusted_current_node_is_not_in_html_namespace);
         }
         resume frame;
     } else {
@@ -291,6 +278,56 @@ pub fn run(self: *Self) !void {
             => |e| return e,
         };
     }
+}
+
+/// Create a new HTML5 parser for testing purposes.
+pub fn initTokenizerOnly(
+    /// Must not be freed while being used by the parser.
+    input: []const u21,
+    allocator: Allocator,
+    on_error: OnError,
+    tokenizer_initial_state: Tokenizer.State,
+    tokenizer_initial_last_start_tag: ?Tokenizer.LastStartTag,
+) !Self {
+    return Self{
+        .input_stream = InputStream{ .text = input },
+        .tokenizer_initial_state = tokenizer_initial_state,
+        .tokenizer_initial_last_start_tag = tokenizer_initial_last_start_tag,
+        .constructor = undefined,
+        .allocator = allocator,
+        .error_handler = ErrorHandler.init(on_error),
+    };
+}
+
+pub fn runTokenizerOnly(self: *Self, token_sink: *std.ArrayList(Token)) !void {
+    var tokenizer_status: *Tokenizer.Status = undefined;
+    var tokenizer_run_frame = async Tokenizer.run(self, self.tokenizer_initial_state, self.tokenizer_initial_last_start_tag, &tokenizer_status);
+
+    while (tokenizer_status.frame) |frame| {
+        token_sink.ensureUnusedCapacity(tokenizer_status.tokens.items.len) catch |err| {
+            for (tokenizer_status.tokens.items) |*token| token.deinit(self.allocator);
+            return err;
+        };
+        token_sink.appendSliceAssumeCapacity(tokenizer_status.tokens.items);
+        resume frame;
+    } else {
+        nosuspend await tokenizer_run_frame catch |err| switch (err) {
+            error.AbortParsing => unreachable,
+            error.OutOfMemory,
+            error.Utf8CannotEncodeSurrogateHalf,
+            error.CodepointTooLarge,
+            => |e| return e,
+        };
+    }
+}
+
+/// Frees the memory associated with the parser.
+pub fn deinitTokenizerOnly(self: *Self) void {
+    self.error_handler.deinit(self.allocator);
+}
+
+pub fn parseError(parser: *Self, err: ParseError) !void {
+    try parser.error_handler.sendError(parser.allocator, err);
 }
 
 /// Implements HTML's "abort a parser" algorithm
@@ -311,7 +348,7 @@ pub fn getDocument(self: Self) *Document {
 /// If the error handling strategy is `abort`, the slice will have at most 1 element.
 /// If the error handling strategy is `report`, the slice can have any number of elements.
 pub fn errors(self: Self) []const ParseError {
-    return switch (self.tokenizer.error_handler.*) {
+    return switch (self.error_handler) {
         .ignore => &[0]ParseError{},
         .abort => |err| if (err) |*e| @ptrCast([*]const ParseError, e)[0..1] else &[0]ParseError{},
         .report => |list| list.items,

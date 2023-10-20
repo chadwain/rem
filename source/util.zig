@@ -10,10 +10,10 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
 const rem = @import("../rem.zig");
-const Dom = rem.dom.Dom;
-const Document = rem.dom.Document;
-const Element = rem.dom.Element;
-const CharacterData = rem.dom.CharacterData;
+const Dom = rem.Dom;
+const Document = Dom.Document;
+const Element = Dom.Element;
+const CharacterData = Dom.CharacterData;
 
 pub fn freeStringHashMap(map: *StringHashMapUnmanaged([]u8), allocator: Allocator) void {
     var iterator = map.iterator();

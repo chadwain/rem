@@ -3,121 +3,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+const Dom = @import("../Dom.zig");
+
 const std = @import("std");
-const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const ComptimeStringMap = std.ComptimeStringMap;
 const MultiArrayList = std.MultiArrayList;
-const AutoHashMapUnmanaged = std.AutoHashMapUnmanaged;
-const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
-
-pub const mutation = @import("dom/mutation.zig");
-
-pub const DomException = enum {
-    NotFound,
-    HierarchyRequest,
-};
-
-pub const Dom = struct {
-    allocator: Allocator,
-
-    /// For elements whose local name cannot be determined by looking at its element_type.
-    /// This does not take precedence over looking at element_type.
-    local_names: AutoHashMapUnmanaged(*const Element, []const u8) = .{},
-    /// Specifically holds MathML annotation-xml elements that are HTML integration points.
-    /// This does not take precedence if finding if an element is an HTML integration point could be done by other means.
-    html_integration_points: AutoHashMapUnmanaged(*const Element, void) = .{},
-
-    all_documents: ArrayListUnmanaged(*Document) = .{},
-    all_elements: ArrayListUnmanaged(*Element) = .{},
-    all_cdatas: ArrayListUnmanaged(*CharacterData) = .{},
-    all_doctypes: ArrayListUnmanaged(*DocumentType) = .{},
-
-    pub fn deinit(self: *Dom) void {
-        for (self.all_elements.items) |item| {
-            item.deinit(self.allocator);
-            self.allocator.destroy(item);
-        }
-        self.all_elements.deinit(self.allocator);
-        for (self.all_cdatas.items) |item| {
-            item.deinit(self.allocator);
-            self.allocator.destroy(item);
-        }
-        self.all_cdatas.deinit(self.allocator);
-        for (self.all_doctypes.items) |item| {
-            item.deinit(self.allocator);
-            self.allocator.destroy(item);
-        }
-        self.all_doctypes.deinit(self.allocator);
-        for (self.all_documents.items) |item| {
-            item.deinit(self.allocator);
-            self.allocator.destroy(item);
-        }
-        self.all_documents.deinit(self.allocator);
-
-        var iterator = self.local_names.valueIterator();
-        while (iterator.next()) |local_name| self.allocator.free(local_name.*);
-        self.local_names.deinit(self.allocator);
-
-        self.html_integration_points.deinit(self.allocator);
-    }
-
-    pub fn exception(self: *Dom, ex: DomException) error{DomException} {
-        _ = self;
-        std.debug.print("DOM Exception raised: {s}\n", .{@tagName(ex)});
-        return error.DomException;
-    }
-
-    /// Creates a new Document node. The returned node is owned by the Dom.
-    pub fn makeDocument(self: *Dom) !*Document {
-        const document = try self.allocator.create(Document);
-        errdefer self.allocator.destroy(document);
-        try self.all_documents.append(self.allocator, document);
-        document.* = Document{};
-        return document;
-    }
-
-    /// Creates a new CharacterData node. The returned node is owned by the Dom.
-    pub fn makeCdata(self: *Dom, data: []const u8, interface: CharacterDataInterface) !*CharacterData {
-        const cdata = try self.allocator.create(CharacterData);
-        errdefer self.allocator.destroy(cdata);
-        try self.all_cdatas.append(self.allocator, cdata);
-        cdata.* = try CharacterData.init(self.allocator, data, interface);
-        return cdata;
-    }
-
-    /// Creates a new DocumentType node. The returned node is owned by the Dom.
-    pub fn makeDoctype(self: *Dom, doctype_name: ?[]const u8, public_identifier: ?[]const u8, system_identifier: ?[]const u8) !*DocumentType {
-        const doctype = try self.allocator.create(DocumentType);
-        errdefer self.allocator.destroy(doctype);
-        try self.all_doctypes.append(self.allocator, doctype);
-        doctype.* = try DocumentType.init(self.allocator, doctype_name, public_identifier, system_identifier);
-        return doctype;
-    }
-
-    /// Creates a new Element node. The returned node is owned by the Dom.
-    pub fn makeElement(self: *Dom, element_type: ElementType) !*Element {
-        // TODO: This function should implement the "create an element" algorithm.
-        // https://dom.spec.whatwg.org/#concept-create-element
-        const element = try self.allocator.create(Element);
-        errdefer self.allocator.destroy(element);
-        try self.all_elements.append(self.allocator, element);
-        element.* = Element{ .element_type = element_type, .attributes = .{}, .parent = null, .children = .{} };
-        return element;
-    }
-
-    pub fn registerLocalName(self: *Dom, element: *const Element, name: []const u8) !void {
-        const copy = try self.allocator.dupe(u8, name);
-        errdefer self.allocator.free(copy);
-        try self.local_names.putNoClobber(self.allocator, element, copy);
-    }
-
-    pub fn registerHtmlIntegrationPoint(self: *Dom, element: *const Element) !void {
-        assert(element.element_type == .mathml_annotation_xml);
-        try self.html_integration_points.putNoClobber(self.allocator, element, {});
-    }
-};
 
 pub const Document = struct {
     doctype: ?*DocumentType = null,
@@ -142,8 +34,98 @@ pub const Document = struct {
         limited_quirks,
     };
 
-    fn deinit(self: *Document, allocator: Allocator) void {
+    pub fn deinit(self: *Document, allocator: Allocator) void {
         self.cdata.deinit(allocator);
+    }
+};
+
+pub const DocumentFormatter = struct {
+    document: *const Document,
+    dom: *const Dom,
+    allocator: Allocator,
+
+    pub fn print(self: DocumentFormatter, writer: anytype) !void {
+        try std.fmt.format(writer, "Document: {s}\n", .{@tagName(self.document.quirks_mode)});
+
+        try printDocumentCdatas(writer, self.document, 0);
+
+        if (self.document.doctype) |doctype| {
+            try std.fmt.format(writer, "  DocumentType: name={s} publicId={s} systemId={s}\n", .{ doctype.name, doctype.publicId, doctype.systemId });
+        }
+
+        try printDocumentCdatas(writer, self.document, 1);
+
+        const ConstElementOrCharacterData = union(enum) {
+            element: *const Element,
+            cdata: *const CharacterData,
+        };
+        var node_stack = ArrayListUnmanaged(struct { node: ConstElementOrCharacterData, depth: usize }){};
+        defer node_stack.deinit(self.allocator);
+
+        if (self.document.element) |document_element| {
+            try node_stack.append(self.allocator, .{ .node = .{ .element = document_element }, .depth = 1 });
+        }
+
+        while (node_stack.items.len > 0) {
+            const item = node_stack.pop();
+            var len = item.depth;
+            while (len > 0) : (len -= 1) {
+                try std.fmt.format(writer, "  ", .{});
+            }
+            switch (item.node) {
+                .element => |element| {
+                    try std.fmt.format(writer, "Element: type={s} local_name={s} namespace={s} attributes=[", .{
+                        @tagName(element.element_type),
+                        element.localName(self.dom),
+                        @tagName(element.namespace()),
+                    });
+                    const num_attributes = element.numAttributes();
+                    if (num_attributes > 0) {
+                        try writer.writeAll(" ");
+                        const attribute_slice = element.attributes.slice();
+                        var i: u32 = 0;
+                        while (i < num_attributes) : (i += 1) {
+                            const key = attribute_slice.items(.key)[i];
+                            const value = attribute_slice.items(.value)[i];
+                            if (key.prefix == .none) {
+                                try std.fmt.format(writer, "\"{s}\"=\"{}\" ", .{ key.local_name, std.zig.fmtEscapes(value) });
+                            } else {
+                                try std.fmt.format(writer, "\"{s}:{s}\"=\"{}\" ", .{ @tagName(key.prefix), key.local_name, std.zig.fmtEscapes(value) });
+                            }
+                        }
+                    }
+                    try std.fmt.format(writer, "]\n", .{});
+
+                    // Add children to stack
+                    var num_children = element.children.items.len;
+                    while (num_children > 0) : (num_children -= 1) {
+                        const node = switch (element.children.items[num_children - 1]) {
+                            .element => |e| ConstElementOrCharacterData{ .element = e },
+                            .cdata => |c| ConstElementOrCharacterData{ .cdata = c },
+                        };
+                        try node_stack.append(self.allocator, .{ .node = node, .depth = item.depth + 1 });
+                    }
+                },
+                .cdata => |cdata| try printCdata(writer, cdata),
+            }
+        }
+
+        try printDocumentCdatas(writer, self.document, 2);
+    }
+
+    fn printDocumentCdatas(writer: anytype, document: *const Document, endpoint_index: u2) !void {
+        const endpoint = document.cdata_endpoints[endpoint_index];
+        for (endpoint.sliceOf(document.cdata.items)) |cdata| {
+            try printCdata(writer, cdata);
+        }
+    }
+
+    fn printCdata(writer: anytype, cdata: *const CharacterData) !void {
+        const interface = switch (cdata.interface) {
+            .text => "Text",
+            .comment => "Comment",
+        };
+        try std.fmt.format(writer, "{s}: \"{}\"\n", .{ interface, std.zig.fmtEscapes(cdata.data.items) });
     }
 };
 
@@ -152,7 +134,7 @@ pub const DocumentType = struct {
     publicId: []u8,
     systemId: []u8,
 
-    fn init(allocator: Allocator, doctype_name: ?[]const u8, public_identifier: ?[]const u8, system_identifier: ?[]const u8) !DocumentType {
+    pub fn init(allocator: Allocator, doctype_name: ?[]const u8, public_identifier: ?[]const u8, system_identifier: ?[]const u8) !DocumentType {
         const name = doctype_name orelse "";
         const publicId = public_identifier orelse "";
         const systemId = system_identifier orelse "";
@@ -173,7 +155,7 @@ pub const DocumentType = struct {
         return result;
     }
 
-    fn deinit(self: *DocumentType, allocator: Allocator) void {
+    pub fn deinit(self: *DocumentType, allocator: Allocator) void {
         const memory = self.name.ptr[0 .. self.name.len + self.publicId.len + self.systemId.len];
         allocator.free(memory);
     }
@@ -863,13 +845,13 @@ pub const CharacterData = struct {
     data: ArrayListUnmanaged(u8) = .{},
     interface: CharacterDataInterface,
 
-    fn init(allocator: Allocator, data: []const u8, interface: CharacterDataInterface) !CharacterData {
+    pub fn init(allocator: Allocator, data: []const u8, interface: CharacterDataInterface) !CharacterData {
         var result = CharacterData{ .interface = interface };
         try result.data.appendSlice(allocator, data);
         return result;
     }
 
-    fn deinit(self: *CharacterData, allocator: Allocator) void {
+    pub fn deinit(self: *CharacterData, allocator: Allocator) void {
         self.data.deinit(allocator);
     }
 

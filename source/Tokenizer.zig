@@ -6,10 +6,10 @@
 const Tokenizer = @This();
 const rem = @import("../rem.zig");
 const named_characters = @import("./named_characters.zig");
-const Token = rem.token.Token;
-const Attributes = rem.token.TokenStartTag.Attributes;
-const ParseError = rem.Parser.ParseError;
-const ErrorHandler = rem.Parser.ErrorHandler;
+const Token = @import("./token.zig").Token;
+const Attributes = Token.StartTag.Attributes;
+const Parser = @import("./Parser.zig");
+const ParseError = Parser.ParseError;
 
 const std = @import("std");
 const ArrayList = std.ArrayList;
@@ -21,89 +21,68 @@ const TREAT_AS_ANYTHING_ELSE = '\u{FFFF}';
 
 state: State = .Data,
 eof: bool = false,
-input: InputStream,
-frame: ?anyframe = null,
 last_start_tag: LastStartTag = undefined,
 adjusted_current_node_is_not_in_html_namespace: bool = false,
 allocator: Allocator,
+status: Status = .{},
 
-tokens: *ArrayList(Token),
-error_handler: *ErrorHandler,
+pub const Status = struct {
+    frame: ?anyframe = null,
+    tokens: ArrayListUnmanaged(Token) = .{},
 
-/// Create a new HTML5 tokenizer.
-pub fn init(
-    allocator: Allocator,
-    input: []const u21,
-    token_sink: *ArrayList(Token),
-    error_handler: *ErrorHandler,
-) Tokenizer {
-    return initState(allocator, input, .Data, token_sink, error_handler);
-}
+    pub fn setState(status: *Status, new_state: State, last_start_tag: LastStartTag) void {
+        const tokenizer = @fieldParentPtr(Tokenizer, "status", status);
+        tokenizer.setNewState(new_state);
+        tokenizer.last_start_tag = last_start_tag;
+    }
 
-/// Create a new HTML5 tokenizer, and change to a particular state.
-pub fn initState(
-    allocator: Allocator,
-    input: []const u21,
-    state: State,
-    token_sink: *ArrayList(Token),
-    error_handler: *ErrorHandler,
-) Tokenizer {
-    return Tokenizer{
-        .allocator = allocator,
-        .input = .{ .chars = input },
+    pub fn setAdjustedCurrentNodeIsNotInHtmlNamespace(status: *Status, value: bool) void {
+        const tokenizer = @fieldParentPtr(Tokenizer, "status", status);
+        tokenizer.adjusted_current_node_is_not_in_html_namespace = value;
+    }
+
+    pub fn abort(status: *Status) void {
+        const tokenizer = @fieldParentPtr(Tokenizer, "status", status);
+        tokenizer.state = .Eof;
+    }
+};
+
+pub fn run(parser: *Parser, state: State, last_start_tag: ?LastStartTag, status: **Status) !void {
+    std.debug.assert(state != .Eof);
+
+    var tokenizer = Tokenizer{
+        .allocator = parser.allocator,
         .state = state,
-        .tokens = token_sink,
-        .error_handler = error_handler,
     };
-}
+    defer {
+        for (tokenizer.status.tokens.items) |*token| token.deinit(tokenizer.allocator);
+        tokenizer.status.tokens.deinit(tokenizer.allocator);
+        tokenizer.status.frame = null;
+    }
+    if (last_start_tag) |lst| tokenizer.last_start_tag = lst;
+    status.* = &tokenizer.status;
 
-/// Free the memory owned by the tokenizer.
-pub fn deinit(tokenizer: *Tokenizer) void {
-    _ = tokenizer;
-}
-
-/// Runs the tokenizer on the given input.
-/// On each iteration, it will output 0 or more tokens to the token sink and 0 or more parse errors to the parse error sink.
-/// The memory taken up by these tokens and parse errors are owned by the user.
-///
-/// Between every suspension of this function, the user must:
-///     1. Change the tokenizer's state via setState, if appropriate.
-///     2. Call setAdjustedCurrentNodeIsNotInHtmlNamespace with an appropriate value.
-///     3. Change the input stream, if appropriate.
-pub fn run(tokenizer: *Tokenizer) !void {
-    defer tokenizer.frame = null;
     while (!tokenizer.eof) {
         switch (tokenizer.state) {
-            .Data => try data(tokenizer),
-            .RAWTEXT => try rawText(tokenizer),
-            .RCDATA => try rcData(tokenizer),
-            .CDATASection => try cDataSection(tokenizer),
-            .PLAINTEXT => try plainText(tokenizer),
-            .ScriptData => try scriptData(tokenizer),
-            .Eof => try eof(tokenizer),
+            .Data => try data(parser, &tokenizer),
+            .RAWTEXT => try rawText(parser, &tokenizer),
+            .RCDATA => try rcData(parser, &tokenizer),
+            .CDATASection => try cDataSection(parser, &tokenizer),
+            .PLAINTEXT => try plainText(parser, &tokenizer),
+            .ScriptData => try scriptData(parser, &tokenizer),
+            .Eof => try eof(&tokenizer),
         }
 
         suspend {
-            tokenizer.frame = @frame();
+            tokenizer.status.frame = @frame();
         }
+        tokenizer.status.tokens.clearRetainingCapacity();
     }
 }
 
-pub fn setState(tokenizer: *Tokenizer, new_state: State) void {
-    tokenizer.state = new_state;
-}
-
-pub fn setLastStartTag(tokenizer: *Tokenizer, last_start_tag: LastStartTag) void {
-    tokenizer.last_start_tag = last_start_tag;
-}
-
-pub fn setAdjustedCurrentNodeIsNotInHtmlNamespace(tokenizer: *Tokenizer, value: bool) void {
-    tokenizer.adjusted_current_node_is_not_in_html_namespace = value;
-}
-
 pub const Error = error{
-    OutOfMemory,
     AbortParsing,
+    OutOfMemory,
     Utf8CannotEncodeSurrogateHalf,
     CodepointTooLarge,
 };
@@ -150,36 +129,34 @@ pub const LastStartTag = enum {
     }
 };
 
-const InputStream = struct {
-    chars: []const u21,
-    position: usize = 0,
-    eof: bool = false,
-};
+fn setNewState(tokenizer: *Tokenizer, new_state: State) void {
+    tokenizer.state = new_state;
+}
 
 /// Returns the next input character in the input stream.
 /// Implements §13.2.3.5 "Preprocessing the input stream" of the HTML standard.
-fn next(tokenizer: *Tokenizer) !?u21 {
-    const char = tokenizer.nextNoErrorCheck();
+fn next(parser: *Parser) !?u21 {
+    const char = nextNoErrorCheck(parser);
     if (char) |c| {
-        try tokenizer.checkInputCharacterForErrors(c);
+        try checkInputCharacterForErrors(parser, c);
     }
     return char;
 }
 
-fn nextNoErrorCheck(tokenizer: *Tokenizer) ?u21 {
-    std.debug.assert(tokenizer.input.position <= tokenizer.input.chars.len);
+fn nextNoErrorCheck(parser: *Parser) ?u21 {
+    std.debug.assert(parser.input_stream.position <= parser.input_stream.text.len);
 
-    if (tokenizer.input.position == tokenizer.input.chars.len) {
-        tokenizer.input.eof = true;
+    if (parser.input_stream.position == parser.input_stream.text.len) {
+        parser.input_stream.eof = true;
         return null;
     }
 
-    var char = tokenizer.input.chars[tokenizer.input.position];
-    tokenizer.input.position += 1;
+    var char = parser.input_stream.text[parser.input_stream.position];
+    parser.input_stream.position += 1;
     if (char == '\r') {
         char = '\n';
-        if (tokenizer.input.position < tokenizer.input.chars.len and tokenizer.input.chars[tokenizer.input.position] == '\n') {
-            tokenizer.input.position += 1;
+        if (parser.input_stream.position < parser.input_stream.text.len and parser.input_stream.text[parser.input_stream.position] == '\n') {
+            parser.input_stream.position += 1;
         }
     }
 
@@ -187,27 +164,27 @@ fn nextNoErrorCheck(tokenizer: *Tokenizer) ?u21 {
 }
 
 /// Undoes a call to `nextNoErrorCheck`.
-fn undo(tokenizer: *Tokenizer) void {
-    if (tokenizer.input.eof) {
-        tokenizer.input.eof = false;
+fn undo(parser: *Parser) void {
+    if (parser.input_stream.eof) {
+        parser.input_stream.eof = false;
         return;
     }
 
-    const previous = tokenizer.input.chars[tokenizer.input.position - 1];
-    if (previous == '\n' and tokenizer.input.position >= 2 and tokenizer.input.chars[tokenizer.input.position - 2] == '\r') {
-        tokenizer.input.position -= 2;
+    const previous = parser.input_stream.text[parser.input_stream.position - 1];
+    if (previous == '\n' and parser.input_stream.position >= 2 and parser.input_stream.text[parser.input_stream.position - 2] == '\r') {
+        parser.input_stream.position -= 2;
     } else {
-        tokenizer.input.position -= 1;
+        parser.input_stream.position -= 1;
     }
 }
 
-fn nextIgnoreEofNoErrorCheck(tokenizer: *Tokenizer) u21 {
-    return tokenizer.nextNoErrorCheck() orelse TREAT_AS_ANYTHING_ELSE;
+fn nextIgnoreEofNoErrorCheck(parser: *Parser) u21 {
+    return nextNoErrorCheck(parser) orelse TREAT_AS_ANYTHING_ELSE;
 }
 
-fn peekIgnoreEof(tokenizer: *Tokenizer) u21 {
-    const char = tokenizer.nextIgnoreEofNoErrorCheck();
-    tokenizer.undo();
+fn peekIgnoreEof(parser: *Parser) u21 {
+    const char = nextIgnoreEofNoErrorCheck(parser);
+    undo(parser);
     return char;
 }
 
@@ -215,9 +192,9 @@ fn peekIgnoreEof(tokenizer: *Tokenizer) u21 {
 /// character is a surrogate, noncharacter, or control character, and if so,
 /// emits a parse error.
 /// Implements part of §13.2.3.5 "Preprocessing the input stream" of the HTML standard.
-fn checkInputCharacterForErrors(tokenizer: *Tokenizer, character: u21) !void {
+fn checkInputCharacterForErrors(parser: *Parser, character: u21) !void {
     switch (character) {
-        0xD800...0xDFFF => try tokenizer.parseError(.SurrogateInInputStream),
+        0xD800...0xDFFF => try parser.parseError(.SurrogateInInputStream),
         0xFDD0...0xFDEF,
         0xFFFE,
         0xFFFF,
@@ -253,12 +230,12 @@ fn checkInputCharacterForErrors(tokenizer: *Tokenizer, character: u21) !void {
         0xFFFFF,
         0x10FFFE,
         0x10FFFF,
-        => try tokenizer.parseError(.NoncharacterInInputStream),
+        => try parser.parseError(.NoncharacterInInputStream),
         0x01...0x08,
         0x0B,
         0x0E...0x1F,
         0x7F...0x9F,
-        => try tokenizer.parseError(.ControlCharacterInInputStream),
+        => try parser.parseError(.ControlCharacterInInputStream),
         0x0D => unreachable, // This character would have been turned into 0x0A.
         else => {},
     }
@@ -267,39 +244,43 @@ fn checkInputCharacterForErrors(tokenizer: *Tokenizer, character: u21) !void {
 /// Scans the next characters in the input stream to see if they are equal to `string`.
 /// If so, consumes those characters and returns `true`. Otherwise, adds any read characters
 /// to the list of replayed characters and returns `false`.
-fn consumeCharsIfEql(tokenizer: *Tokenizer, comptime string: []const u8) bool {
+fn consumeCharsIfEql(parser: *Parser, comptime string: []const u8) bool {
     const decoded_string = rem.util.utf8DecodeStringComptime(string);
-    return consumeCharsIfEqlGeneric(tokenizer, &decoded_string, caseSensitiveEql);
+    return consumeCharsIfEqlGeneric(parser, &decoded_string, caseSensitiveEql);
 }
 
 /// Scans the next characters in the input stream to see if they are equal to `string` in
 /// a case-insensitive manner.
 /// If so, consumes those characters and returns `true`. Otherwise, adds any read characters
 /// to the list of replayed characters and returns `false`.
-fn consumeCharsIfCaseInsensitiveEql(tokenizer: *Tokenizer, comptime string: []const u8) bool {
+fn consumeCharsIfCaseInsensitiveEql(parser: *Parser, comptime string: []const u8) bool {
     const decoded_string = rem.util.utf8DecodeStringComptime(string);
-    return consumeCharsIfEqlGeneric(tokenizer, &decoded_string, caseInsensitiveEql);
+    return consumeCharsIfEqlGeneric(parser, &decoded_string, caseInsensitiveEql);
 }
 
-fn consumeCharsIfEqlGeneric(tokenizer: *Tokenizer, decoded_string: []const u21, comptime eqlFn: fn (u21, u21) bool) bool {
+fn consumeCharsIfEqlGeneric(parser: *Parser, decoded_string: []const u21, comptime eqlFn: fn (u21, u21) bool) bool {
     var index: usize = 0;
     while (index < decoded_string.len) {
         const string_char = decoded_string[index];
         index += 1;
-        const next_char = tokenizer.nextNoErrorCheck() orelse break;
+        const next_char = nextNoErrorCheck(parser) orelse break;
         if (!eqlFn(string_char, next_char)) break;
     } else {
         return true;
     }
 
     while (index > 0) : (index -= 1) {
-        tokenizer.undo();
+        undo(parser);
     }
     return false;
 }
 
+fn emitToken(tokenizer: *Tokenizer, token: Token) !void {
+    try tokenizer.status.tokens.append(tokenizer.allocator, token);
+}
+
 fn emitCharacter(tokenizer: *Tokenizer, character: u21) !void {
-    try tokenizer.tokens.append(Token{ .character = .{ .data = character } });
+    try tokenizer.emitToken(Token{ .character = .{ .data = character } });
 }
 
 fn emitString(tokenizer: *Tokenizer, comptime string: []const u8) !void {
@@ -308,49 +289,45 @@ fn emitString(tokenizer: *Tokenizer, comptime string: []const u8) !void {
     }
 }
 
-fn parseError(tokenizer: *Tokenizer, err: ParseError) !void {
-    try tokenizer.error_handler.sendError(err);
-}
-
 fn adjustedCurrentNodeIsNotInHtmlNamespace(tokenizer: *Tokenizer) bool {
     return tokenizer.adjusted_current_node_is_not_in_html_namespace;
 }
 
 fn eof(tokenizer: *Tokenizer) !void {
-    try tokenizer.tokens.append(Token.eof);
+    try tokenizer.emitToken(.eof);
     tokenizer.eof = true;
 }
 
-fn data(tokenizer: *Tokenizer) !void {
-    while (try tokenizer.next()) |char| switch (char) {
-        '&' => try characterReference(tokenizer, null),
-        '<' => return tagOpen(tokenizer),
+fn data(parser: *Parser, tokenizer: *Tokenizer) !void {
+    while (try next(parser)) |char| switch (char) {
+        '&' => try characterReference(parser, tokenizer, null),
+        '<' => return tagOpen(parser, tokenizer),
         0x00 => {
-            try tokenizer.parseError(.UnexpectedNullCharacter);
+            try parser.parseError(.UnexpectedNullCharacter);
             try tokenizer.emitCharacter(0x00);
         },
         else => |c| try tokenizer.emitCharacter(c),
     } else {
-        return tokenizer.setState(.Eof);
+        return tokenizer.setNewState(.Eof);
     }
 }
 
-fn markupDeclarationOpen(tokenizer: *Tokenizer) !void {
-    if (tokenizer.consumeCharsIfEql("--")) {
-        return comment(tokenizer);
-    } else if (tokenizer.consumeCharsIfCaseInsensitiveEql("DOCTYPE")) {
-        return doctype(tokenizer);
-    } else if (tokenizer.consumeCharsIfEql("[CDATA[")) {
+fn markupDeclarationOpen(parser: *Parser, tokenizer: *Tokenizer) !void {
+    if (consumeCharsIfEql(parser, "--")) {
+        return comment(parser, tokenizer);
+    } else if (consumeCharsIfCaseInsensitiveEql(parser, "DOCTYPE")) {
+        return doctype(parser, tokenizer);
+    } else if (consumeCharsIfEql(parser, "[CDATA[")) {
         if (tokenizer.adjustedCurrentNodeIsNotInHtmlNamespace()) {
-            tokenizer.setState(.CDATASection);
+            return tokenizer.setNewState(.CDATASection);
         } else {
-            try tokenizer.parseError(.CDATAInHtmlContent);
-            for ("[CDATA[") |_| tokenizer.undo();
-            return bogusComment(tokenizer);
+            try parser.parseError(.CDATAInHtmlContent);
+            for ("[CDATA[") |_| undo(parser);
+            return bogusComment(parser, tokenizer);
         }
     } else {
-        try tokenizer.parseError(.IncorrectlyOpenedComment);
-        return bogusComment(tokenizer);
+        try parser.parseError(.IncorrectlyOpenedComment);
+        return bogusComment(parser, tokenizer);
     }
 }
 
@@ -392,14 +369,14 @@ const TagData = struct {
         try appendChar(&tag_data.buffer, tag_data.allocator, char);
     }
 
-    fn finishAttributeName(tag_data: *TagData, tokenizer: *Tokenizer) !void {
+    fn finishAttributeName(tag_data: *TagData, parser: *Parser) !void {
         const attribute_name = tag_data.buffer.toOwnedSlice(tag_data.allocator);
         errdefer tag_data.allocator.free(attribute_name);
 
         const get_result = try tag_data.attributes.getOrPut(tag_data.allocator, attribute_name);
 
         if (get_result.found_existing) {
-            try tokenizer.parseError(.DuplicateAttribute);
+            try parser.parseError(.DuplicateAttribute);
             tag_data.allocator.free(attribute_name);
             tag_data.current_attribute_value_result_location = null;
         } else {
@@ -419,7 +396,7 @@ const TagData = struct {
     }
 };
 
-fn emitTag(tokenizer: *Tokenizer, tag_data: *TagData) !void {
+fn emitTag(parser: *Parser, tokenizer: *Tokenizer, tag_data: *TagData) !void {
     const name = tag_data.name.toOwnedSlice(tag_data.allocator);
     errdefer tag_data.allocator.free(name);
 
@@ -431,7 +408,7 @@ fn emitTag(tokenizer: *Tokenizer, tag_data: *TagData) !void {
                 .self_closing = tag_data.self_closing,
             } };
             tag_data.attributes = .{};
-            try tokenizer.tokens.append(token);
+            try tokenizer.emitToken(token);
         },
         .End => {
             // TODO: Don't store any attributes in the first place
@@ -442,124 +419,125 @@ fn emitTag(tokenizer: *Tokenizer, tag_data: *TagData) !void {
                     tag_data.allocator.free(attr.value_ptr.*);
                 }
                 tag_data.attributes.clearRetainingCapacity();
-                try tokenizer.parseError(.EndTagWithAttributes);
+                try parser.parseError(.EndTagWithAttributes);
             }
 
             if (tag_data.self_closing) {
-                try tokenizer.parseError(.EndTagWithTrailingSolidus);
+                try parser.parseError(.EndTagWithTrailingSolidus);
             }
 
             tokenizer.last_start_tag = undefined;
 
-            try tokenizer.tokens.append(Token{ .end_tag = .{
+            const token = Token{ .end_tag = .{
                 .name = name,
-            } });
+            } };
+            try tokenizer.emitToken(token);
         },
     }
 }
 
-fn tagOpen(tokenizer: *Tokenizer) !void {
-    if (tokenizer.nextNoErrorCheck()) |char| switch (char) {
-        '!' => return markupDeclarationOpen(tokenizer),
-        '/' => return endTagOpen(tokenizer),
+fn tagOpen(parser: *Parser, tokenizer: *Tokenizer) !void {
+    if (nextNoErrorCheck(parser)) |char| switch (char) {
+        '!' => return markupDeclarationOpen(parser, tokenizer),
+        '/' => return endTagOpen(parser, tokenizer),
         'A'...'Z', 'a'...'z' => {
-            tokenizer.undo();
-            return tagName(tokenizer, .Start);
+            undo(parser);
+            return tagName(parser, tokenizer, .Start);
         },
         '?' => {
-            try tokenizer.parseError(.UnexpectedQuestionMarkInsteadOfTagName);
-            tokenizer.undo();
-            return bogusComment(tokenizer);
+            try parser.parseError(.UnexpectedQuestionMarkInsteadOfTagName);
+            undo(parser);
+            return bogusComment(parser, tokenizer);
         },
         else => {
-            try tokenizer.parseError(.InvalidFirstCharacterOfTagName);
+            try parser.parseError(.InvalidFirstCharacterOfTagName);
             try tokenizer.emitCharacter('<');
-            return tokenizer.undo();
+            return undo(parser);
         },
     } else {
-        try tokenizer.parseError(.EOFBeforeTagName);
+        try parser.parseError(.EOFBeforeTagName);
         try tokenizer.emitCharacter('<');
-        return tokenizer.setState(.Eof);
+        return tokenizer.setNewState(.Eof);
     }
 }
 
-fn endTagOpen(tokenizer: *Tokenizer) !void {
-    if (tokenizer.nextNoErrorCheck()) |char| {
+fn endTagOpen(parser: *Parser, tokenizer: *Tokenizer) !void {
+    if (nextNoErrorCheck(parser)) |char| {
         switch (char) {
             'A'...'Z', 'a'...'z' => {
-                tokenizer.undo();
-                return tagName(tokenizer, .End);
+                undo(parser);
+                return tagName(parser, tokenizer, .End);
             },
-            '>' => try tokenizer.parseError(.MissingEndTagName),
+            '>' => try parser.parseError(.MissingEndTagName),
             else => {
-                try tokenizer.parseError(.InvalidFirstCharacterOfTagName);
-                tokenizer.undo();
-                return bogusComment(tokenizer);
+                try parser.parseError(.InvalidFirstCharacterOfTagName);
+                undo(parser);
+                return bogusComment(parser, tokenizer);
             },
         }
     } else {
-        try tokenizer.parseError(.EOFBeforeTagName);
+        try parser.parseError(.EOFBeforeTagName);
         try tokenizer.emitString("</");
-        return tokenizer.setState(.Eof);
+        return tokenizer.setNewState(.Eof);
     }
 }
 
-fn tagName(tokenizer: *Tokenizer, start_or_end: TagData.StartOrEnd) !void {
+fn tagName(parser: *Parser, tokenizer: *Tokenizer, start_or_end: TagData.StartOrEnd) !void {
     var tag_data = TagData.init(start_or_end, tokenizer.allocator);
     defer tag_data.deinit();
 
-    while (try tokenizer.next()) |current_input_char| {
+    while (try next(parser)) |current_input_char| {
         switch (current_input_char) {
-            '\t', '\n', 0x0C, ' ' => return attribute(tokenizer, &tag_data),
-            '/' => return selfClosingStartTag(tokenizer, &tag_data),
-            '>' => return try emitTag(tokenizer, &tag_data),
+            '\t', '\n', 0x0C, ' ' => return attribute(parser, tokenizer, &tag_data),
+            '/' => return selfClosingStartTag(parser, tokenizer, &tag_data),
+            '>' => return try emitTag(parser, tokenizer, &tag_data),
             0x00 => {
-                try tokenizer.parseError(.UnexpectedNullCharacter);
+                try parser.parseError(.UnexpectedNullCharacter);
                 try tag_data.appendName(REPLACEMENT_CHARACTER);
             },
             else => |c| try tag_data.appendName(toLowercase(c)),
         }
     } else {
-        try tokenizer.parseError(.EOFInTag);
-        return tokenizer.setState(.Eof);
+        try parser.parseError(.EOFInTag);
+        return tokenizer.setNewState(.Eof);
     }
 }
 
-fn nonDataEndTagOpen(tokenizer: *Tokenizer) !void {
-    switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+fn nonDataEndTagOpen(parser: *Parser, tokenizer: *Tokenizer) !void {
+    switch (nextIgnoreEofNoErrorCheck(parser)) {
         'A'...'Z', 'a'...'z' => {
-            tokenizer.undo();
-            return nonDataEndTagName(tokenizer);
+            undo(parser);
+            return nonDataEndTagName(parser, tokenizer);
         },
         else => {
             try tokenizer.emitString("</");
-            tokenizer.undo();
+            undo(parser);
         },
     }
 }
 
-fn nonDataEndTagName(tokenizer: *Tokenizer) !void {
+fn nonDataEndTagName(parser: *Parser, tokenizer: *Tokenizer) !void {
     var tag_data = TagData.init(.End, tokenizer.allocator);
     defer tag_data.deinit();
 
-    while (tokenizer.nextNoErrorCheck()) |char| {
+    while (nextNoErrorCheck(parser)) |char| {
         switch (char) {
             '\t', '\n', 0x0C, ' ' => {
                 if (tokenizer.isAppropriateEndTag(&tag_data)) {
-                    return attribute(tokenizer, &tag_data);
+                    return attribute(parser, tokenizer, &tag_data);
                 }
                 break;
             },
             '/' => {
                 if (tokenizer.isAppropriateEndTag(&tag_data)) {
-                    return selfClosingStartTag(tokenizer, &tag_data);
+                    return selfClosingStartTag(parser, tokenizer, &tag_data);
                 }
                 break;
             },
             '>' => {
                 if (tokenizer.isAppropriateEndTag(&tag_data)) {
-                    try emitTag(tokenizer, &tag_data);
-                    return tokenizer.setState(.Data);
+                    try emitTag(parser, tokenizer, &tag_data);
+                    return tokenizer.setNewState(.Data);
                 }
                 break;
             },
@@ -570,7 +548,7 @@ fn nonDataEndTagName(tokenizer: *Tokenizer) !void {
 
     try tokenizer.emitString("</");
     for (tag_data.name.items) |c| try tokenizer.emitCharacter(c);
-    tokenizer.undo();
+    undo(parser);
 }
 
 fn isAppropriateEndTag(tokenizer: *Tokenizer, tag_data: *const TagData) bool {
@@ -584,239 +562,241 @@ const AttributeState = enum {
     Slash,
 };
 
-fn attribute(tokenizer: *Tokenizer, tag_data: *TagData) !void {
-    return attributeLoop(tokenizer, tag_data, .BeforeName);
+fn attribute(parser: *Parser, tokenizer: *Tokenizer, tag_data: *TagData) !void {
+    return attributeLoop(parser, tokenizer, tag_data, .BeforeName);
 }
 
-fn selfClosingStartTag(tokenizer: *Tokenizer, tag_data: *TagData) !void {
-    return attributeLoop(tokenizer, tag_data, .Slash);
+fn selfClosingStartTag(parser: *Parser, tokenizer: *Tokenizer, tag_data: *TagData) !void {
+    return attributeLoop(parser, tokenizer, tag_data, .Slash);
 }
 
-fn attributeLoop(tokenizer: *Tokenizer, tag_data: *TagData, initial_state: AttributeState) !void {
+fn attributeLoop(parser: *Parser, tokenizer: *Tokenizer, tag_data: *TagData, initial_state: AttributeState) !void {
     var next_state: ?AttributeState = initial_state;
     while (next_state) |state| {
         next_state = switch (state) {
-            .BeforeName => try beforeAttributeName(tokenizer, tag_data),
-            .Name => try attributeName(tokenizer, tag_data),
-            .Value => try beforeAttributeValue(tokenizer, tag_data),
-            .Slash => try attributeSlash(tokenizer, tag_data),
+            .BeforeName => try beforeAttributeName(parser, tokenizer, tag_data),
+            .Name => try attributeName(parser, tokenizer, tag_data),
+            .Value => try beforeAttributeValue(parser, tokenizer, tag_data),
+            .Slash => try attributeSlash(parser, tokenizer, tag_data),
         };
     }
 }
 
-fn beforeAttributeName(tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
+fn beforeAttributeName(parser: *Parser, tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
     // Make end-of-file (null) be handled the same as '>'
-    while (true) switch (tokenizer.nextNoErrorCheck() orelse '>') {
+    while (true) switch (nextNoErrorCheck(parser) orelse '>') {
         '\t', '\n', 0x0C, ' ' => {},
         '/', '>' => {
-            tokenizer.undo();
-            return try afterAttributeName(tokenizer, tag_data);
+            undo(parser);
+            return try afterAttributeName(parser, tokenizer, tag_data);
         },
         '=' => {
-            try tokenizer.parseError(.UnexpectedEqualsSignBeforeAttributeName);
+            try parser.parseError(.UnexpectedEqualsSignBeforeAttributeName);
             try tag_data.appendCurrentAttributeName('=');
             return AttributeState.Name;
         },
         else => {
-            tokenizer.undo();
+            undo(parser);
             return AttributeState.Name;
         },
     };
 }
 
-fn attributeName(tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
+fn attributeName(parser: *Parser, tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
     // Make end-of-file (null) be handled the same as '>'
-    while (true) switch ((try tokenizer.next()) orelse '>') {
+    while (true) switch ((try next(parser)) orelse '>') {
         '\t', '\n', 0x0C, ' ', '/', '>' => {
-            try tag_data.finishAttributeName(tokenizer);
-            tokenizer.undo();
-            return try afterAttributeName(tokenizer, tag_data);
+            try tag_data.finishAttributeName(parser);
+            undo(parser);
+            return try afterAttributeName(parser, tokenizer, tag_data);
         },
         '=' => {
-            try tag_data.finishAttributeName(tokenizer);
+            try tag_data.finishAttributeName(parser);
             return AttributeState.Value;
         },
         0x00 => {
-            try tokenizer.parseError(.UnexpectedNullCharacter);
+            try parser.parseError(.UnexpectedNullCharacter);
             try tag_data.appendCurrentAttributeName(REPLACEMENT_CHARACTER);
         },
         '"', '\'', '<' => |c| {
-            try tokenizer.parseError(.UnexpectedCharacterInAttributeName);
+            try parser.parseError(.UnexpectedCharacterInAttributeName);
             try tag_data.appendCurrentAttributeName(c);
         },
         else => |c| try tag_data.appendCurrentAttributeName(toLowercase(c)),
     };
 }
 
-fn afterAttributeName(tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
-    while (tokenizer.nextNoErrorCheck()) |current_input_char| {
+fn afterAttributeName(parser: *Parser, tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
+    while (nextNoErrorCheck(parser)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             '/' => return AttributeState.Slash,
             '=' => return AttributeState.Value,
-            '>' => return try attributeEnd(tokenizer, tag_data),
+            '>' => return try attributeEnd(parser, tokenizer, tag_data),
             else => {
-                tokenizer.undo();
+                undo(parser);
                 return AttributeState.Name;
             },
         }
     } else {
-        return try eofInTag(tokenizer);
+        return try eofInTag(parser, tokenizer);
     }
 }
 
-fn beforeAttributeValue(tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
-    while (true) switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+fn beforeAttributeValue(parser: *Parser, tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
+    while (true) switch (nextIgnoreEofNoErrorCheck(parser)) {
         '\t', '\n', 0x0C, ' ' => {},
-        '"' => return attributeValueQuoted(tokenizer, tag_data, .Double),
-        '\'' => return attributeValueQuoted(tokenizer, tag_data, .Single),
+        '"' => return attributeValueQuoted(parser, tokenizer, tag_data, .Double),
+        '\'' => return attributeValueQuoted(parser, tokenizer, tag_data, .Single),
         '>' => {
-            try tokenizer.parseError(.MissingAttributeValue);
-            return try attributeEnd(tokenizer, tag_data);
+            try parser.parseError(.MissingAttributeValue);
+            return try attributeEnd(parser, tokenizer, tag_data);
         },
         else => {
-            tokenizer.undo();
-            return attributeValueUnquoted(tokenizer, tag_data);
+            undo(parser);
+            return attributeValueUnquoted(parser, tokenizer, tag_data);
         },
     };
 }
 
 const QuoteStyle = enum { Single, Double };
 
-fn attributeValueQuoted(tokenizer: *Tokenizer, tag_data: *TagData, comptime quote_style: QuoteStyle) !?AttributeState {
+fn attributeValueQuoted(parser: *Parser, tokenizer: *Tokenizer, tag_data: *TagData, comptime quote_style: QuoteStyle) !?AttributeState {
     const quote = switch (quote_style) {
         .Single => '\'',
         .Double => '"',
     };
 
-    while (try tokenizer.next()) |current_input_char| {
+    while (try next(parser)) |current_input_char| {
         switch (current_input_char) {
             quote => break tag_data.finishAttributeValue(),
-            '&' => try characterReference(tokenizer, tag_data),
+            '&' => try characterReference(parser, tokenizer, tag_data),
             0x00 => {
-                try tokenizer.parseError(.UnexpectedNullCharacter);
+                try parser.parseError(.UnexpectedNullCharacter);
                 try tag_data.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
             },
             else => |c| try tag_data.appendCurrentAttributeValue(c),
         }
     } else {
-        return try eofInTag(tokenizer);
+        return try eofInTag(parser, tokenizer);
     }
 
     // AfterAttributeValueQuoted
-    if (tokenizer.nextNoErrorCheck()) |current_input_char| {
+    if (nextNoErrorCheck(parser)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => return AttributeState.BeforeName,
             '/' => return AttributeState.Slash,
-            '>' => return try attributeEnd(tokenizer, tag_data),
+            '>' => return try attributeEnd(parser, tokenizer, tag_data),
             else => {
-                try tokenizer.parseError(.MissingWhitespaceBetweenAttributes);
-                tokenizer.undo();
+                try parser.parseError(.MissingWhitespaceBetweenAttributes);
+                undo(parser);
                 return AttributeState.BeforeName;
             },
         }
     } else {
-        return try eofInTag(tokenizer);
+        return try eofInTag(parser, tokenizer);
     }
 }
 
-fn attributeValueUnquoted(tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
-    while (try tokenizer.next()) |current_input_char| switch (current_input_char) {
+fn attributeValueUnquoted(parser: *Parser, tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
+    while (try next(parser)) |current_input_char| switch (current_input_char) {
         '\t', '\n', 0x0C, ' ' => {
             tag_data.finishAttributeValue();
             return AttributeState.BeforeName;
         },
-        '&' => try characterReference(tokenizer, tag_data),
+        '&' => try characterReference(parser, tokenizer, tag_data),
         '>' => {
             tag_data.finishAttributeValue();
-            return try attributeEnd(tokenizer, tag_data);
+            return try attributeEnd(parser, tokenizer, tag_data);
         },
         0x00 => {
-            try tokenizer.parseError(.UnexpectedNullCharacter);
+            try parser.parseError(.UnexpectedNullCharacter);
             try tag_data.appendCurrentAttributeValue(REPLACEMENT_CHARACTER);
         },
         '"', '\'', '<', '=', '`' => |c| {
-            try tokenizer.parseError(.UnexpectedCharacterInUnquotedAttributeValue);
+            try parser.parseError(.UnexpectedCharacterInUnquotedAttributeValue);
             try tag_data.appendCurrentAttributeValue(c);
         },
         else => |c| try tag_data.appendCurrentAttributeValue(c),
     } else {
-        return try eofInTag(tokenizer);
+        return try eofInTag(parser, tokenizer);
     }
 }
 
-fn attributeSlash(tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
-    if (tokenizer.nextNoErrorCheck()) |current_input_char| {
+fn attributeSlash(parser: *Parser, tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
+    if (nextNoErrorCheck(parser)) |current_input_char| {
         switch (current_input_char) {
             '>' => {
                 tag_data.self_closing = true;
-                return try attributeEnd(tokenizer, tag_data);
+                return try attributeEnd(parser, tokenizer, tag_data);
             },
             else => {
-                try tokenizer.parseError(.UnexpectedSolidusInTag);
-                tokenizer.undo();
+                try parser.parseError(.UnexpectedSolidusInTag);
+                undo(parser);
                 return AttributeState.BeforeName;
             },
         }
     } else {
-        return try eofInTag(tokenizer);
+        return try eofInTag(parser, tokenizer);
     }
 }
 
-fn attributeEnd(tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
-    tokenizer.setState(.Data);
-    try emitTag(tokenizer, tag_data);
+fn attributeEnd(parser: *Parser, tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
+    tokenizer.setNewState(.Data);
+    try emitTag(parser, tokenizer, tag_data);
     return null;
 }
 
-fn eofInTag(tokenizer: *Tokenizer) !?AttributeState {
-    try tokenizer.parseError(.EOFInTag);
-    tokenizer.setState(.Eof);
+fn eofInTag(parser: *Parser, tokenizer: *Tokenizer) !?AttributeState {
+    try parser.parseError(.EOFInTag);
+    tokenizer.setNewState(.Eof);
     return null;
 }
 
-fn characterReference(tokenizer: *Tokenizer, tag_data: ?*TagData) !void {
+fn characterReference(parser: *Parser, tokenizer: *Tokenizer, tag_data: ?*TagData) !void {
     // By assumption, the '&' character has just been consumed.
     var num_consumed_chars: usize = 1;
 
-    switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+    switch (nextIgnoreEofNoErrorCheck(parser)) {
         '0'...'9', 'A'...'Z', 'a'...'z' => {
-            tokenizer.undo();
-            return namedCharacterReference(tokenizer, tag_data, &num_consumed_chars);
+            undo(parser);
+            return namedCharacterReference(parser, tokenizer, tag_data, &num_consumed_chars);
         },
         '#' => {
             num_consumed_chars += 1;
-            return numericCharacterReference(tokenizer, tag_data, &num_consumed_chars);
+            return numericCharacterReference(parser, tokenizer, tag_data, &num_consumed_chars);
         },
         else => {
-            tokenizer.undo();
-            return flushCharacterReference(tokenizer, tag_data, &num_consumed_chars);
+            undo(parser);
+            return flushCharacterReference(parser, tokenizer, tag_data, &num_consumed_chars);
         },
     }
 }
 
-fn namedCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *usize) !void {
-    const result = try findNamedCharacterReference(tokenizer, num_consumed_chars);
+fn namedCharacterReference(parser: *Parser, tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *usize) !void {
+    const result = try findNamedCharacterReference(parser, num_consumed_chars);
     const match_found = result.chars[0] != null;
     if (match_found) {
-        const is_alphanumeric_or_equal = switch (tokenizer.peekIgnoreEof()) {
-            '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
-            else => false,
-        };
-        const dont_emit_chars = (tag_data != null and !result.ends_with_semicolon and is_alphanumeric_or_equal);
+        const dont_emit_chars = if (tag_data != null and !result.ends_with_semicolon)
+            switch (peekIgnoreEof(parser)) {
+                '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
+                else => false,
+            }
+        else
+            false;
 
         if (dont_emit_chars) {
-            return flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
+            return flushCharacterReference(parser, tokenizer, tag_data, num_consumed_chars);
         } else {
             if (!result.ends_with_semicolon) {
-                try tokenizer.parseError(.MissingSemicolonAfterCharacterReference);
+                try parser.parseError(.MissingSemicolonAfterCharacterReference);
             }
             try characterReferenceEmitCharacter(tokenizer, tag_data, result.chars[0].?);
             if (result.chars[1]) |second| try characterReferenceEmitCharacter(tokenizer, tag_data, second);
         }
     } else {
-        try flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
-        return ambiguousAmpersand(tokenizer, tag_data);
+        try flushCharacterReference(parser, tokenizer, tag_data, num_consumed_chars);
+        return ambiguousAmpersand(parser, tokenizer, tag_data);
     }
 }
 
@@ -825,7 +805,7 @@ const FindNamedCharacterReferenceResult = struct {
     ends_with_semicolon: bool,
 };
 
-fn findNamedCharacterReference(tokenizer: *Tokenizer, num_consumed_chars: *usize) !FindNamedCharacterReferenceResult {
+fn findNamedCharacterReference(parser: *Parser, num_consumed_chars: *usize) !FindNamedCharacterReferenceResult {
     var last_index_with_value = named_characters.root_index;
     var ends_with_semicolon: bool = false;
 
@@ -833,8 +813,8 @@ fn findNamedCharacterReference(tokenizer: *Tokenizer, num_consumed_chars: *usize
     var num_pending_chars: usize = 0;
 
     while (true) {
-        const character = tokenizer.nextNoErrorCheck() orelse {
-            tokenizer.undo();
+        const character = nextNoErrorCheck(parser) orelse {
+            undo(parser);
             break;
         };
         num_pending_chars += 1;
@@ -860,79 +840,79 @@ fn findNamedCharacterReference(tokenizer: *Tokenizer, num_consumed_chars: *usize
     }
 
     while (num_pending_chars > 0) : (num_pending_chars -= 1) {
-        tokenizer.undo();
+        undo(parser);
     }
 
     // There is no need to check the consumed characters for errors (controls, surrogates, noncharacters)
-    // because we've just determined that they form a valid character reference.
+    // beacuse we've just determined that they form a valid character reference.
     return FindNamedCharacterReferenceResult{ .chars = last_index_with_value.value(), .ends_with_semicolon = ends_with_semicolon };
 }
 
-fn ambiguousAmpersand(tokenizer: *Tokenizer, tag_data: ?*TagData) !void {
-    while (true) switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+fn ambiguousAmpersand(parser: *Parser, tokenizer: *Tokenizer, tag_data: ?*TagData) !void {
+    while (true) switch (nextIgnoreEofNoErrorCheck(parser)) {
         '0'...'9', 'A'...'Z', 'a'...'z' => |c| try characterReferenceEmitCharacter(tokenizer, tag_data, c),
-        ';' => break try tokenizer.parseError(.UnknownNamedCharacterReference),
+        ';' => break try parser.parseError(.UnknownNamedCharacterReference),
         else => break,
     };
 
-    tokenizer.undo();
+    undo(parser);
 }
 
-fn numericCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *usize) !void {
+fn numericCharacterReference(parser: *Parser, tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *usize) !void {
     var character_reference_code: u21 = 0;
-    switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+    switch (nextIgnoreEofNoErrorCheck(parser)) {
         'x', 'X' => {
             num_consumed_chars.* += 1;
 
             // HexadecimalCharacterReferenceStart
-            switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+            switch (nextIgnoreEofNoErrorCheck(parser)) {
                 '0'...'9', 'A'...'F', 'a'...'f' => {
-                    tokenizer.undo();
+                    undo(parser);
 
                     // HexadecimalCharacterReference
-                    while (true) switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+                    while (true) switch (nextIgnoreEofNoErrorCheck(parser)) {
                         '0'...'9' => |c| characterReferenceCodeAddDigit(&character_reference_code, 16, decimalCharToNumber(c)),
                         'A'...'F' => |c| characterReferenceCodeAddDigit(&character_reference_code, 16, upperHexCharToNumber(c)),
                         'a'...'f' => |c| characterReferenceCodeAddDigit(&character_reference_code, 16, lowerHexCharToNumber(c)),
                         ';' => break,
                         else => {
-                            try tokenizer.parseError(.MissingSemicolonAfterCharacterReference);
-                            break tokenizer.undo();
+                            try parser.parseError(.MissingSemicolonAfterCharacterReference);
+                            break undo(parser);
                         },
                     };
                 },
-                else => return noDigitsInNumericCharacterReference(tokenizer, tag_data, num_consumed_chars),
+                else => return noDigitsInNumericCharacterReference(parser, tokenizer, tag_data, num_consumed_chars),
             }
         },
         // DecimalCharacterReferenceStart
         '0'...'9' => {
-            tokenizer.undo();
+            undo(parser);
 
             // DecimalCharacterReference
-            while (true) switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+            while (true) switch (nextIgnoreEofNoErrorCheck(parser)) {
                 '0'...'9' => |c| characterReferenceCodeAddDigit(&character_reference_code, 10, decimalCharToNumber(c)),
                 ';' => break,
                 else => {
-                    try tokenizer.parseError(.MissingSemicolonAfterCharacterReference);
-                    break tokenizer.undo();
+                    try parser.parseError(.MissingSemicolonAfterCharacterReference);
+                    break undo(parser);
                 },
             };
         },
-        else => return noDigitsInNumericCharacterReference(tokenizer, tag_data, num_consumed_chars),
+        else => return noDigitsInNumericCharacterReference(parser, tokenizer, tag_data, num_consumed_chars),
     }
 
     // NumericCharacterReferenceEnd
     switch (character_reference_code) {
         0x00 => {
-            try tokenizer.parseError(.NullCharacterReference);
+            try parser.parseError(.NullCharacterReference);
             character_reference_code = REPLACEMENT_CHARACTER;
         },
         0x10FFFF + 1...std.math.maxInt(@TypeOf(character_reference_code)) => {
-            try tokenizer.parseError(.CharacterReferenceOutsideUnicodeRange);
+            try parser.parseError(.CharacterReferenceOutsideUnicodeRange);
             character_reference_code = REPLACEMENT_CHARACTER;
         },
         0xD800...0xDFFF => {
-            try tokenizer.parseError(.SurrogateCharacterReference);
+            try parser.parseError(.SurrogateCharacterReference);
             character_reference_code = REPLACEMENT_CHARACTER;
         },
         0xFDD0...0xFDEF,
@@ -970,10 +950,10 @@ fn numericCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_con
         0xFFFFF,
         0x10FFFE,
         0x10FFFF,
-        => try tokenizer.parseError(.NoncharacterCharacterReference),
-        0x01...0x08, 0x0B, 0x0D...0x1F => try tokenizer.parseError(.ControlCharacterReference),
+        => try parser.parseError(.NoncharacterCharacterReference),
+        0x01...0x08, 0x0B, 0x0D...0x1F => try parser.parseError(.ControlCharacterReference),
         0x7F...0x9F => |c| {
-            try tokenizer.parseError(.ControlCharacterReference);
+            try parser.parseError(.ControlCharacterReference);
             switch (c) {
                 0x80 => character_reference_code = 0x20AC,
                 0x82 => character_reference_code = 0x201A,
@@ -1015,21 +995,21 @@ fn characterReferenceCodeAddDigit(character_reference_code: *u21, comptime base:
     character_reference_code.* = character_reference_code.* *| base +| digit;
 }
 
-fn noDigitsInNumericCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *const usize) !void {
-    try tokenizer.parseError(.AbsenceOfDigitsInNumericCharacterReference);
-    tokenizer.undo();
-    try flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
+fn noDigitsInNumericCharacterReference(parser: *Parser, tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *const usize) !void {
+    try parser.parseError(.AbsenceOfDigitsInNumericCharacterReference);
+    undo(parser);
+    try flushCharacterReference(parser, tokenizer, tag_data, num_consumed_chars);
 }
 
-fn flushCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *const usize) !void {
+fn flushCharacterReference(parser: *Parser, tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *const usize) !void {
     var i = num_consumed_chars.*;
     while (i > 0) : (i -= 1) {
-        tokenizer.undo();
+        undo(parser);
     }
 
     i = num_consumed_chars.*;
     while (i > 0) : (i -= 1) {
-        const character = tokenizer.nextNoErrorCheck().?;
+        const character = nextNoErrorCheck(parser).?;
         try characterReferenceEmitCharacter(tokenizer, tag_data, character);
     }
 }
@@ -1048,146 +1028,146 @@ const CommentState = enum {
     End,
 };
 
-fn comment(tokenizer: *Tokenizer) !void {
+fn comment(parser: *Parser, tokenizer: *Tokenizer) !void {
     var comment_data = ArrayListUnmanaged(u8){};
     defer comment_data.deinit(tokenizer.allocator);
 
-    var next_state: ?CommentState = try commentStart(tokenizer, &comment_data);
+    var next_state: ?CommentState = try commentStart(parser, tokenizer, &comment_data);
     while (next_state) |state| {
         next_state = switch (state) {
-            .Normal => try commentNormal(tokenizer, &comment_data),
-            .EndDash => try commentEndDash(tokenizer, &comment_data),
-            .End => try commentEnd(tokenizer, &comment_data),
+            .Normal => try commentNormal(parser, tokenizer, &comment_data),
+            .EndDash => try commentEndDash(parser, tokenizer, &comment_data),
+            .End => try commentEnd(parser, tokenizer, &comment_data),
         };
     }
 
     try tokenizer.emitComment(&comment_data);
 }
 
-fn commentStart(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
-    switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+fn commentStart(parser: *Parser, tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
+    switch (nextIgnoreEofNoErrorCheck(parser)) {
         '-' => {
             // CommentStartDash
-            switch (tokenizer.nextNoErrorCheck() orelse return try eofInComment(tokenizer)) {
+            switch (nextNoErrorCheck(parser) orelse return try eofInComment(parser, tokenizer)) {
                 '-' => return CommentState.End,
-                '>' => return try abruptCommentClose(tokenizer),
+                '>' => return try abruptCommentClose(parser),
                 else => {
                     try comment_data.append(tokenizer.allocator, '-');
-                    tokenizer.undo();
+                    undo(parser);
                     return CommentState.Normal;
                 },
             }
         },
-        '>' => return try abruptCommentClose(tokenizer),
+        '>' => return try abruptCommentClose(parser),
         else => {
-            tokenizer.undo();
+            undo(parser);
             return CommentState.Normal;
         },
     }
 }
 
-fn commentNormal(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
-    while (try tokenizer.next()) |current_input_char| switch (current_input_char) {
+fn commentNormal(parser: *Parser, tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
+    while (try next(parser)) |current_input_char| switch (current_input_char) {
         '<' => {
             try comment_data.append(tokenizer.allocator, '<');
 
             // CommentLessThanSign
-            while (true) switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+            while (true) switch (nextIgnoreEofNoErrorCheck(parser)) {
                 '!' => {
                     try comment_data.append(tokenizer.allocator, '!');
 
                     // CommentLessThanSignBang
-                    if (tokenizer.nextIgnoreEofNoErrorCheck() != '-') {
-                        tokenizer.undo();
+                    if (nextIgnoreEofNoErrorCheck(parser) != '-') {
+                        undo(parser);
                         break;
                     }
 
                     // CommentLessThanSignBangDash
-                    if (tokenizer.nextIgnoreEofNoErrorCheck() != '-') {
-                        tokenizer.undo();
+                    if (nextIgnoreEofNoErrorCheck(parser) != '-') {
+                        undo(parser);
                         return CommentState.EndDash;
                     }
 
                     // CommentLessThanSignBangDashDash
                     // Make end-of-file (null) be handled the same as '>'
-                    if (tokenizer.nextNoErrorCheck() orelse '>' != '>') {
-                        try tokenizer.parseError(.NestedComment);
+                    if (nextNoErrorCheck(parser) orelse '>' != '>') {
+                        try parser.parseError(.NestedComment);
                     }
-                    tokenizer.undo();
+                    undo(parser);
                     return CommentState.End;
                 },
                 '<' => try comment_data.append(tokenizer.allocator, '<'),
                 else => {
-                    tokenizer.undo();
+                    undo(parser);
                     break;
                 },
             };
         },
         '-' => return CommentState.EndDash,
         0x00 => {
-            try tokenizer.parseError(.UnexpectedNullCharacter);
+            try parser.parseError(.UnexpectedNullCharacter);
             try appendChar(comment_data, tokenizer.allocator, REPLACEMENT_CHARACTER);
         },
         else => |c| try appendChar(comment_data, tokenizer.allocator, c),
     } else {
-        return try eofInComment(tokenizer);
+        return try eofInComment(parser, tokenizer);
     }
 }
 
-fn commentEndDash(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
-    switch (tokenizer.nextNoErrorCheck() orelse return try eofInComment(tokenizer)) {
+fn commentEndDash(parser: *Parser, tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
+    switch (nextNoErrorCheck(parser) orelse return try eofInComment(parser, tokenizer)) {
         '-' => return CommentState.End,
         else => {
             try comment_data.append(tokenizer.allocator, '-');
-            tokenizer.undo();
+            undo(parser);
             return CommentState.Normal;
         },
     }
 }
 
-fn commentEnd(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
-    while (tokenizer.nextNoErrorCheck()) |current_input_char| switch (current_input_char) {
+fn commentEnd(parser: *Parser, tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
+    while (nextNoErrorCheck(parser)) |current_input_char| switch (current_input_char) {
         '>' => return null,
-        '!' => return try commentEndBang(tokenizer, comment_data),
+        '!' => return try commentEndBang(parser, tokenizer, comment_data),
         '-' => try comment_data.append(tokenizer.allocator, '-'),
         else => {
             try comment_data.appendSlice(tokenizer.allocator, "--");
-            tokenizer.undo();
+            undo(parser);
             return CommentState.Normal;
         },
     } else {
-        return try eofInComment(tokenizer);
+        return try eofInComment(parser, tokenizer);
     }
 }
 
-fn commentEndBang(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
-    switch (tokenizer.nextNoErrorCheck() orelse return try eofInComment(tokenizer)) {
+fn commentEndBang(parser: *Parser, tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
+    switch (nextNoErrorCheck(parser) orelse return try eofInComment(parser, tokenizer)) {
         '-' => {
             try comment_data.appendSlice(tokenizer.allocator, "--!");
             return CommentState.EndDash;
         },
-        '>' => return incorrectlyClosedComment(tokenizer),
+        '>' => return incorrectlyClosedComment(parser),
         else => {
             try comment_data.appendSlice(tokenizer.allocator, "--!");
-            tokenizer.undo();
+            undo(parser);
             return CommentState.Normal;
         },
     }
 }
 
-fn bogusComment(tokenizer: *Tokenizer) !void {
+fn bogusComment(parser: *Parser, tokenizer: *Tokenizer) !void {
     var comment_data = ArrayListUnmanaged(u8){};
     defer comment_data.deinit(tokenizer.allocator);
 
-    while (try tokenizer.next()) |char| switch (char) {
+    while (try next(parser)) |char| switch (char) {
         '>' => break,
         0x00 => {
-            try tokenizer.parseError(.UnexpectedNullCharacter);
+            try parser.parseError(.UnexpectedNullCharacter);
             try appendChar(&comment_data, tokenizer.allocator, REPLACEMENT_CHARACTER);
         },
         else => |c| try appendChar(&comment_data, tokenizer.allocator, c),
     } else {
-        tokenizer.setState(.Eof);
+        tokenizer.setNewState(.Eof);
     }
 
     try tokenizer.emitComment(&comment_data);
@@ -1195,22 +1175,22 @@ fn bogusComment(tokenizer: *Tokenizer) !void {
 
 fn emitComment(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !void {
     const owned = comment_data.toOwnedSlice(tokenizer.allocator);
-    try tokenizer.tokens.append(Token{ .comment = .{ .data = owned } });
+    try tokenizer.emitToken(Token{ .comment = .{ .data = owned } });
 }
 
-fn eofInComment(tokenizer: *Tokenizer) !?CommentState {
-    try tokenizer.parseError(.EOFInComment);
-    tokenizer.setState(.Eof);
+fn eofInComment(parser: *Parser, tokenizer: *Tokenizer) !?CommentState {
+    try parser.parseError(.EOFInComment);
+    tokenizer.setNewState(.Eof);
     return null;
 }
 
-fn abruptCommentClose(tokenizer: *Tokenizer) !?CommentState {
-    try tokenizer.parseError(.AbruptClosingOfEmptyComment);
+fn abruptCommentClose(parser: *Parser) !?CommentState {
+    try parser.parseError(.AbruptClosingOfEmptyComment);
     return null;
 }
 
-fn incorrectlyClosedComment(tokenizer: *Tokenizer) !?CommentState {
-    try tokenizer.parseError(.IncorrectlyClosedComment);
+fn incorrectlyClosedComment(parser: *Parser) !?CommentState {
+    try parser.parseError(.IncorrectlyClosedComment);
     return null;
 }
 
@@ -1227,11 +1207,11 @@ const DoctypeData = struct {
     }
 };
 
-fn doctype(tokenizer: *Tokenizer) !void {
+fn doctype(parser: *Parser, tokenizer: *Tokenizer) !void {
     var doctype_data = DoctypeData{};
     defer doctype_data.deinit(tokenizer.allocator);
 
-    try doctypeStart(tokenizer, &doctype_data);
+    try doctypeStart(parser, tokenizer, &doctype_data);
 
     const doctype_token = Token{ .doctype = .{
         .name = if (doctype_data.name) |*name| name.toOwnedSlice(tokenizer.allocator) else null,
@@ -1239,92 +1219,92 @@ fn doctype(tokenizer: *Tokenizer) !void {
         .system_identifier = if (doctype_data.system_identifier) |*system_identifier| system_identifier.toOwnedSlice(tokenizer.allocator) else null,
         .force_quirks = doctype_data.force_quirks,
     } };
-    try tokenizer.tokens.append(doctype_token);
+    try tokenizer.emitToken(doctype_token);
 }
 
-fn doctypeStart(tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
-    if (tokenizer.nextNoErrorCheck()) |current_input_char| {
+fn doctypeStart(parser: *Parser, tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
+    if (nextNoErrorCheck(parser)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
-            '>' => tokenizer.undo(),
+            '>' => undo(parser),
             else => {
-                try tokenizer.parseError(.MissingWhitespaceBeforeDOCTYPEName);
-                tokenizer.undo();
+                try parser.parseError(.MissingWhitespaceBeforeDOCTYPEName);
+                undo(parser);
             },
         }
-        return try beforeDoctypeName(tokenizer, doctype_data);
+        return try beforeDoctypeName(parser, tokenizer, doctype_data);
     } else {
-        return try eofInDoctype(tokenizer, doctype_data);
+        return try eofInDoctype(parser, tokenizer, doctype_data);
     }
 }
 
-fn beforeDoctypeName(tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
-    while (tokenizer.nextNoErrorCheck()) |current_input_char| {
+fn beforeDoctypeName(parser: *Parser, tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
+    while (nextNoErrorCheck(parser)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             '>' => {
-                try tokenizer.parseError(.MissingDOCTYPEName);
+                try parser.parseError(.MissingDOCTYPEName);
                 doctype_data.force_quirks = true;
                 return;
             },
             else => {
-                tokenizer.undo();
-                return try doctypeName(tokenizer, doctype_data);
+                undo(parser);
+                return try doctypeName(parser, tokenizer, doctype_data);
             },
         }
     } else {
-        return try eofInDoctype(tokenizer, doctype_data);
+        return try eofInDoctype(parser, tokenizer, doctype_data);
     }
 }
 
-fn doctypeName(tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
+fn doctypeName(parser: *Parser, tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
     doctype_data.name = ArrayListUnmanaged(u8){};
     const doctype_name_data = &doctype_data.name.?;
 
-    while (try tokenizer.next()) |current_input_char| {
+    while (try next(parser)) |current_input_char| {
         switch (current_input_char) {
-            '\t', '\n', 0x0C, ' ' => return afterDoctypeName(tokenizer, doctype_data),
+            '\t', '\n', 0x0C, ' ' => return afterDoctypeName(parser, tokenizer, doctype_data),
             '>' => return,
             0x00 => {
-                try tokenizer.parseError(.UnexpectedNullCharacter);
+                try parser.parseError(.UnexpectedNullCharacter);
                 try appendChar(doctype_name_data, tokenizer.allocator, REPLACEMENT_CHARACTER);
             },
             else => |c| try appendChar(doctype_name_data, tokenizer.allocator, toLowercase(c)),
         }
     } else {
-        return try eofInDoctype(tokenizer, doctype_data);
+        return try eofInDoctype(parser, tokenizer, doctype_data);
     }
 }
 
-fn afterDoctypeName(tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
-    while (tokenizer.nextNoErrorCheck()) |current_input_char| {
+fn afterDoctypeName(parser: *Parser, tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
+    while (nextNoErrorCheck(parser)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             '>' => return,
             else => |c| {
-                if (caseInsensitiveEql(c, 'P') and tokenizer.consumeCharsIfCaseInsensitiveEql("UBLIC")) {
-                    return afterDOCTYPEPublicOrSystemKeyword(tokenizer, doctype_data, .public);
-                } else if (caseInsensitiveEql(c, 'S') and tokenizer.consumeCharsIfCaseInsensitiveEql("YSTEM")) {
-                    return afterDOCTYPEPublicOrSystemKeyword(tokenizer, doctype_data, .system);
+                if (caseInsensitiveEql(c, 'P') and consumeCharsIfCaseInsensitiveEql(parser, "UBLIC")) {
+                    return afterDOCTYPEPublicOrSystemKeyword(parser, tokenizer, doctype_data, .public);
+                } else if (caseInsensitiveEql(c, 'S') and consumeCharsIfCaseInsensitiveEql(parser, "YSTEM")) {
+                    return afterDOCTYPEPublicOrSystemKeyword(parser, tokenizer, doctype_data, .system);
                 } else {
-                    try tokenizer.parseError(.InvalidCharacterSequenceAfterDOCTYPEName);
+                    try parser.parseError(.InvalidCharacterSequenceAfterDOCTYPEName);
                     doctype_data.force_quirks = true;
-                    tokenizer.undo();
-                    return bogusDOCTYPE(tokenizer);
+                    undo(parser);
+                    return bogusDOCTYPE(parser, tokenizer);
                 }
             },
         }
     } else {
-        return try eofInDoctype(tokenizer, doctype_data);
+        return try eofInDoctype(parser, tokenizer, doctype_data);
     }
 }
 
 const PublicOrSystem = enum { public, system };
 
-fn afterDOCTYPEPublicOrSystemKeyword(tokenizer: *Tokenizer, doctype_data: *DoctypeData, public_or_system: PublicOrSystem) !void {
+fn afterDOCTYPEPublicOrSystemKeyword(parser: *Parser, tokenizer: *Tokenizer, doctype_data: *DoctypeData, public_or_system: PublicOrSystem) !void {
     // AfterDOCTYPEPublicKeyword
     // AfterDOCTYPESystemKeyword
-    if (tokenizer.nextNoErrorCheck()) |current_input_char| {
+    if (nextNoErrorCheck(parser)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             '"', '\'' => |quote| {
@@ -1332,15 +1312,15 @@ fn afterDOCTYPEPublicOrSystemKeyword(tokenizer: *Tokenizer, doctype_data: *Docty
                     .public => .MissingWhitespaceAfterDOCTYPEPublicKeyword,
                     .system => .MissingWhitespaceAfterDOCTYPESystemKeyword,
                 };
-                try tokenizer.parseError(err);
-                return doctypePublicOrSystemIdentifier(tokenizer, doctype_data, public_or_system, quote);
+                try parser.parseError(err);
+                return doctypePublicOrSystemIdentifier(parser, tokenizer, doctype_data, public_or_system, quote);
             },
             '>' => {
                 const err: ParseError = switch (public_or_system) {
                     .public => .MissingDOCTYPEPublicIdentifier,
                     .system => .MissingDOCTYPESystemIdentifier,
                 };
-                try tokenizer.parseError(err);
+                try parser.parseError(err);
                 doctype_data.force_quirks = true;
                 return;
             },
@@ -1349,28 +1329,28 @@ fn afterDOCTYPEPublicOrSystemKeyword(tokenizer: *Tokenizer, doctype_data: *Docty
                     .public => .MissingQuoteBeforeDOCTYPEPublicIdentifier,
                     .system => .MissingQuoteBeforeDOCTYPESystemIdentifier,
                 };
-                try tokenizer.parseError(err);
+                try parser.parseError(err);
                 doctype_data.force_quirks = true;
-                tokenizer.undo();
-                return bogusDOCTYPE(tokenizer);
+                undo(parser);
+                return bogusDOCTYPE(parser, tokenizer);
             },
         }
     } else {
-        return try eofInDoctype(tokenizer, doctype_data);
+        return try eofInDoctype(parser, tokenizer, doctype_data);
     }
 
     // BeforeDOCTYPEPublicIdentifier
     // BeforeDOCTYPESystemIdentifier
-    while (tokenizer.nextNoErrorCheck()) |current_input_char| {
+    while (nextNoErrorCheck(parser)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
-            '"', '\'' => |quote| return doctypePublicOrSystemIdentifier(tokenizer, doctype_data, public_or_system, quote),
+            '"', '\'' => |quote| return doctypePublicOrSystemIdentifier(parser, tokenizer, doctype_data, public_or_system, quote),
             '>' => {
                 const err: ParseError = switch (public_or_system) {
                     .public => .MissingDOCTYPEPublicIdentifier,
                     .system => .MissingDOCTYPESystemIdentifier,
                 };
-                try tokenizer.parseError(err);
+                try parser.parseError(err);
                 doctype_data.force_quirks = true;
                 return;
             },
@@ -1379,18 +1359,18 @@ fn afterDOCTYPEPublicOrSystemKeyword(tokenizer: *Tokenizer, doctype_data: *Docty
                     .public => .MissingQuoteBeforeDOCTYPEPublicIdentifier,
                     .system => .MissingQuoteBeforeDOCTYPESystemIdentifier,
                 };
-                try tokenizer.parseError(err);
+                try parser.parseError(err);
                 doctype_data.force_quirks = true;
-                tokenizer.undo();
-                return bogusDOCTYPE(tokenizer);
+                undo(parser);
+                return bogusDOCTYPE(parser, tokenizer);
             },
         }
     } else {
-        return try eofInDoctype(tokenizer, doctype_data);
+        return try eofInDoctype(parser, tokenizer, doctype_data);
     }
 }
 
-fn doctypePublicOrSystemIdentifier(tokenizer: *Tokenizer, doctype_data: *DoctypeData, public_or_system: PublicOrSystem, quote: u21) Error!void {
+fn doctypePublicOrSystemIdentifier(parser: *Parser, tokenizer: *Tokenizer, doctype_data: *DoctypeData, public_or_system: PublicOrSystem, quote: u21) Error!void {
     // DOCTYPEPublicIdentifierDoubleQuoted
     // DOCTYPEPublicIdentifierSingleQuoted
     // DOCTYPESystemIdentifierDoubleQuoted
@@ -1403,101 +1383,101 @@ fn doctypePublicOrSystemIdentifier(tokenizer: *Tokenizer, doctype_data: *Doctype
     identifier_data_optional.* = ArrayListUnmanaged(u8){};
     const identifier_data = &identifier_data_optional.*.?;
 
-    while (try tokenizer.next()) |current_input_char| {
+    while (try next(parser)) |current_input_char| {
         if (current_input_char == quote) {
             const afterIdentifier = switch (public_or_system) {
                 .public => afterDOCTYPEPublicIdentifier,
                 .system => afterDOCTYPESystemIdentifier,
             };
-            return afterIdentifier(tokenizer, doctype_data);
+            return afterIdentifier(parser, tokenizer, doctype_data);
         } else if (current_input_char == 0x00) {
-            try tokenizer.parseError(.UnexpectedNullCharacter);
+            try parser.parseError(.UnexpectedNullCharacter);
             try appendChar(identifier_data, tokenizer.allocator, REPLACEMENT_CHARACTER);
         } else if (current_input_char == '>') {
             const err: ParseError = switch (public_or_system) {
                 .public => .AbruptDOCTYPEPublicIdentifier,
                 .system => .AbruptDOCTYPESystemIdentifier,
             };
-            try tokenizer.parseError(err);
+            try parser.parseError(err);
             doctype_data.force_quirks = true;
             return;
         } else {
             try appendChar(identifier_data, tokenizer.allocator, current_input_char);
         }
     } else {
-        return try eofInDoctype(tokenizer, doctype_data);
+        return try eofInDoctype(parser, tokenizer, doctype_data);
     }
 }
 
-fn afterDOCTYPEPublicIdentifier(tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
-    if (tokenizer.nextNoErrorCheck()) |current_input_char| {
+fn afterDOCTYPEPublicIdentifier(parser: *Parser, tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
+    if (nextNoErrorCheck(parser)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             '>' => return,
             '"', '\'' => |quote| {
-                try tokenizer.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
-                return doctypePublicOrSystemIdentifier(tokenizer, doctype_data, .system, quote);
+                try parser.parseError(.MissingWhitespaceBetweenDOCTYPEPublicAndSystemIdentifiers);
+                return doctypePublicOrSystemIdentifier(parser, tokenizer, doctype_data, .system, quote);
             },
             else => {
-                try tokenizer.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
+                try parser.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
                 doctype_data.force_quirks = true;
-                tokenizer.undo();
-                return bogusDOCTYPE(tokenizer);
+                undo(parser);
+                return bogusDOCTYPE(parser, tokenizer);
             },
         }
     } else {
-        return try eofInDoctype(tokenizer, doctype_data);
+        return try eofInDoctype(parser, tokenizer, doctype_data);
     }
 
     // BetweenDOCTYPEPublicAndSystemIdentifiers
-    while (tokenizer.nextNoErrorCheck()) |current_input_char| {
+    while (nextNoErrorCheck(parser)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             '>' => return,
             '"', '\'' => |quote| {
-                return doctypePublicOrSystemIdentifier(tokenizer, doctype_data, .system, quote);
+                return doctypePublicOrSystemIdentifier(parser, tokenizer, doctype_data, .system, quote);
             },
             else => {
-                try tokenizer.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
+                try parser.parseError(.MissingQuoteBeforeDOCTYPESystemIdentifier);
                 doctype_data.force_quirks = true;
-                tokenizer.undo();
-                return bogusDOCTYPE(tokenizer);
+                undo(parser);
+                return bogusDOCTYPE(parser, tokenizer);
             },
         }
     } else {
-        return try eofInDoctype(tokenizer, doctype_data);
+        return try eofInDoctype(parser, tokenizer, doctype_data);
     }
 }
 
-fn afterDOCTYPESystemIdentifier(tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
-    while (tokenizer.nextNoErrorCheck()) |current_input_char| {
+fn afterDOCTYPESystemIdentifier(parser: *Parser, tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
+    while (nextNoErrorCheck(parser)) |current_input_char| {
         switch (current_input_char) {
             '\t', '\n', 0x0C, ' ' => {},
             '>' => return,
             else => {
-                try tokenizer.parseError(.UnexpectedCharacterAfterDOCTYPESystemIdentifier);
-                tokenizer.undo();
-                return bogusDOCTYPE(tokenizer);
+                try parser.parseError(.UnexpectedCharacterAfterDOCTYPESystemIdentifier);
+                undo(parser);
+                return bogusDOCTYPE(parser, tokenizer);
             },
         }
     } else {
-        return try eofInDoctype(tokenizer, doctype_data);
+        return try eofInDoctype(parser, tokenizer, doctype_data);
     }
 }
 
-fn eofInDoctype(tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
-    try tokenizer.parseError(.EOFInDOCTYPE);
+fn eofInDoctype(parser: *Parser, tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
+    try parser.parseError(.EOFInDOCTYPE);
     doctype_data.force_quirks = true;
-    return tokenizer.setState(.Eof);
+    return tokenizer.setNewState(.Eof);
 }
 
-fn bogusDOCTYPE(tokenizer: *Tokenizer) !void {
-    while (try tokenizer.next()) |current_input_char| switch (current_input_char) {
+fn bogusDOCTYPE(parser: *Parser, tokenizer: *Tokenizer) !void {
+    while (try next(parser)) |current_input_char| switch (current_input_char) {
         '>' => return,
-        0x00 => try tokenizer.parseError(.UnexpectedNullCharacter),
+        0x00 => try parser.parseError(.UnexpectedNullCharacter),
         else => {},
     } else {
-        return tokenizer.setState(.Eof);
+        return tokenizer.setNewState(.Eof);
     }
 }
 
@@ -1507,160 +1487,160 @@ const ScriptState = enum {
     DoubleEscaped,
 };
 
-fn scriptData(tokenizer: *Tokenizer) !void {
+fn scriptData(parser: *Parser, tokenizer: *Tokenizer) !void {
     var next_state: ?ScriptState = .Normal;
     while (next_state) |state| {
         next_state = switch (state) {
-            .Normal => try scriptDataNormal(tokenizer),
-            .Escaped => try scriptDataEscaped(tokenizer),
-            .DoubleEscaped => try scriptDataDoubleEscaped(tokenizer),
+            .Normal => try scriptDataNormal(parser, tokenizer),
+            .Escaped => try scriptDataEscaped(parser, tokenizer),
+            .DoubleEscaped => try scriptDataDoubleEscaped(parser, tokenizer),
         };
     }
 }
 
-fn scriptDataNormal(tokenizer: *Tokenizer) !?ScriptState {
-    while (try tokenizer.next()) |char| switch (char) {
+fn scriptDataNormal(parser: *Parser, tokenizer: *Tokenizer) !?ScriptState {
+    while (try next(parser)) |char| switch (char) {
         0x00 => {
-            try tokenizer.parseError(.UnexpectedNullCharacter);
+            try parser.parseError(.UnexpectedNullCharacter);
             try tokenizer.emitCharacter(REPLACEMENT_CHARACTER);
         },
         else => try tokenizer.emitCharacter(char),
         '<' => {
             // ScriptDataLessThanSign
-            switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+            switch (nextIgnoreEofNoErrorCheck(parser)) {
                 else => {
                     try tokenizer.emitCharacter('<');
-                    tokenizer.undo();
+                    undo(parser);
                     continue;
                 },
                 // ScriptDataEndTagOpen
                 '/' => {
-                    try nonDataEndTagOpen(tokenizer);
+                    try nonDataEndTagOpen(parser, tokenizer);
                     if (tokenizer.state != .ScriptData) return null;
                 },
                 '!' => {
                     try tokenizer.emitString("<!");
 
                     // ScriptDataEscapeStart
-                    if (tokenizer.nextIgnoreEofNoErrorCheck() != '-') {
-                        tokenizer.undo();
+                    if (nextIgnoreEofNoErrorCheck(parser) != '-') {
+                        undo(parser);
                         continue;
                     }
                     try tokenizer.emitCharacter('-');
 
                     // ScriptDataEscapeStartDash
-                    if (tokenizer.nextIgnoreEofNoErrorCheck() != '-') {
-                        tokenizer.undo();
+                    if (nextIgnoreEofNoErrorCheck(parser) != '-') {
+                        undo(parser);
                         continue;
                     }
                     try tokenizer.emitCharacter('-');
 
                     // ScriptDataEscapedDashDash
-                    return try scriptDataEscapedOrDoubleEscapedDashDash(tokenizer, .Normal);
+                    return try scriptDataEscapedOrDoubleEscapedDashDash(parser, tokenizer, .Normal);
                 },
             }
         },
     } else {
-        tokenizer.setState(.Eof);
+        tokenizer.setNewState(.Eof);
         return null;
     }
 }
 
-fn scriptDataEscaped(tokenizer: *Tokenizer) !?ScriptState {
-    while (try tokenizer.next()) |current_input_char| {
+fn scriptDataEscaped(parser: *Parser, tokenizer: *Tokenizer) !?ScriptState {
+    while (try next(parser)) |current_input_char| {
         switch (current_input_char) {
             '-' => {
                 try tokenizer.emitCharacter('-');
 
                 // ScriptDataEscapedDash
-                if (tokenizer.nextIgnoreEofNoErrorCheck() != '-') {
-                    tokenizer.undo();
+                if (nextIgnoreEofNoErrorCheck(parser) != '-') {
+                    undo(parser);
                     continue;
                 }
                 try tokenizer.emitCharacter('-');
 
                 // ScriptDataEscapedDashDash
-                return try scriptDataEscapedOrDoubleEscapedDashDash(tokenizer, .Escaped);
+                return try scriptDataEscapedOrDoubleEscapedDashDash(parser, tokenizer, .Escaped);
             },
             // ScriptDataEscapedLessThanSign
-            '<' => switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+            '<' => switch (nextIgnoreEofNoErrorCheck(parser)) {
                 '/' => {
-                    try nonDataEndTagOpen(tokenizer);
+                    try nonDataEndTagOpen(parser, tokenizer);
                     if (tokenizer.state != .ScriptData) return null;
                 },
                 'A'...'Z', 'a'...'z' => {
                     try tokenizer.emitCharacter('<');
-                    tokenizer.undo();
+                    undo(parser);
 
                     // ScriptDataDoubleEscapeStart
-                    return try scriptDataDoubleEscapeStartOrEnd(tokenizer, .Escaped);
+                    return try scriptDataDoubleEscapeStartOrEnd(parser, tokenizer, .Escaped);
                 },
                 else => {
                     try tokenizer.emitCharacter('<');
-                    tokenizer.undo();
+                    undo(parser);
                 },
             },
             0x00 => {
-                try tokenizer.parseError(.UnexpectedNullCharacter);
+                try parser.parseError(.UnexpectedNullCharacter);
                 try tokenizer.emitCharacter(REPLACEMENT_CHARACTER);
             },
             else => |c| try tokenizer.emitCharacter(c),
         }
     } else {
-        try tokenizer.parseError(.EOFInScriptHtmlCommentLikeText);
-        tokenizer.setState(.Eof);
+        try parser.parseError(.EOFInScriptHtmlCommentLikeText);
+        tokenizer.setNewState(.Eof);
         return null;
     }
 }
 
-fn scriptDataDoubleEscaped(tokenizer: *Tokenizer) !?ScriptState {
-    while (try tokenizer.next()) |current_input_char| {
+fn scriptDataDoubleEscaped(parser: *Parser, tokenizer: *Tokenizer) !?ScriptState {
+    while (try next(parser)) |current_input_char| {
         switch (current_input_char) {
             '-' => {
                 try tokenizer.emitCharacter('-');
 
                 // ScriptDataDoubleEscapedDash
-                if (tokenizer.nextIgnoreEofNoErrorCheck() != '-') {
-                    tokenizer.undo();
+                if (nextIgnoreEofNoErrorCheck(parser) != '-') {
+                    undo(parser);
                     continue;
                 }
                 try tokenizer.emitCharacter('-');
 
                 // ScriptDataDoubleEscapedDashDash
-                return try scriptDataEscapedOrDoubleEscapedDashDash(tokenizer, .DoubleEscaped);
+                return try scriptDataEscapedOrDoubleEscapedDashDash(parser, tokenizer, .DoubleEscaped);
             },
             '<' => {
                 try tokenizer.emitCharacter('<');
 
                 // ScriptDataDoubleEscapedLessThanSign
-                if (tokenizer.nextIgnoreEofNoErrorCheck() != '/') {
-                    tokenizer.undo();
+                if (nextIgnoreEofNoErrorCheck(parser) != '/') {
+                    undo(parser);
                     continue;
                 }
 
                 try tokenizer.emitCharacter('/');
 
                 // ScriptDataDoubleEscapeEnd
-                return try scriptDataDoubleEscapeStartOrEnd(tokenizer, .DoubleEscaped);
+                return try scriptDataDoubleEscapeStartOrEnd(parser, tokenizer, .DoubleEscaped);
             },
             0x00 => {
-                try tokenizer.parseError(.UnexpectedNullCharacter);
+                try parser.parseError(.UnexpectedNullCharacter);
                 try tokenizer.emitCharacter(REPLACEMENT_CHARACTER);
             },
             else => |c| try tokenizer.emitCharacter(c),
         }
     } else {
-        try tokenizer.parseError(.EOFInScriptHtmlCommentLikeText);
-        tokenizer.setState(.Eof);
+        try parser.parseError(.EOFInScriptHtmlCommentLikeText);
+        tokenizer.setNewState(.Eof);
         return null;
     }
 }
 
-fn scriptDataDoubleEscapeStartOrEnd(tokenizer: *Tokenizer, script_state: ScriptState) !ScriptState {
+fn scriptDataDoubleEscapeStartOrEnd(parser: *Parser, tokenizer: *Tokenizer, script_state: ScriptState) !ScriptState {
     const script = "script";
     var num_matching_chars: u3 = 0;
     var matches: ?bool = null;
-    while (true) switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+    while (true) switch (nextIgnoreEofNoErrorCheck(parser)) {
         '\t', '\n', 0x0C, ' ', '/', '>' => |c| {
             try tokenizer.emitCharacter(c);
             if (matches orelse false) {
@@ -1689,21 +1669,21 @@ fn scriptDataDoubleEscapeStartOrEnd(tokenizer: *Tokenizer, script_state: ScriptS
             }
         },
         else => {
-            tokenizer.undo();
+            undo(parser);
             return script_state;
         },
     };
 }
 
-fn scriptDataEscapedOrDoubleEscapedDashDash(tokenizer: *Tokenizer, script_state: ScriptState) !?ScriptState {
-    while (true) switch (tokenizer.nextIgnoreEofNoErrorCheck()) {
+fn scriptDataEscapedOrDoubleEscapedDashDash(parser: *Parser, tokenizer: *Tokenizer, script_state: ScriptState) !?ScriptState {
+    while (true) switch (nextIgnoreEofNoErrorCheck(parser)) {
         '-' => try tokenizer.emitCharacter('-'),
         '>' => {
             try tokenizer.emitCharacter('>');
             return .Normal;
         },
         else => {
-            tokenizer.undo();
+            undo(parser);
             const next_state: ScriptState = switch (script_state) {
                 .Normal, .Escaped => .Escaped,
                 .DoubleEscaped => .DoubleEscaped,
@@ -1713,80 +1693,80 @@ fn scriptDataEscapedOrDoubleEscapedDashDash(tokenizer: *Tokenizer, script_state:
     };
 }
 
-fn rawText(tokenizer: *Tokenizer) !void {
-    while (try tokenizer.next()) |char| switch (char) {
+fn rawText(parser: *Parser, tokenizer: *Tokenizer) !void {
+    while (try next(parser)) |char| switch (char) {
         0x00 => {
-            try tokenizer.parseError(.UnexpectedNullCharacter);
+            try parser.parseError(.UnexpectedNullCharacter);
             try tokenizer.emitCharacter(REPLACEMENT_CHARACTER);
         },
         else => |c| try tokenizer.emitCharacter(c),
         '<' => {
             // RAWTEXTLessThanSign
-            if (tokenizer.nextIgnoreEofNoErrorCheck() != '/') {
+            if (nextIgnoreEofNoErrorCheck(parser) != '/') {
                 try tokenizer.emitCharacter('<');
-                tokenizer.undo();
+                undo(parser);
                 continue;
             }
 
-            return nonDataEndTagOpen(tokenizer);
+            return nonDataEndTagOpen(parser, tokenizer);
         },
     } else {
-        return tokenizer.setState(.Eof);
+        return tokenizer.setNewState(.Eof);
     }
 }
 
-fn plainText(tokenizer: *Tokenizer) !void {
+fn plainText(parser: *Parser, tokenizer: *Tokenizer) !void {
     while (true) {
-        if (try tokenizer.next()) |char| switch (char) {
+        if (try next(parser)) |char| switch (char) {
             0x00 => {
-                try tokenizer.parseError(.UnexpectedNullCharacter);
+                try parser.parseError(.UnexpectedNullCharacter);
                 try tokenizer.emitCharacter(REPLACEMENT_CHARACTER);
             },
             else => |c| try tokenizer.emitCharacter(c),
         } else {
-            return tokenizer.setState(.Eof);
+            return tokenizer.setNewState(.Eof);
         }
     }
 }
 
-fn rcData(tokenizer: *Tokenizer) !void {
-    while (try tokenizer.next()) |char| {
+fn rcData(parser: *Parser, tokenizer: *Tokenizer) !void {
+    while (try next(parser)) |char| {
         switch (char) {
-            '&' => try characterReference(tokenizer, null),
+            '&' => try characterReference(parser, tokenizer, null),
             0x00 => {
-                try tokenizer.parseError(.UnexpectedNullCharacter);
+                try parser.parseError(.UnexpectedNullCharacter);
                 try tokenizer.emitCharacter(REPLACEMENT_CHARACTER);
             },
             else => |c| try tokenizer.emitCharacter(c),
             '<' => {
                 // RCDATALessThanSign
-                if (tokenizer.nextIgnoreEofNoErrorCheck() != '/') {
+                if (nextIgnoreEofNoErrorCheck(parser) != '/') {
                     try tokenizer.emitCharacter('<');
-                    tokenizer.undo();
+                    undo(parser);
                     continue;
                 }
 
-                return nonDataEndTagOpen(tokenizer);
+                return nonDataEndTagOpen(parser, tokenizer);
             },
         }
     } else {
-        return tokenizer.setState(.Eof);
+        return tokenizer.setNewState(.Eof);
     }
 }
 
-fn cDataSection(tokenizer: *Tokenizer) !void {
-    while (try tokenizer.next()) |char| switch (char) {
+fn cDataSection(parser: *Parser, tokenizer: *Tokenizer) !void {
+    while (try next(parser)) |char| switch (char) {
         ']' => {
-            if (consumeCharsIfEql(tokenizer, "]>")) {
-                return tokenizer.setState(.Data);
+            if (consumeCharsIfEql(parser, "]>")) {
+                return tokenizer.setNewState(.Data);
             } else {
                 try tokenizer.emitCharacter(']');
             }
         },
         else => |c| try tokenizer.emitCharacter(c),
     } else {
-        try tokenizer.parseError(.EOFInCDATA);
-        return tokenizer.setState(.Eof);
+        try parser.parseError(.EOFInCDATA);
+        return tokenizer.setNewState(.Eof);
     }
 }
 
@@ -1821,49 +1801,4 @@ fn upperHexCharToNumber(c: u21) u21 {
 
 fn lowerHexCharToNumber(c: u21) u21 {
     return c - 0x57;
-}
-
-test "Tokenizer usage" {
-    const allocator = std.testing.allocator;
-
-    const string = "<!doctype><HTML>asdf</body hello=world>";
-    const input: []const u21 = &rem.util.utf8DecodeStringComptime(string);
-
-    var all_tokens = std.ArrayList(Token).init(allocator);
-    defer {
-        for (all_tokens.items) |*t| t.deinit(allocator);
-        all_tokens.deinit();
-    }
-
-    var error_handler = ErrorHandler{ .report = ArrayList(ParseError).init(allocator) };
-    defer error_handler.report.deinit();
-
-    var tokenizer = init(allocator, input, &all_tokens, &error_handler);
-    defer tokenizer.deinit();
-
-    var run_frame = async tokenizer.run();
-    while (tokenizer.frame) |frame| resume frame;
-    try nosuspend await run_frame;
-
-    const expected_tokens = &[8]Token{
-        .{ .doctype = .{ .name = null, .public_identifier = null, .system_identifier = null, .force_quirks = true } },
-        .{ .start_tag = .{ .name = "html", .attributes = .{}, .self_closing = false } },
-        .{ .character = .{ .data = 'a' } },
-        .{ .character = .{ .data = 's' } },
-        .{ .character = .{ .data = 'd' } },
-        .{ .character = .{ .data = 'f' } },
-        .{ .end_tag = .{ .name = "body" } },
-        .eof,
-    };
-
-    const expected_parse_errors = &[2]ParseError{
-        .MissingDOCTYPEName,
-        .EndTagWithAttributes,
-    };
-
-    try std.testing.expectEqual(expected_tokens.len, all_tokens.items.len);
-    for (expected_tokens) |expected, i| {
-        try std.testing.expect(expected.eql(all_tokens.items[i]));
-    }
-    try std.testing.expectEqualSlices(ParseError, expected_parse_errors, error_handler.report.items);
 }

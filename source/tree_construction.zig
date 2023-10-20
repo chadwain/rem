@@ -11,67 +11,19 @@ const ComptimeStringMap = std.ComptimeStringMap;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
 const rem = @import("../rem.zig");
-const Token = rem.token.Token;
-const TokenStartTag = rem.token.TokenStartTag;
-const TokenEndTag = rem.token.TokenEndTag;
-const TokenComment = rem.token.TokenComment;
-const TokenCharacter = rem.token.TokenCharacter;
-const TokenDOCTYPE = rem.token.TokenDOCTYPE;
-const Tokenizer = rem.Tokenizer;
-const ParseError = rem.Parser.ParseError;
-const ErrorHandler = rem.Parser.ErrorHandler;
+const Token = @import("./token.zig").Token;
+const Tokenizer = @import("./Tokenizer.zig");
+const Parser = @import("./Parser.zig");
+const ParseError = Parser.ParseError;
 
-const Dom = rem.dom.Dom;
-const Document = rem.dom.Document;
-const Element = rem.dom.Element;
-const ElementType = rem.dom.ElementType;
-const ElementAttributesKey = rem.dom.ElementAttributesKey;
-const CharacterData = rem.dom.CharacterData;
-const CharacterDataInterface = rem.dom.CharacterDataInterface;
-
-test "Tree constructor usage" {
-    const allocator = std.testing.allocator;
-
-    const string = "<!doctype><html>asdf</body hello=world>";
-    const input: []const u21 = &rem.util.utf8DecodeStringComptime(string);
-
-    var tokens = std.ArrayList(Token).init(allocator);
-    defer {
-        for (tokens.items) |*t| t.deinit(allocator);
-        tokens.deinit();
-    }
-
-    var error_handler: ErrorHandler = .ignore;
-    defer error_handler.deinit();
-
-    var tokenizer = Tokenizer.init(allocator, input, &tokens, &error_handler);
-    defer tokenizer.deinit();
-
-    var dom = Dom{ .allocator = allocator };
-    defer dom.deinit();
-
-    const document = try dom.makeDocument();
-
-    var constructor = TreeConstructor.init(&dom, document, allocator, &error_handler, .{});
-    defer constructor.deinit();
-
-    var tokenizer_run_frame = async tokenizer.run();
-    while (tokenizer.frame) |frame| {
-        if (tokens.items.len > 0) {
-            var constructor_result: TreeConstructor.RunResult = undefined;
-            for (tokens.items) |*token| {
-                constructor_result = try constructor.run(token.*);
-                token.deinit(allocator);
-            }
-            tokens.clearRetainingCapacity();
-
-            if (constructor_result.new_tokenizer_state) |state| tokenizer.setState(state);
-            tokenizer.setAdjustedCurrentNodeIsNotInHtmlNamespace(constructor_result.adjusted_current_node_is_not_in_html_namespace);
-        }
-        resume frame;
-    }
-    try nosuspend await tokenizer_run_frame;
-}
+const Dom = @import("./Dom.zig");
+const Document = Dom.Document;
+const Element = Dom.Element;
+const ElementType = Dom.ElementType;
+const ElementAttributesKey = Dom.ElementAttributesKey;
+const CharacterData = Dom.CharacterData;
+const CharacterDataInterface = Dom.CharacterDataInterface;
+const ElementOrCharacterData = Dom.ElementOrCharacterData;
 
 // TODO: Use decoded Unicode codepoints ([]u21) for everything
 
@@ -79,7 +31,6 @@ pub const TreeConstructor = struct {
     dom: *Dom,
     document: *Document,
     allocator: Allocator,
-    error_handler: *ErrorHandler,
 
     fragment_context: ?*Element,
     scripting: bool,
@@ -92,13 +43,13 @@ pub const TreeConstructor = struct {
 
     active_formatting_elements: ArrayListUnmanaged(FormattingElement) = .{},
     // TODO: Somehow make it so that tag attributes do not need to be copied
-    formatting_element_tag_attributes: ArrayListUnmanaged(TokenStartTag.Attributes) = .{},
+    formatting_element_tag_attributes: ArrayListUnmanaged(Token.StartTag.Attributes) = .{},
     index_of_last_marker: ?usize = null,
 
     head_element_pointer: ?*Element = null,
     form_element_pointer: ?*Element = null,
 
-    pending_table_character_tokens: ArrayListUnmanaged(TokenCharacter) = .{},
+    pending_table_character_tokens: ArrayListUnmanaged(Token.Character) = .{},
     pending_table_chars_contains_non_whitespace: bool = false,
 
     parser_cannot_change_the_mode: bool = false,
@@ -130,12 +81,11 @@ pub const TreeConstructor = struct {
     };
 
     /// Create a new HTML5 tree constructor.
-    pub fn init(dom: *Dom, document: *Document, allocator: Allocator, error_handler: *ErrorHandler, args: Arguments) TreeConstructor {
+    pub fn init(dom: *Dom, document: *Document, allocator: Allocator, args: Arguments) TreeConstructor {
         return TreeConstructor{
             .dom = dom,
             .document = document,
             .allocator = allocator,
-            .error_handler = error_handler,
             .fragment_context = args.fragment_context,
             .scripting = args.scripting,
         };
@@ -147,7 +97,7 @@ pub const TreeConstructor = struct {
         self.template_insertion_modes.deinit(self.allocator);
         self.active_formatting_elements.deinit(self.allocator);
         for (self.formatting_element_tag_attributes.items) |*attributes| {
-            rem.util.freeStringHashMapConst(attributes, self.allocator);
+            freeStringHashMap(attributes, self.allocator);
         }
         self.formatting_element_tag_attributes.deinit(self.allocator);
         self.pending_table_character_tokens.deinit(self.allocator);
@@ -414,14 +364,15 @@ fn initial(c: *TreeConstructor, token: Token) !void {
         },
         .comment => |comment| try insertCommentToDocument(c, comment),
         .doctype => |d| {
-            if (!rem.util.eqlNullSlices2(u8, "html", d.name) or (d.public_identifier != null) or
-                (d.system_identifier != null and !strEql(d.system_identifier.?, "about:legacy-compat")))
+            if ((d.name == null or !strEql("html", d.name.?)) or
+                (d.public_identifier != null) or
+                (d.system_identifier != null and !strEql("about:legacy-compat", d.system_identifier.?)))
             {
                 try parseError(c, .TreeConstructionError);
             }
 
             const doctype = try c.dom.makeDoctype(d.name, d.public_identifier, d.system_identifier);
-            try rem.dom.mutation.documentAppendDocumentType(c.dom, c.document, doctype, .Suppress);
+            try Dom.mutation.documentAppendDocumentType(c.dom, c.document, doctype, .Suppress);
 
             if (!c.is_iframe_srcdoc_document and !c.parser_cannot_change_the_mode) {
                 if (doctypeEnablesQuirks(d)) {
@@ -465,7 +416,7 @@ fn beforeHtml(c: *TreeConstructor, token: Token) !void {
             if (ElementType.fromStringHtml(start_tag.name)) |token_element_type| switch (token_element_type) {
                 .html_html => {
                     const element = try createAnElementForTheToken(c, start_tag, .html_html, .{ .document = c.document }, .dont_adjust);
-                    try rem.dom.mutation.documentAppendElement(c.dom, c.document, element, .Suppress);
+                    try Dom.mutation.documentAppendElement(c.dom, c.document, element, .Suppress);
                     try c.open_elements.append(c.allocator, element);
                     changeTo(c, .BeforeHead);
                 },
@@ -494,7 +445,7 @@ fn beforeHtmlAnythingElse(c: *TreeConstructor) !void {
     // TODO: Set the element's "node document"
     const element = try c.dom.makeElement(.html_html);
     element.parent = .document;
-    try rem.dom.mutation.documentAppendElement(c.dom, c.document, element, .Suppress);
+    try Dom.mutation.documentAppendElement(c.dom, c.document, element, .Suppress);
     try c.open_elements.append(c.allocator, element);
     reprocessIn(c, .BeforeHead);
 }
@@ -541,7 +492,7 @@ fn beforeHead(c: *TreeConstructor, token: Token) !void {
 }
 
 fn beforeHeadAnythingElse(c: *TreeConstructor) !void {
-    const node = try insertHtmlElementForTheToken(c, TokenStartTag{
+    const node = try insertHtmlElementForTheToken(c, Token.StartTag{
         .name = "head",
         .attributes = .{},
         .self_closing = false,
@@ -600,21 +551,21 @@ fn inHead(c: *TreeConstructor, token: Token) !void {
     }
 }
 
-fn inHeadWhitespace(c: *TreeConstructor, character: TokenCharacter) !void {
+fn inHeadWhitespace(c: *TreeConstructor, character: Token.Character) !void {
     try insertCharacter(c, character);
 }
 
-fn inHeadComment(c: *TreeConstructor, comment: TokenComment) !void {
+fn inHeadComment(c: *TreeConstructor, comment: Token.Comment) !void {
     try insertComment(c, comment);
 }
 
-fn inHeadStartTagBaseBasefontBgsoundLink(c: *TreeConstructor, start_tag: TokenStartTag, element_type: ElementType) !void {
+fn inHeadStartTagBaseBasefontBgsoundLink(c: *TreeConstructor, start_tag: Token.StartTag, element_type: ElementType) !void {
     _ = try insertHtmlElementForTheToken(c, start_tag, element_type);
     _ = c.open_elements.pop();
     acknowledgeSelfClosingFlag(c);
 }
 
-fn inHeadStartTagMeta(c: *TreeConstructor, start_tag: TokenStartTag) !void {
+fn inHeadStartTagMeta(c: *TreeConstructor, start_tag: Token.StartTag) !void {
     _ = try insertHtmlElementForTheToken(c, start_tag, .html_meta);
     _ = c.open_elements.pop();
     acknowledgeSelfClosingFlag(c);
@@ -638,15 +589,15 @@ fn inHeadStartTagMeta(c: *TreeConstructor, start_tag: TokenStartTag) !void {
     // }
 }
 
-fn inHeadStartTagTitle(c: *TreeConstructor, start_tag: TokenStartTag) !void {
+fn inHeadStartTagTitle(c: *TreeConstructor, start_tag: Token.StartTag) !void {
     try textParsingAlgorithm(.RCDATA, c, start_tag, .html_title);
 }
 
-fn inHeadStartTagNoframesStyle(c: *TreeConstructor, start_tag: TokenStartTag, comptime element_type: ElementType) !void {
+fn inHeadStartTagNoframesStyle(c: *TreeConstructor, start_tag: Token.StartTag, comptime element_type: ElementType) !void {
     try textParsingAlgorithm(.RAWTEXT, c, start_tag, element_type);
 }
 
-fn inHeadStartTagScript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
+fn inHeadStartTagScript(c: *TreeConstructor, start_tag: Token.StartTag) !void {
     // Step 1
     const adjusted_insertion_location = appropriateNodeInsertionLocation(c);
 
@@ -664,8 +615,8 @@ fn inHeadStartTagScript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
     // Step 6
     switch (adjusted_insertion_location) {
         // TODO: Check pre-insertion validity
-        .element_last_child => |e| try rem.dom.mutation.elementAppend(c.dom, e, .{ .element = element }, .Suppress),
-        .parent_before_child => |s| try rem.dom.mutation.elementInsert(c.dom, s.parent, .{ .element = s.child }, .{ .element = element }, .Suppress),
+        .element_last_child => |e| try Dom.mutation.elementAppend(c.dom, e, .{ .element = element }, .Suppress),
+        .parent_before_child => |s| try Dom.mutation.elementInsert(c.dom, s.parent, .{ .element = s.child }, .{ .element = element }, .Suppress),
     }
 
     // Step 7
@@ -679,7 +630,7 @@ fn inHeadStartTagScript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
     changeToAndSetOriginalInsertionMode(c, .Text, c.insertion_mode);
 }
 
-fn inHeadStartTagTemplate(c: *TreeConstructor, start_tag: TokenStartTag) !void {
+fn inHeadStartTagTemplate(c: *TreeConstructor, start_tag: Token.StartTag) !void {
     _ = try insertHtmlElementForTheToken(c, start_tag, .html_template);
     try insertAMarker(c);
     c.frameset_ok = .not_ok;
@@ -687,7 +638,7 @@ fn inHeadStartTagTemplate(c: *TreeConstructor, start_tag: TokenStartTag) !void {
     try c.template_insertion_modes.append(c.allocator, .InTemplate);
 }
 
-fn inHeadStartTagNoscript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
+fn inHeadStartTagNoscript(c: *TreeConstructor, start_tag: Token.StartTag) !void {
     if (c.scripting) {
         try textParsingAlgorithm(.RAWTEXT, c, start_tag, .html_noscript);
     } else {
@@ -855,7 +806,7 @@ fn afterHead(c: *TreeConstructor, token: Token) !void {
 }
 
 fn afterHeadAnythingElse(c: *TreeConstructor) !void {
-    _ = try insertHtmlElementForTheToken(c, TokenStartTag{
+    _ = try insertHtmlElementForTheToken(c, Token.StartTag{
         .name = "body",
         .attributes = .{},
         .self_closing = false,
@@ -906,7 +857,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                         // Ignore the token.
                     } else {
                         // The stack of open elements has at least 2 elements because of previous checks.
-                        rem.dom.mutation.elementRemove(c.dom, c.open_elements.items[1], .Suppress);
+                        Dom.mutation.elementRemove(c.dom, c.open_elements.items[1], .Suppress);
                         c.open_elements.shrinkRetainingCapacity(1);
                         _ = try insertHtmlElementForTheToken(c, start_tag, .html_frameset);
                         changeTo(c, .InFrameset);
@@ -1230,7 +1181,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 if (strEql(start_tag.name, "image")) {
                     try parseError(c, .TreeConstructionError);
                     try reconstructActiveFormattingElements(c);
-                    _ = try insertHtmlElementForTheToken(c, TokenStartTag{
+                    _ = try insertHtmlElementForTheToken(c, Token.StartTag{
                         .name = "img",
                         .attributes = start_tag.attributes,
                         .self_closing = start_tag.self_closing,
@@ -1350,7 +1301,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 .html_p => {
                     if (!hasElementInButtonScope(c, ElementType.html_p)) {
                         try parseError(c, .TreeConstructionError);
-                        _ = try insertHtmlElementForTheToken(c, TokenStartTag{
+                        _ = try insertHtmlElementForTheToken(c, Token.StartTag{
                             .name = "p",
                             .attributes = .{},
                             .self_closing = false,
@@ -1430,7 +1381,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                 },
                 .html_br => {
                     try reconstructActiveFormattingElements(c);
-                    _ = try insertHtmlElementForTheToken(c, TokenStartTag{
+                    _ = try insertHtmlElementForTheToken(c, Token.StartTag{
                         .name = "br",
                         .attributes = .{},
                         .self_closing = false,
@@ -1449,7 +1400,7 @@ fn inBodyDoctype(c: *TreeConstructor) !void {
     // Ignore the token.
 }
 
-fn inBodyComment(c: *TreeConstructor, comment: TokenComment) !void {
+fn inBodyComment(c: *TreeConstructor, comment: Token.Comment) !void {
     try insertComment(c, comment);
 }
 
@@ -1490,7 +1441,7 @@ fn inBodyEofCheckForParseErrors(c: *TreeConstructor) !void {
     }
 }
 
-fn inBodyCharacter(c: *TreeConstructor, character: TokenCharacter) !void {
+fn inBodyCharacter(c: *TreeConstructor, character: Token.Character) !void {
     if (isNull(character)) {
         try parseError(c, .TreeConstructionError);
         // Ignore the token.
@@ -1503,12 +1454,12 @@ fn inBodyCharacter(c: *TreeConstructor, character: TokenCharacter) !void {
     }
 }
 
-fn inBodyWhitespaceCharacter(c: *TreeConstructor, character: TokenCharacter) !void {
+fn inBodyWhitespaceCharacter(c: *TreeConstructor, character: Token.Character) !void {
     try reconstructActiveFormattingElements(c);
     try insertCharacter(c, character);
 }
 
-fn inBodyStartTagHtml(c: *TreeConstructor, start_tag: TokenStartTag) !void {
+fn inBodyStartTagHtml(c: *TreeConstructor, start_tag: Token.StartTag) !void {
     try parseError(c, .TreeConstructionError);
     if (stackOfOpenElementsHas(c, .html_template)) {
         // Ignore the token.
@@ -1521,7 +1472,7 @@ fn inBodyStartTagHtml(c: *TreeConstructor, start_tag: TokenStartTag) !void {
     }
 }
 
-fn inBodyStartTagNoscript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
+fn inBodyStartTagNoscript(c: *TreeConstructor, start_tag: Token.StartTag) !void {
     if (c.scripting) {
         try textParsingAlgorithm(.RAWTEXT, c, start_tag, .html_noscript);
     } else {
@@ -1529,7 +1480,7 @@ fn inBodyStartTagNoscript(c: *TreeConstructor, start_tag: TokenStartTag) !void {
     }
 }
 
-fn inBodyStartTagAnythingElse(c: *TreeConstructor, start_tag: TokenStartTag, element_type: ElementType) !void {
+fn inBodyStartTagAnythingElse(c: *TreeConstructor, start_tag: Token.StartTag, element_type: ElementType) !void {
     try reconstructActiveFormattingElements(c);
     _ = try insertHtmlElementForTheToken(c, start_tag, element_type);
 }
@@ -1626,7 +1577,7 @@ fn inTable(c: *TreeConstructor, token: Token) !void {
                 },
                 .html_col => {
                     clearTheStackBackToATableContext(c);
-                    _ = try insertHtmlElementForTheToken(c, TokenStartTag{
+                    _ = try insertHtmlElementForTheToken(c, Token.StartTag{
                         .name = "colgroup",
                         .attributes = .{},
                         .self_closing = false,
@@ -1640,7 +1591,7 @@ fn inTable(c: *TreeConstructor, token: Token) !void {
                 },
                 .html_td, .html_th, .html_tr => {
                     clearTheStackBackToATableContext(c);
-                    _ = try insertHtmlElementForTheToken(c, TokenStartTag{
+                    _ = try insertHtmlElementForTheToken(c, Token.StartTag{
                         .name = "tbody",
                         .attributes = .{},
                         .self_closing = false,
@@ -1915,7 +1866,7 @@ fn inTableBody(c: *TreeConstructor, token: Token) !void {
                 .html_th, .html_td => {
                     try parseError(c, .TreeConstructionError);
                     clearTheStackBackToATableBodyContext(c);
-                    _ = try insertHtmlElementForTheToken(c, TokenStartTag{
+                    _ = try insertHtmlElementForTheToken(c, Token.StartTag{
                         .name = "tr",
                         .attributes = .{},
                         .self_closing = false,
@@ -2523,7 +2474,7 @@ fn processTokenForeignContent(c: *TreeConstructor, token: Token) !void {
         .character => |character| {
             if (isNull(character)) {
                 try parseError(c, .TreeConstructionError);
-                try insertCharacter(c, TokenCharacter{ .data = '\u{FFFD}' });
+                try insertCharacter(c, Token.Character{ .data = '\u{FFFD}' });
             } else {
                 try insertCharacter(c, character);
                 if (!isWhitespace(character)) {
@@ -2627,7 +2578,7 @@ fn foreignContentEndTagBrP(c: *TreeConstructor, token: Token) !void {
     return processToken(c, token);
 }
 
-fn foreignContentStartTagAnythingElse(c: *TreeConstructor, start_tag: TokenStartTag, token_element_type: ElementType) !void {
+fn foreignContentStartTagAnythingElse(c: *TreeConstructor, start_tag: Token.StartTag, token_element_type: ElementType) !void {
     const foreign_content_change_svg_tag_name_map = ComptimeStringMap([]const u8, .{
         .{ "altglyph", "altGlyph" },
         .{ "altglyphdef", "altGlyphDef" },
@@ -2671,7 +2622,7 @@ fn foreignContentStartTagAnythingElse(c: *TreeConstructor, start_tag: TokenStart
     const adjusted_current_node = adjustedCurrentNode(c);
     const namespace = adjusted_current_node.namespace();
     var element_type: ElementType = undefined;
-    var new_token: TokenStartTag = undefined;
+    var new_token: Token.StartTag = undefined;
     var adjust_attributes: AdjustAttributes = undefined;
     switch (namespace) {
         .html => {
@@ -2686,7 +2637,7 @@ fn foreignContentStartTagAnythingElse(c: *TreeConstructor, start_tag: TokenStart
         },
         .svg => {
             const new_tag_name = foreign_content_change_svg_tag_name_map.get(start_tag.name) orelse start_tag.name;
-            new_token = TokenStartTag{
+            new_token = Token.StartTag{
                 .name = new_tag_name,
                 .attributes = start_tag.attributes,
                 .self_closing = start_tag.self_closing,
@@ -2722,7 +2673,7 @@ fn foreignContentEndTagScriptWithinSvgScript(c: *TreeConstructor) void {
     }
 }
 
-fn foreignContentEndTagAnythingElse(c: *TreeConstructor, end_tag: TokenEndTag) !void {
+fn foreignContentEndTagAnythingElse(c: *TreeConstructor, end_tag: Token.EndTag) !void {
     var index = c.open_elements.items.len;
     var node = c.open_elements.items[index - 1];
     if (!rem.util.eqlIgnoreCase(end_tag.name, node.localName(c.dom))) {
@@ -2755,7 +2706,7 @@ fn acknowledgeSelfClosingFlag(c: *TreeConstructor) void {
 
 const RawtextOrRcdata = enum { RAWTEXT, RCDATA };
 
-fn textParsingAlgorithm(variant: RawtextOrRcdata, c: *TreeConstructor, start_tag: TokenStartTag, comptime element_type: ElementType) !void {
+fn textParsingAlgorithm(variant: RawtextOrRcdata, c: *TreeConstructor, start_tag: Token.StartTag, comptime element_type: ElementType) !void {
     _ = try insertHtmlElementForTheToken(c, start_tag, element_type);
     switch (variant) {
         .RAWTEXT => setTokenizerState(c, .RAWTEXT, element_type),
@@ -2764,11 +2715,11 @@ fn textParsingAlgorithm(variant: RawtextOrRcdata, c: *TreeConstructor, start_tag
     changeToAndSetOriginalInsertionMode(c, .Text, c.insertion_mode);
 }
 
-fn isNull(character: TokenCharacter) bool {
+fn isNull(character: Token.Character) bool {
     return character.data == 0x00;
 }
 
-fn isWhitespace(character: TokenCharacter) bool {
+fn isWhitespace(character: Token.Character) bool {
     // TODO: The tokenizer removed all 0x0D characters.
     return switch (character.data) {
         0x09, 0x0A, 0x0C, 0x0D, 0x20 => true,
@@ -2776,112 +2727,121 @@ fn isWhitespace(character: TokenCharacter) bool {
     };
 }
 
-fn doctypeEnablesQuirks(doctype: TokenDOCTYPE) bool {
+fn doctypeEnablesQuirks(doctype: Token.Doctype) bool {
+    const lower = rem.util.toLowercaseComptime;
+    const eql = rem.util.eqlIgnoreCase2;
+    const startsWith = rem.util.startsWithIgnoreCase2;
+
     // TODO: Use std.ComptimeStringMap
     if (doctype.force_quirks) return true;
     if (doctype.name != null and !strEql(doctype.name.?, "html")) return true;
-    if (doctype.system_identifier) |si| {
-        if (rem.util.eqlIgnoreCase2(si, "http://www.ibm.com/data/dtd/v11/ibmxhtml1-transitional.dtd")) {
+    if (doctype.system_identifier) |system_identifier| {
+        if (eql("http://www.ibm.com/data/dtd/v11/ibmxhtml1-transitional.dtd", system_identifier)) {
             return true;
         }
     } else {
-        if (doctype.public_identifier) |pi| {
-            if (rem.util.startsWithIgnoreCase2(pi, &rem.util.toLowercaseComptime("-//W3C//DTD HTML 4.01 Frameset//")) or
-                rem.util.startsWithIgnoreCase2(pi, &rem.util.toLowercaseComptime("-//W3C//DTD HTML 4.01 Transitional//")))
-            {
-                return true;
+        if (doctype.public_identifier) |public_identifier| {
+            for (&[_][]const u8{
+                &lower("-//W3C//DTD HTML 4.01 Frameset//"),
+                &lower("-//W3C//DTD HTML 4.01 Transitional//"),
+            }) |s| {
+                if (startsWith(public_identifier, s)) return true;
             }
         }
     }
-    if (doctype.public_identifier) |pi| {
-        for (rem.util.mapToLowercaseComptime(&[_][]const u8{
-            "-//W3O//DTD W3 HTML Strict 3.0//EN//",
-            "-/W3C/DTD HTML 4.0 Transitional/EN",
-            "HTML",
-        })) |s| {
-            if (rem.util.eqlIgnoreCase2(pi, s)) return true;
+    if (doctype.public_identifier) |public_identifier| {
+        for (&[_][]const u8{
+            &lower("-//W3O//DTD W3 HTML Strict 3.0//EN//"),
+            &lower("-/W3C/DTD HTML 4.0 Transitional/EN"),
+            &lower("HTML"),
+        }) |s| {
+            if (eql(s, public_identifier)) return true;
         }
+
         @setEvalBranchQuota(6000);
-        for (rem.util.mapToLowercaseComptime(&[_][]const u8{
-            "+//Silmaril//dtd html Pro v0r11 19970101//",
-            "-//AS//DTD HTML 3.0 asWedit + extensions//",
-            "-//AdvaSoft Ltd//DTD HTML 3.0 asWedit + extensions//",
-            "-//IETF//DTD HTML 2.0 Level 1//",
-            "-//IETF//DTD HTML 2.0 Level 2//",
-            "-//IETF//DTD HTML 2.0 Strict Level 1//",
-            "-//IETF//DTD HTML 2.0 Strict Level 2//",
-            "-//IETF//DTD HTML 2.0 Strict//",
-            "-//IETF//DTD HTML 2.0//",
-            "-//IETF//DTD HTML 2.1E//",
-            "-//IETF//DTD HTML 3.0//",
-            "-//IETF//DTD HTML 3.2 Final//",
-            "-//IETF//DTD HTML 3.2//",
-            "-//IETF//DTD HTML 3//",
-            "-//IETF//DTD HTML Level 0//",
-            "-//IETF//DTD HTML Level 1//",
-            "-//IETF//DTD HTML Level 2//",
-            "-//IETF//DTD HTML Level 3//",
-            "-//IETF//DTD HTML Strict Level 0//",
-            "-//IETF//DTD HTML Strict Level 1//",
-            "-//IETF//DTD HTML Strict Level 2//",
-            "-//IETF//DTD HTML Strict Level 3//",
-            "-//IETF//DTD HTML Strict//",
-            "-//IETF//DTD HTML//",
-            "-//Metrius//DTD Metrius Presentational//",
-            "-//Microsoft//DTD Internet Explorer 2.0 HTML Strict//",
-            "-//Microsoft//DTD Internet Explorer 2.0 HTML//",
-            "-//Microsoft//DTD Internet Explorer 2.0 Tables//",
-            "-//Microsoft//DTD Internet Explorer 3.0 HTML Strict//",
-            "-//Microsoft//DTD Internet Explorer 3.0 HTML//",
-            "-//Microsoft//DTD Internet Explorer 3.0 Tables//",
-            "-//Netscape Comm. Corp.//DTD HTML//",
-            "-//Netscape Comm. Corp.//DTD Strict HTML//",
-            "-//O'Reilly and Associates//DTD HTML 2.0//",
-            "-//O'Reilly and Associates//DTD HTML Extended 1.0//",
-            "-//O'Reilly and Associates//DTD HTML Extended Relaxed 1.0//",
-            "-//SQ//DTD HTML 2.0 HoTMetaL + extensions//",
-            "-//SoftQuad Software//DTD HoTMetaL PRO 6.0::19990601::extensions to HTML 4.0//",
-            "-//SoftQuad//DTD HoTMetaL PRO 4.0::19971010::extensions to HTML 4.0//",
-            "-//Spyglass//DTD HTML 2.0 Extended//",
-            "-//Sun Microsystems Corp.//DTD HotJava HTML//",
-            "-//Sun Microsystems Corp.//DTD HotJava Strict HTML//",
-            "-//W3C//DTD HTML 3 1995-03-24//",
-            "-//W3C//DTD HTML 3.2 Draft//",
-            "-//W3C//DTD HTML 3.2 Final//",
-            "-//W3C//DTD HTML 3.2//",
-            "-//W3C//DTD HTML 3.2S Draft//",
-            "-//W3C//DTD HTML 4.0 Frameset//",
-            "-//W3C//DTD HTML 4.0 Transitional//",
-            "-//W3C//DTD HTML Experimental 19960712//",
-            "-//W3C//DTD HTML Experimental 970421//",
-            "-//W3C//DTD W3 HTML//",
-            "-//W3O//DTD W3 HTML 3.0//",
-            "-//WebTechs//DTD Mozilla HTML 2.0//",
-            "-//WebTechs//DTD Mozilla HTML//",
-        })) |s| {
-            if (rem.util.startsWithIgnoreCase2(pi, s)) return true;
+        for (&[_][]const u8{
+            &lower("+//Silmaril//dtd html Pro v0r11 19970101//"),
+            &lower("-//AS//DTD HTML 3.0 asWedit + extensions//"),
+            &lower("-//AdvaSoft Ltd//DTD HTML 3.0 asWedit + extensions//"),
+            &lower("-//IETF//DTD HTML 2.0 Level 1//"),
+            &lower("-//IETF//DTD HTML 2.0 Level 2//"),
+            &lower("-//IETF//DTD HTML 2.0 Strict Level 1//"),
+            &lower("-//IETF//DTD HTML 2.0 Strict Level 2//"),
+            &lower("-//IETF//DTD HTML 2.0 Strict//"),
+            &lower("-//IETF//DTD HTML 2.0//"),
+            &lower("-//IETF//DTD HTML 2.1E//"),
+            &lower("-//IETF//DTD HTML 3.0//"),
+            &lower("-//IETF//DTD HTML 3.2 Final//"),
+            &lower("-//IETF//DTD HTML 3.2//"),
+            &lower("-//IETF//DTD HTML 3//"),
+            &lower("-//IETF//DTD HTML Level 0//"),
+            &lower("-//IETF//DTD HTML Level 1//"),
+            &lower("-//IETF//DTD HTML Level 2//"),
+            &lower("-//IETF//DTD HTML Level 3//"),
+            &lower("-//IETF//DTD HTML Strict Level 0//"),
+            &lower("-//IETF//DTD HTML Strict Level 1//"),
+            &lower("-//IETF//DTD HTML Strict Level 2//"),
+            &lower("-//IETF//DTD HTML Strict Level 3//"),
+            &lower("-//IETF//DTD HTML Strict//"),
+            &lower("-//IETF//DTD HTML//"),
+            &lower("-//Metrius//DTD Metrius Presentational//"),
+            &lower("-//Microsoft//DTD Internet Explorer 2.0 HTML Strict//"),
+            &lower("-//Microsoft//DTD Internet Explorer 2.0 HTML//"),
+            &lower("-//Microsoft//DTD Internet Explorer 2.0 Tables//"),
+            &lower("-//Microsoft//DTD Internet Explorer 3.0 HTML Strict//"),
+            &lower("-//Microsoft//DTD Internet Explorer 3.0 HTML//"),
+            &lower("-//Microsoft//DTD Internet Explorer 3.0 Tables//"),
+            &lower("-//Netscape Comm. Corp.//DTD HTML//"),
+            &lower("-//Netscape Comm. Corp.//DTD Strict HTML//"),
+            &lower("-//O'Reilly and Associates//DTD HTML 2.0//"),
+            &lower("-//O'Reilly and Associates//DTD HTML Extended 1.0//"),
+            &lower("-//O'Reilly and Associates//DTD HTML Extended Relaxed 1.0//"),
+            &lower("-//SQ//DTD HTML 2.0 HoTMetaL + extensions//"),
+            &lower("-//SoftQuad Software//DTD HoTMetaL PRO 6.0::19990601::extensions to HTML 4.0//"),
+            &lower("-//SoftQuad//DTD HoTMetaL PRO 4.0::19971010::extensions to HTML 4.0//"),
+            &lower("-//Spyglass//DTD HTML 2.0 Extended//"),
+            &lower("-//Sun Microsystems Corp.//DTD HotJava HTML//"),
+            &lower("-//Sun Microsystems Corp.//DTD HotJava Strict HTML//"),
+            &lower("-//W3C//DTD HTML 3 1995-03-24//"),
+            &lower("-//W3C//DTD HTML 3.2 Draft//"),
+            &lower("-//W3C//DTD HTML 3.2 Final//"),
+            &lower("-//W3C//DTD HTML 3.2//"),
+            &lower("-//W3C//DTD HTML 3.2S Draft//"),
+            &lower("-//W3C//DTD HTML 4.0 Frameset//"),
+            &lower("-//W3C//DTD HTML 4.0 Transitional//"),
+            &lower("-//W3C//DTD HTML Experimental 19960712//"),
+            &lower("-//W3C//DTD HTML Experimental 970421//"),
+            &lower("-//W3C//DTD W3 HTML//"),
+            &lower("-//W3O//DTD W3 HTML 3.0//"),
+            &lower("-//WebTechs//DTD Mozilla HTML 2.0//"),
+            &lower("-//WebTechs//DTD Mozilla HTML//"),
+        }) |s| {
+            if (startsWith(public_identifier, s)) return true;
         }
     }
     return false;
 }
 
-fn doctypeEnablesLimitedQuirks(doctype: TokenDOCTYPE) bool {
+fn doctypeEnablesLimitedQuirks(doctype: Token.Doctype) bool {
+    const lower = rem.util.toLowercaseComptime;
+    const startsWith = rem.util.startsWithIgnoreCase2;
+
     // TODO: Use std.ComptimeStringMap
     const pi = doctype.public_identifier orelse return false;
-    for (rem.util.mapToLowercaseComptime(&[_][]const u8{
-        "-//W3C//DTD XHTML 1.0 Frameset//",
-        "-//W3C//DTD XHTML 1.0 Transitional//",
-    })) |s| {
-        if (rem.util.startsWithIgnoreCase2(pi, s)) {
+    for (&[_][]const u8{
+        &lower("-//W3C//DTD XHTML 1.0 Frameset//"),
+        &lower("-//W3C//DTD XHTML 1.0 Transitional//"),
+    }) |s| {
+        if (startsWith(pi, s)) {
             return true;
         }
     }
     if (doctype.system_identifier != null) {
-        for (rem.util.mapToLowercaseComptime(&[_][]const u8{
-            "-//W3C//DTD HTML 4.01 Frameset//",
-            "-//W3C//DTD HTML 4.01 Transitional//",
-        })) |s| {
-            if (rem.util.startsWithIgnoreCase2(pi, s)) {
+        for (&[_][]const u8{
+            &lower("-//W3C//DTD HTML 4.01 Frameset//"),
+            &lower("-//W3C//DTD HTML 4.01 Transitional//"),
+        }) |s| {
+            if (startsWith(pi, s)) {
                 return true;
             }
         }
@@ -2901,6 +2861,15 @@ fn strEqlAny(string: []const u8, compare_to: []const []const u8) bool {
     return false;
 }
 
+fn freeStringHashMap(map: anytype, allocator: Allocator) void {
+    var iterator = map.iterator();
+    while (iterator.next()) |attr| {
+        allocator.free(attr.key_ptr.*);
+        allocator.free(attr.value_ptr.*);
+    }
+    map.deinit(allocator);
+}
+
 fn elemTypeEqlAny(element_type: ElementType, compare_to: []const ElementType) bool {
     for (compare_to) |t| {
         if (element_type == t) return true;
@@ -2909,7 +2878,8 @@ fn elemTypeEqlAny(element_type: ElementType, compare_to: []const ElementType) bo
 }
 
 fn parseError(c: *TreeConstructor, err: ParseError) !void {
-    try c.error_handler.sendError(err);
+    const parser = @fieldParentPtr(Parser, "constructor", c);
+    try parser.parseError(err);
 }
 
 const ParentNode = union(enum) {
@@ -3021,7 +2991,7 @@ fn appropriateNodeInsertionLocationWithTarget(c: *TreeConstructor, target: *Elem
     return adjusted_insertion_location;
 }
 
-fn insertCharacter(c: *TreeConstructor, character: TokenCharacter) !void {
+fn insertCharacter(c: *TreeConstructor, character: Token.Character) !void {
     const location = appropriateNodeInsertionLocation(c);
     // TODO: If the adjusted insertion location is in a Document node, then return.
 
@@ -3035,7 +3005,7 @@ fn insertCharacter(c: *TreeConstructor, character: TokenCharacter) !void {
             } else {
                 const cdata = try c.dom.makeCdata(code_units[0..len], .text);
                 // TODO: Catch a possible DomException.
-                try rem.dom.mutation.elementAppend(c.dom, element, .{ .cdata = cdata }, .Suppress);
+                try Dom.mutation.elementAppend(c.dom, element, .{ .cdata = cdata }, .Suppress);
             }
         },
         .parent_before_child => |s| {
@@ -3045,13 +3015,13 @@ fn insertCharacter(c: *TreeConstructor, character: TokenCharacter) !void {
             } else {
                 const cdata = try c.dom.makeCdata(code_units[0..len], .text);
                 // TODO: Catch a possible DomException.
-                try rem.dom.mutation.elementInsert(c.dom, s.parent, .{ .element = s.child }, .{ .cdata = cdata }, .Suppress);
+                try Dom.mutation.elementInsert(c.dom, s.parent, .{ .element = s.child }, .{ .cdata = cdata }, .Suppress);
             }
         },
     }
 }
 
-fn insertComment(c: *TreeConstructor, comment: TokenComment) !void {
+fn insertComment(c: *TreeConstructor, comment: Token.Comment) !void {
     const location = appropriateNodeInsertionLocation(c);
     switch (location) {
         .element_last_child => |element| return insertCommentToElement(c, comment, element),
@@ -3059,22 +3029,22 @@ fn insertComment(c: *TreeConstructor, comment: TokenComment) !void {
     }
 }
 
-fn insertCommentToDocument(c: *TreeConstructor, comment: TokenComment) !void {
+fn insertCommentToDocument(c: *TreeConstructor, comment: Token.Comment) !void {
     const cdata = try c.dom.makeCdata(comment.data, .comment);
     // TODO: Catch a possible DomException.
-    return rem.dom.mutation.documentAppendCdata(c.dom, c.document, cdata, .Suppress);
+    return Dom.mutation.documentAppendCdata(c.dom, c.document, cdata, .Suppress);
 }
 
-fn insertCommentToElement(c: *TreeConstructor, comment: TokenComment, element: *Element) !void {
+fn insertCommentToElement(c: *TreeConstructor, comment: Token.Comment, element: *Element) !void {
     const cdata = try c.dom.makeCdata(comment.data, .comment);
     // TODO: Catch a possible DomException.
-    return rem.dom.mutation.elementAppend(c.dom, element, .{ .cdata = cdata }, .Suppress);
+    return Dom.mutation.elementAppend(c.dom, element, .{ .cdata = cdata }, .Suppress);
 }
 
-fn insertCommentToElementBeforeChild(c: *TreeConstructor, comment: TokenComment, parent: *Element, child: *Element) !void {
+fn insertCommentToElementBeforeChild(c: *TreeConstructor, comment: Token.Comment, parent: *Element, child: *Element) !void {
     const cdata = try c.dom.makeCdata(comment.data, .comment);
     // TODO: Catch a possible DomException.
-    return rem.dom.mutation.elementInsert(c.dom, parent, .{ .element = child }, .{ .cdata = cdata }, .Suppress);
+    return Dom.mutation.elementInsert(c.dom, parent, .{ .element = child }, .{ .cdata = cdata }, .Suppress);
 }
 
 /// Implements https://html.spec.whatwg.org/multipage/parsing.html#create-an-element-for-the-token
@@ -3083,7 +3053,7 @@ fn createAnElementForTheToken(
     /// Only the attributes of the start tag is used.
     /// The element type is determined by element_type.
     // TODO: Don't take an entire start tag, only its attributes.
-    start_tag: TokenStartTag,
+    start_tag: Token.StartTag,
     element_type: ElementType,
     intended_parent: ParentNode,
     adjust_attributes: AdjustAttributes,
@@ -3126,7 +3096,7 @@ const adjust_foreign_attributes_map = ComptimeStringMap(ElementAttributesKey, .{
 });
 
 /// Appends the attributes from the token to the Element.
-fn elementAppendAttributes(dom: *Dom, element: *Element, attributes: *TokenStartTag.Attributes.Iterator) !void {
+fn elementAppendAttributes(dom: *Dom, element: *Element, attributes: *Token.StartTag.Attributes.Iterator) !void {
     while (attributes.next()) |attr| {
         try element.appendAttribute(dom.allocator, .{ .prefix = .none, .namespace = .none, .local_name = attr.key_ptr.* }, attr.value_ptr.*);
     }
@@ -3134,7 +3104,7 @@ fn elementAppendAttributes(dom: *Dom, element: *Element, attributes: *TokenStart
 
 /// Appends the attributes from the token to the Element, while also doing the
 /// "adjust MathML attributes" and "adjust foreign attributes" algorithms.
-fn appendAttributesAdjustMathMlForeign(dom: *Dom, element: *Element, attributes: *TokenStartTag.Attributes.Iterator) !void {
+fn appendAttributesAdjustMathMlForeign(dom: *Dom, element: *Element, attributes: *Token.StartTag.Attributes.Iterator) !void {
     while (attributes.next()) |attr| {
         const name = attr.key_ptr.*;
         const value = attr.value_ptr.*;
@@ -3150,7 +3120,7 @@ fn appendAttributesAdjustMathMlForeign(dom: *Dom, element: *Element, attributes:
 
 /// Appends the attributes from the token to the Element, while also doing the
 /// "adjust SVG attributes" and "adjust foreign attributes" algorithms.
-fn appendAttributesAdjustSvgForeign(dom: *Dom, element: *Element, attributes: *TokenStartTag.Attributes.Iterator) !void {
+fn appendAttributesAdjustSvgForeign(dom: *Dom, element: *Element, attributes: *Token.StartTag.Attributes.Iterator) !void {
     const adjust_svg_attributes_map = ComptimeStringMap([]const u8, .{
         .{ "attributename", "attributeName" },
         .{ "attributetype", "attributeType" },
@@ -3229,7 +3199,7 @@ fn appendAttributesAdjustSvgForeign(dom: *Dom, element: *Element, attributes: *T
 // TODO: Add an option to not add the element to the list of open elements (skipping step 4 of this algorithm).
 fn insertForeignElementForTheToken(
     c: *TreeConstructor,
-    start_tag: TokenStartTag,
+    start_tag: Token.StartTag,
     element_type: ElementType,
     adjust_attributes: AdjustAttributes,
 ) !*Element {
@@ -3247,8 +3217,8 @@ fn insertForeignElementForTheToken(
     switch (adjusted_insertion_location) {
         // TODO: Check pre-insertion validity
         // TODO: If it is NOT possible to insert element at the adjusted insertion location, then ignore the error.
-        .element_last_child => |e| try rem.dom.mutation.elementAppend(c.dom, e, .{ .element = element }, .Suppress),
-        .parent_before_child => |s| try rem.dom.mutation.elementInsert(c.dom, s.parent, .{ .element = s.child }, .{ .element = element }, .Suppress),
+        .element_last_child => |e| try Dom.mutation.elementAppend(c.dom, e, .{ .element = element }, .Suppress),
+        .parent_before_child => |s| try Dom.mutation.elementInsert(c.dom, s.parent, .{ .element = s.child }, .{ .element = element }, .Suppress),
     }
     if (c.fragment_context != null) {
         // TODO: pop the element queue from element's relevant agent's custom element reactions stack,
@@ -3260,7 +3230,7 @@ fn insertForeignElementForTheToken(
 }
 
 /// Implements https://html.spec.whatwg.org/multipage/parsing.html#insert-an-html-element
-fn insertHtmlElementForTheToken(c: *TreeConstructor, start_tag: TokenStartTag, element_type: ElementType) !*Element {
+fn insertHtmlElementForTheToken(c: *TreeConstructor, start_tag: Token.StartTag, element_type: ElementType) !*Element {
     assert(element_type.namespace() == .html);
     return insertForeignElementForTheToken(c, start_tag, element_type, .dont_adjust);
 }
@@ -3345,8 +3315,8 @@ fn addFormattingElementTagAttributes(c: *TreeConstructor, element: *Element) !us
     const attributes_copy = try c.formatting_element_tag_attributes.addOne(c.allocator);
     errdefer _ = c.formatting_element_tag_attributes.pop();
 
-    attributes_copy.* = TokenStartTag.Attributes{};
-    errdefer rem.util.freeStringHashMapConst(attributes_copy, c.allocator);
+    attributes_copy.* = Token.StartTag.Attributes{};
+    errdefer freeStringHashMap(attributes_copy, c.allocator);
     try attributes_copy.ensureTotalCapacity(c.allocator, element.numAttributes());
 
     const slice = element.attributes.slice();
@@ -3372,7 +3342,7 @@ fn deleteFormattingElementTagAttributes(c: *TreeConstructor, ref: usize) void {
         }
     }
     const tag_attributes = &c.formatting_element_tag_attributes.items[ref];
-    rem.util.freeStringHashMapConst(tag_attributes, c.allocator);
+    freeStringHashMap(tag_attributes, c.allocator);
     _ = c.formatting_element_tag_attributes.orderedRemove(ref);
 }
 
@@ -3468,7 +3438,7 @@ fn reconstructActiveFormattingElements(c: *TreeConstructor) !void {
         const entry = &c.active_formatting_elements.items[index];
         const new_element = try insertHtmlElementForTheToken(
             c,
-            TokenStartTag{
+            Token.StartTag{
                 // We can get away with using a "fake" token because createAnElementForTheToken
                 // doesn't use the token's name unless we're creating a custom element (which we aren't).
                 .name = undefined,
@@ -3599,7 +3569,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, element_type: ElementType) !void
             const node_in_formatting_elements = &c.active_formatting_elements.items[node_in_formatting_elements_index.?];
             const new_element = try createAnElementForTheToken(
                 c,
-                TokenStartTag{
+                Token.StartTag{
                     .name = undefined,
                     .attributes = c.formatting_element_tag_attributes.items[node_in_formatting_elements.tag_attributes_ref],
                     .self_closing = undefined,
@@ -3617,7 +3587,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, element_type: ElementType) !void
             }
 
             // Step 4.13.8
-            try rem.dom.mutation.elementAppend(
+            try Dom.mutation.elementAppend(
                 c.dom,
                 node_in_open_elements.*,
                 .{ .element = c.open_elements.items[last_node_in_open_elements_index] },
@@ -3632,13 +3602,13 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, element_type: ElementType) !void
         // Step 4.14
         const location = appropriateNodeInsertionLocationWithTarget(c, common_ancestor);
         switch (location) {
-            .element_last_child => |e| try rem.dom.mutation.elementAppend(
+            .element_last_child => |e| try Dom.mutation.elementAppend(
                 c.dom,
                 e,
                 .{ .element = c.open_elements.items[last_node_in_open_elements_index] },
                 .Suppress,
             ),
-            .parent_before_child => |s| try rem.dom.mutation.elementInsert(
+            .parent_before_child => |s| try Dom.mutation.elementInsert(
                 c.dom,
                 s.parent,
                 .{ .element = s.child },
@@ -3650,7 +3620,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, element_type: ElementType) !void
         // Step 4.15
         const new_element = try createAnElementForTheToken(
             c,
-            TokenStartTag{
+            Token.StartTag{
                 .name = undefined,
                 .attributes = c.formatting_element_tag_attributes.items[formatting_element.tag_attributes_ref],
                 .self_closing = undefined,
@@ -3661,10 +3631,10 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, element_type: ElementType) !void
         );
         // Step 4.16
         // TODO: This needs to go through the DOM API
-        std.mem.swap(ArrayListUnmanaged(rem.dom.ElementOrCharacterData), &furthest_block.children, &new_element.children);
+        std.mem.swap(ArrayListUnmanaged(ElementOrCharacterData), &furthest_block.children, &new_element.children);
 
         // Step 4.17
-        try rem.dom.mutation.elementAppend(c.dom, furthest_block, .{ .element = new_element }, .Suppress);
+        try Dom.mutation.elementAppend(c.dom, furthest_block, .{ .element = new_element }, .Suppress);
 
         // Step 4.18
         // Instead of calling removeFromListOfActiveFormattingElements, which might delete the tag attributes
