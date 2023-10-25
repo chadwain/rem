@@ -152,13 +152,17 @@ pub const Token = union(enum) {
             .character => |c| {
                 try writer.writeAll("Character (");
                 switch (c.data) {
+                    0x00...0x08, 0x0B...0x7F => {
+                        const as_u7: u7 = @intCast(c.data);
+                        if (std.ascii.isControl(as_u7) or std.ascii.isWhitespace(as_u7)) {
+                            try writer.print("U+{X}", .{as_u7});
+                        } else {
+                            try writer.writeByte(as_u7);
+                        }
+                    },
                     '\n' => try writer.writeAll("<newline>"),
                     '\t' => try writer.writeAll("<tab>"),
-                    else => {
-                        var code_units: [4]u8 = undefined;
-                        const len = std.unicode.utf8Encode(c.data, &code_units) catch unreachable;
-                        try writer.writeAll(code_units[0..len]);
-                    },
+                    else => try writer.print("U+{X}", .{c.data}),
                 }
                 try writer.writeAll(")");
             },

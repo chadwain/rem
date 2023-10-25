@@ -27,7 +27,7 @@ Clone the repository like this:
 git clone --recursive --config core.autocrlf=false https://github.com/chadwain/rem.git
 ```
 
-There are no dependencies other than a Zig compiler. Note that this library is only compatible with Zig version 0.10.1.
+There are no dependencies other than a Zig compiler. Note that this library is only compatible with Zig version 0.11.0 or newer.
 
 ## Use the code
 Here's an example of using the parser. You can see the output of this program by running `zig build example`.
@@ -38,7 +38,7 @@ const rem = @import("rem");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(!gpa.deinit());
+    defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
     // This is the text that will be read by the parser.

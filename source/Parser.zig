@@ -259,7 +259,7 @@ pub fn run(self: *Self) !void {
         const tokens = tokenizer.tokens.items;
         if (tokens.len > 0) {
             var constructor_result: TreeConstructor.RunResult = undefined;
-            for (tokens) |*token, i| {
+            for (tokens, 0..) |*token, i| {
                 constructor_result = self.constructor.run(token.*) catch |err| switch (err) {
                     error.AbortParsing => @panic("TODO abort parsing"),
                     error.OutOfMemory,
@@ -346,7 +346,7 @@ pub fn getDocument(self: Self) *Document {
 pub fn errors(self: Self) []const ParseError {
     return switch (self.error_handler) {
         .ignore => &[0]ParseError{},
-        .abort => |err| if (err) |*e| @ptrCast([*]const ParseError, e)[0..1] else &[0]ParseError{},
+        .abort => |err| if (err) |*e| @as([*]const ParseError, @ptrCast(e))[0..1] else &[0]ParseError{},
         .report => |list| list.items,
     };
 }

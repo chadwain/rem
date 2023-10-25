@@ -8,7 +8,7 @@ const rem = @import("rem");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(!gpa.deinit());
+    defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
     // This is the text that will be read by the parser.

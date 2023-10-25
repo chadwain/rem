@@ -248,7 +248,7 @@ const Test = struct {
 };
 
 fn createTest(test_string: *[]const u8, allocator: Allocator) !Test {
-    var lines = std.mem.split(u8, test_string.*, "\n");
+    var lines = std.mem.splitScalar(u8, test_string.*, '\n');
     defer test_string.* = lines.rest();
     var section = lines.next().?;
 
@@ -326,7 +326,7 @@ fn createTest(test_string: *[]const u8, allocator: Allocator) !Test {
     };
 }
 
-fn parseDom(lines: *std.mem.SplitIterator(u8), context_element_type: ?ElementType, allocator: Allocator) !Expected {
+fn parseDom(lines: *std.mem.SplitIterator(u8, .scalar), context_element_type: ?ElementType, allocator: Allocator) !Expected {
     var stack = ArrayList(*Element).init(allocator);
     defer stack.deinit();
 
@@ -518,7 +518,7 @@ fn runTest(t: Test, allocator: Allocator, scripting: bool) !void {
             try list.append(value);
             i += len;
         }
-        break :input list.toOwnedSlice();
+        break :input try list.toOwnedSlice();
     };
     defer allocator.free(input);
 
@@ -552,8 +552,8 @@ fn deeplyCompareDocuments(allocator: Allocator, doc1: *const Document, doc2: *co
     inline while (i < doc1.cdata_endpoints.len) : (i += 1) {
         try expectEqual(doc1.cdata_endpoints[i], doc2.cdata_endpoints[i]);
     }
-    for (doc1.cdata.items) |c1, j| {
-        try expectEqualCdatas(c1, doc2.cdata.items[j]);
+    for (doc1.cdata.items, doc2.cdata.items) |c1, c2| {
+        try expectEqualCdatas(c1, c2);
     }
 
     if (doc1.doctype) |d1| {

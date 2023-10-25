@@ -4,69 +4,104 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 const std = @import("std");
+const Build = std.Build;
 
-pub fn build(builder: *std.build.Builder) void {
-    const rem_pkg = std.build.Pkg{
+pub fn build(b: *Build) void {
+    const optimize = b.standardOptimizeOption(.{});
+    const target = b.standardTargetOptions(.{});
+
+    const rem_lib = b.addStaticLibrary(.{
         .name = "rem",
-        .source = .{ .path = "rem.zig" },
-    };
+        .root_source_file = .{ .path = "rem.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(rem_lib);
 
-    const mode = builder.standardReleaseOptions();
-    const target = builder.standardTargetOptions(.{});
+    {
+        const rem_unit_tests = b.addTest(.{
+            .name = "rem-unit-tests",
+            .root_source_file = .{ .path = "rem.zig" },
+            .target = target,
+            .optimize = optimize,
+        });
+        b.installArtifact(rem_unit_tests);
 
-    const lib = builder.addStaticLibrary("rem", "rem.zig");
-    lib.setBuildMode(mode);
-    lib.setTarget(target);
-    lib.use_stage1 = true;
-    lib.install();
+        const rem_unit_tests_run = b.addRunArtifact(rem_unit_tests);
+        rem_unit_tests_run.step.dependOn(&rem_unit_tests.step);
 
-    const lib_tests = builder.addTest("rem.zig");
-    lib_tests.setBuildMode(mode);
-    lib_tests.setTarget(target);
-    lib_tests.use_stage1 = true;
-    const lib_tests_step = builder.step("test", "Run library tests");
-    lib_tests_step.dependOn(&lib_tests.step);
+        const rem_unit_tests_run_step = b.step("test", "Run unit tests");
+        rem_unit_tests_run_step.dependOn(&rem_unit_tests_run.step);
+    }
 
-    const html5lib_tokenizer_tests = builder.addTest("test/html5lib-test-tokenizer.zig");
-    html5lib_tokenizer_tests.setBuildMode(mode);
-    html5lib_tokenizer_tests.setTarget(target);
-    html5lib_tokenizer_tests.addPackage(rem_pkg);
-    html5lib_tokenizer_tests.use_stage1 = true;
-    const html5lib_tokenizer_tests_step = builder.step("test-tokenizer", "Run tokenizer tests from html5lib-tests");
-    html5lib_tokenizer_tests_step.dependOn(&html5lib_tokenizer_tests.step);
+    const rem_module = b.createModule(.{ .source_file = .{ .path = "rem.zig" } });
 
-    const html5lib_tree_construction_tests = builder.addTest("test/html5lib-test-tree-construction.zig");
-    html5lib_tree_construction_tests.setBuildMode(mode);
-    html5lib_tree_construction_tests.setTarget(target);
-    html5lib_tree_construction_tests.addPackage(rem_pkg);
-    html5lib_tree_construction_tests.use_stage1 = true;
-    const html5lib_tree_construction_tests_step = builder.step("test-tree-construction", "Run tree construction tests from html5lib-tests");
-    html5lib_tree_construction_tests_step.dependOn(&html5lib_tree_construction_tests.step);
+    {
+        const html5lib_tokenizer_tests = b.addTest(.{
+            .name = "html5lib-tokenizer-tests",
+            .root_source_file = .{ .path = "test/html5lib-test-tokenizer.zig" },
+            .target = target,
+            .optimize = optimize,
+        });
+        html5lib_tokenizer_tests.addModule("rem", rem_module);
+        b.installArtifact(html5lib_tokenizer_tests);
 
-    const example = builder.addExecutable("example", "./example.zig");
-    example.setBuildMode(mode);
-    example.setTarget(target);
-    example.addPackage(rem_pkg);
-    example.use_stage1 = true;
-    example.install();
-    const example_run = example.run();
-    const example_step = builder.step("example", "Run an example program");
-    example_step.dependOn(&example_run.step);
+        const html5lib_tokenizer_tests_run = b.addRunArtifact(html5lib_tokenizer_tests);
+        html5lib_tokenizer_tests_run.step.dependOn(&html5lib_tokenizer_tests.step);
 
-    const run_generate_named_characters = genNamedCharactersRunStep(builder);
-    const generate_named_characters_step = builder.step("generate-named-characters", "Generate the named character reference data");
-    generate_named_characters_step.dependOn(&run_generate_named_characters.step);
-}
+        const html5lib_tokenizer_tests_run_step = b.step(
+            "test-tokenizer",
+            "Run tokenizer tests from html5lib-tests (requires 0.12.0-dev.91+a155e3585 or newer)",
+        );
+        html5lib_tokenizer_tests_run_step.dependOn(&html5lib_tokenizer_tests_run.step);
+    }
 
-fn genNamedCharactersRunStep(builder: *std.build.Builder) *std.build.RunStep {
-    const json_data = builder.pathFromRoot("tools/character_reference_data.json");
-    const path = builder.pathFromRoot("source/named_characters.zig");
-    const generate_named_characters = builder.addExecutable(
-        "generate_named_characters",
-        "tools/generate_named_characters.zig",
-    );
-    generate_named_characters.setBuildMode(.Debug);
-    const run_generate_named_characters = generate_named_characters.run();
-    run_generate_named_characters.addArgs(&.{ json_data, path });
-    return run_generate_named_characters;
+    {
+        const html5lib_tree_construction_tests = b.addTest(.{
+            .name = "html5lib-tree-construction-tests",
+            .root_source_file = .{ .path = "test/html5lib-test-tree-construction.zig" },
+            .target = target,
+            .optimize = optimize,
+        });
+        html5lib_tree_construction_tests.addModule("rem", rem_module);
+        b.installArtifact(html5lib_tree_construction_tests);
+
+        const html5lib_tree_construction_tests_run = b.addRunArtifact(html5lib_tree_construction_tests);
+        html5lib_tree_construction_tests_run.step.dependOn(&html5lib_tree_construction_tests.step);
+
+        const html5lib_tree_construction_tests_run_step = b.step("test-tree-construction", "Run tree construction tests from html5lib-tests");
+        html5lib_tree_construction_tests_run_step.dependOn(&html5lib_tree_construction_tests_run.step);
+    }
+
+    {
+        const example = b.addExecutable(.{
+            .name = "example",
+            .root_source_file = .{ .path = "./example.zig" },
+            .target = target,
+            .optimize = optimize,
+        });
+        example.addModule("rem", rem_module);
+        b.installArtifact(example);
+
+        const example_run = b.addRunArtifact(example);
+        const example_run_step = b.step("example", "Run an example program");
+        example_run_step.dependOn(&example_run.step);
+    }
+
+    {
+        const json_data = b.pathFromRoot("tools/character_reference_data.json");
+        const output_path = b.pathFromRoot("source/named_characters.zig");
+        const generate_named_characters = b.addExecutable(.{
+            .name = "generate-named-characters",
+            .root_source_file = .{ .path = "tools/generate_named_characters.zig" },
+            .target = target,
+            .optimize = .Debug,
+        });
+
+        const generate_named_characters_run = b.addRunArtifact(generate_named_characters);
+        generate_named_characters_run.addArgs(&.{ json_data, output_path });
+
+        const generate_named_characters_run_step = b.step("generate-named-characters", "Generate the named character reference data");
+        generate_named_characters_run_step.dependOn(&generate_named_characters_run.step);
+    }
 }

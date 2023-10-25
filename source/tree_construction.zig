@@ -1012,12 +1012,12 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                         if (fe.element.?.element_type == .html_a) {
                             try parseError(c, .TreeConstructionError);
                             try adoptionAgencyAlgorithm(c, .html_a);
-                            for (c.active_formatting_elements.items) |fe2, j| {
+                            for (c.active_formatting_elements.items, 0..) |fe2, j| {
                                 if (fe2.element == fe.element.?) removeFromListOfActiveFormattingElements(c, j);
                             }
                             // TODO: The adoption agency algorithm may have already removed the element from the stack of open elements
                             // if the element was in table scope.
-                            for (c.open_elements.items) |e, j| {
+                            for (c.open_elements.items, 0..) |e, j| {
                                 if (e == fe.element.?) _ = c.open_elements.orderedRemove(j);
                             }
                             break;
@@ -3270,7 +3270,7 @@ fn findInStackOfOpenElements(c: *TreeConstructor, element: *Element) ?usize {
 
 // TODO: This function could probably be deleted in favor of flags that keep track of what has been pushed onto the stack.
 fn removeFromStackOfOpenElements(c: *TreeConstructor, element: *Element) void {
-    for (c.open_elements.items) |e, i| {
+    for (c.open_elements.items, 0..) |e, i| {
         if (e == element) {
             _ = c.open_elements.orderedRemove(i);
             return;
@@ -3301,7 +3301,7 @@ const FormattingElement = struct {
         if (tag_attributes.count() != element.attributes.len) return false;
 
         const element_attributes_slice = element.attributes.slice();
-        for (element_attributes_slice.items(.key)) |key, index| {
+        for (element_attributes_slice.items(.key), 0..) |key, index| {
             // TODO: Need to compare namespaces too
             const tag_entry = tag_attributes.get(key.local_name) orelse return false;
             const value = element_attributes_slice.items(.value)[index];

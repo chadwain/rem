@@ -63,29 +63,19 @@ pub const eqlIgnoreCase = std.ascii.eqlIgnoreCase;
 /// Assumes the second string is already lowercase.
 pub fn eqlIgnoreCase2(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
-    for (b) |c2, i| {
+    for (a, b) |c1, c2| {
         assert(c2 == std.ascii.toLower(c2));
-        if (c2 != std.ascii.toLower(a[i])) return false;
+        if (c2 != std.ascii.toLower(c1)) return false;
     }
     return true;
 }
 
 pub fn toLowercaseComptime(comptime string: []const u8) [string.len]u8 {
     var result: [string.len]u8 = undefined;
-    for (string) |c, i| {
-        result[i] = std.ascii.toLower(c);
+    for (string, &result) |s, *dest| {
+        dest.* = std.ascii.toLower(s);
     }
     return result;
-}
-
-pub fn mapToLowercaseComptime(comptime strings: []const []const u8) [strings.len][]const u8 {
-    comptime {
-        var result: [strings.len][]const u8 = undefined;
-        for (strings) |s, i| {
-            result[i] = &toLowercaseComptime(s);
-        }
-        return result;
-    }
 }
 
 /// Assumes `needle` is already lowercase.

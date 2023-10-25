@@ -96,14 +96,13 @@ const Item = struct {
 };
 
 fn createTree(arena: Allocator, input_data: []const u8) !Node {
-    var json_parser = std.json.Parser.init(arena, false);
-    var json_tree = try json_parser.parse(input_data);
+    var parsed_json = try std.json.parseFromSlice(std.json.Value, arena, input_data, .{});
 
     var node = Node{ .children = ArrayList(Node.Entry).init(arena), .input = std.ArrayList(Item).init(arena) };
-    var it = json_tree.root.Object.iterator();
+    var it = parsed_json.value.object.iterator();
     while (it.next()) |o| {
         const name = o.key_ptr.*[1..];
-        try node.input.append(.{ .name = name, .characters = o.value_ptr.Object.get("characters").?.String });
+        try node.input.append(.{ .name = name, .characters = o.value_ptr.object.get("characters").?.string });
     }
 
     try createChildren(arena, &node);
@@ -170,10 +169,10 @@ fn render(root: *const Node, arena: Allocator) ![]u8 {
         };
 
         entry.has_children = true;
-        entry.index_of_children = @intCast(u14, children.items.len);
-        for (node.children.items) |c, i| {
-            const child_main_index = @intCast(u16, entries.items.len);
-            try children.append(.{ .char = @intCast(u7, c.key), .final = (i == node.children.items.len - 1) });
+        entry.index_of_children = @intCast(children.items.len);
+        for (node.children.items, 0..) |c, i| {
+            const child_main_index: u16 = @intCast(entries.items.len);
+            try children.append(.{ .char = @intCast(c.key), .final = (i == node.children.items.len - 1) });
             try stack.insert(stack_len, .{ .node = c.node, .main_index = child_main_index });
             const child_entry = try entries.addOne();
 
@@ -195,7 +194,7 @@ fn render(root: *const Node, arena: Allocator) ![]u8 {
         \\    array_index: u14,
         \\
         \\    pub fn entry(index: Index) Entry {
-        \\        return @bitCast(Entry, entries[index.array_index]);
+        \\        return @bitCast(entries[index.array_index]);
         \\    }
         \\
         \\    pub fn value(index: Index) Value {
@@ -216,7 +215,7 @@ fn render(root: *const Node, arena: Allocator) ![]u8 {
         \\
         \\        var i = entry.index_of_children.array_index;
         \\        while (true) : (i += 1) {
-        \\            const child = @bitCast(Child, children[i]);
+        \\            const child: Child = @bitCast(children[i]);
         \\            if (child.char == char_u7) {
         \\                return Index{ .array_index = i + 1 };
         \\            } else if (child.final) {
@@ -245,14 +244,14 @@ fn render(root: *const Node, arena: Allocator) ![]u8 {
         \\    .fields = &.{
         \\        .{
         \\            .name = "0",
-        \\            .field_type = ?u21,
+        \\            .type = ?u21,
         \\            .default_value = @as(*const anyopaque, &@as(?u21, null)),
         \\            .is_comptime = false,
         \\            .alignment = @alignOf(?u21),
         \\        },
         \\        .{
         \\            .name = "1",
-        \\            .field_type = ?u21,
+        \\            .type = ?u21,
         \\            .default_value = @as(*const anyopaque, &@as(?u21, null)),
         \\            .is_comptime = false,
         \\            .alignment = @alignOf(?u21),
@@ -265,38 +264,38 @@ fn render(root: *const Node, arena: Allocator) ![]u8 {
     );
 
     try writer.print("\nconst entries = [{}]u16{{", .{entries.items.len});
-    for (entries.items) |entry, i| {
+    for (entries.items, 0..) |entry, i| {
         if (i % 20 == 0) try writeNewline(writer);
-        try writer.print("{}, ", .{@bitCast(u16, entry)});
+        try writer.print("{}, ", .{@as(u16, @bitCast(entry))});
     }
     try writer.writeAll("};\n");
 
     try writer.print("\nconst children = [{}]u8{{", .{children.items.len});
-    for (children.items) |child, i| {
+    for (children.items, 0..) |child, i| {
         if (i % 20 == 0) try writeNewline(writer);
-        try writer.print("{}, ", .{@bitCast(u8, child)});
+        try writer.print("{}, ", .{@as(u8, @bitCast(child))});
     }
     try writer.writeAll("};\n");
 
     try writer.print("\nconst values = [{}]Value{{", .{values.items.len});
-    for (values.items) |value, i| {
+    for (values.items, 0..) |value, i| {
         if (i % 5 == 0) try writeNewline(writer);
-        try writer.writeAll(".{");
+        try writer.writeAll("Value{");
         if (value.first) |first| {
-            try writer.print("'\\u{{{X}}}'", .{first});
+            try writer.print("@as(?u21, '\\u{{{X}}}')", .{first});
             if (value.second) |second| {
-                try writer.print(", '\\u{{{X}}}'}}, ", .{second});
+                try writer.print(", @as(?u21, '\\u{{{X}}}')}}, ", .{second});
             } else {
-                try writer.writeAll(", null}, ");
+                try writer.writeAll(", @as(?u21, null)}, ");
             }
         } else {
             try writer.writeAll("null, null}, ");
         }
     }
     try writer.writeAll("};\n");
-
     try writer.writeByte(0);
-    var ast = try std.zig.parse(arena, @ptrCast([:0]u8, output.items));
+
+    var ast = try std.zig.Ast.parse(arena, output.items[0 .. output.items.len - 1 :0], .zig);
     return try ast.render(arena);
 }
 

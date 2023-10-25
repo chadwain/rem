@@ -43,6 +43,18 @@ const Parser = rem.Parser;
 const ParseError = Parser.ParseError;
 const ErrorHandler = Parser.ErrorHandler;
 
+comptime {
+    const min_supported_zig_version_string = "0.12.0-dev.91+a155e3585";
+    const min_supported_zig_version = std.SemanticVersion.parse(min_supported_zig_version_string) catch unreachable;
+    const current_zig_version = @import("builtin").zig_version;
+    if (current_zig_version.order(min_supported_zig_version) == .lt) {
+        const current_zig_version_string = @import("builtin").zig_version_string;
+        @compileError("Due to a regression in your current Zig version (" ++ current_zig_version_string ++ "), this test has been disabled.\n" ++
+            "Please use Zig version " ++ min_supported_zig_version_string ++ " or newer and try again.\n" ++
+            "See https://github.com/ziglang/zig/issues/16828 for more info.");
+    }
+}
+
 test "content model flags" {
     try runTestFile("test/html5lib-tests/tokenizer/contentModelFlags.test");
 }
@@ -95,39 +107,37 @@ test "unicode chars problematic" {
     try runTestFile("test/html5lib-tests/tokenizer/unicodeCharsProblematic.test");
 }
 
-// Not supported at the moment.
+// TODO: Not supported at the moment.
 // test "xml violation" {
 //     try runTestFile("test/html5lib-tests/tokenizer/xmlViolation.test");
 // }
 
 fn runTestFile(file_path: []const u8) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(!gpa.deinit());
+    defer std.debug.assert(gpa.deinit() == .ok);
     const gpa_allocator = gpa.allocator();
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    var arena_allocator = arena.allocator();
+    const arena_allocator = arena.allocator();
 
     var contents = try std.fs.cwd().readFileAlloc(arena_allocator, file_path, std.math.maxInt(usize));
     defer arena_allocator.free(contents);
-    var parser = std.json.Parser.init(arena_allocator, false);
-    defer parser.deinit();
-    var tree = try parser.parse(contents);
+    var tree = try std.json.parseFromSlice(std.json.Value, arena_allocator, contents, .{});
     defer tree.deinit();
 
-    var tests = tree.root.Object.get("tests").?.Array;
+    var tests = tree.value.object.get("tests").?.array;
     var progress = Progress{};
     const prog_root = progress.start("", tests.items.len);
 
     for (tests.items) |test_obj| {
-        const description = test_obj.Object.get("description").?.String;
+        const description = test_obj.object.get("description").?.string;
 
         var states: [6]TokenizerState = undefined;
         var num_states: usize = 0;
-        if (test_obj.Object.get("initialStates")) |initial_states_obj| {
-            for (initial_states_obj.Array.items) |initial_state_val| {
-                states[num_states] = parseInitialState(initial_state_val.String);
+        if (test_obj.object.get("initialStates")) |initial_states_obj| {
+            for (initial_states_obj.array.items) |initial_state_val| {
+                states[num_states] = parseInitialState(initial_state_val.string);
                 num_states += 1;
             }
         } else {
@@ -138,22 +148,22 @@ fn runTestFile(file_path: []const u8) !void {
         var prog_task = prog_root.start(description, num_states);
         prog_task.activate();
 
-        const double_escaped = if (test_obj.Object.get("doubleEscaped")) |de| de.Bool else false;
-        const input_raw = test_obj.Object.get("input").?.String;
+        const double_escaped = if (test_obj.object.get("doubleEscaped")) |de| de.bool else false;
+        const input_raw = test_obj.object.get("input").?.string;
         const input = try getStringDecoded(input_raw, arena_allocator, double_escaped);
         defer arena_allocator.free(input);
-        const expected_tokens = try parseOutput(arena_allocator, test_obj.Object.get("output").?.Array, double_escaped);
+        const expected_tokens = try parseOutput(arena_allocator, test_obj.object.get("output").?.array.items, double_escaped);
         defer expected_tokens.deinit();
         const expected_errors = blk: {
-            if (test_obj.Object.get("errors")) |errors_obj| {
-                break :blk try parseErrors(arena_allocator, errors_obj.Array);
+            if (test_obj.object.get("errors")) |errors_obj| {
+                break :blk try parseErrors(arena_allocator, errors_obj.array.items);
             } else {
                 break :blk std.ArrayList(ErrorInfo).init(arena_allocator);
             }
         };
         defer expected_errors.deinit();
         const last_start_tag = blk: {
-            const string = if (test_obj.Object.get("lastStartTag")) |lastStartTagObj| lastStartTagObj.String else break :blk null;
+            const string = if (test_obj.object.get("lastStartTag")) |lastStartTagObj| lastStartTagObj.string else break :blk null;
             break :blk LastStartTag.fromString(string) orelse std.debug.panic("Unrecognized value for last_start_tag_name: \"{s}\"", .{string});
         };
 
@@ -198,9 +208,9 @@ fn runTest(
         );
         return error.UnequalNumberOfTokens;
     };
-    for (expected_tokens) |token, i| {
-        expectEqualTokens(token, all_tokens.items[i]) catch {
-            std.debug.print("Mismatched tokens\n Expected: {any}\n Actual: {any}\n", .{ token, all_tokens.items[i] });
+    for (expected_tokens, all_tokens.items[0 .. all_tokens.items.len - 1]) |expected, actual| {
+        expectEqualTokens(expected, actual) catch {
+            std.debug.print("Mismatched tokens\n Expected: {any}\n Actual: {any}\n", .{ expected, actual });
             return error.MismatchedTokens;
         };
     }
@@ -214,45 +224,46 @@ fn runTest(
         );
         return error.UnequalNumberOfParseErrors;
     };
-    for (expected_errors) |err, i| {
-        testing.expectEqualSlices(u8, err.id, ErrorInfo.errorToSpecId(all_errors[i])) catch {
+    for (expected_errors, all_errors) |expected, actual| {
+        const actual_string = ErrorInfo.errorToSpecId(actual);
+        testing.expectEqualSlices(u8, expected.id, actual_string) catch {
             std.debug.print(
                 "Mismatched parse errors\n Expected: {s}\n Actual: {s}\n",
-                .{ err.id, ErrorInfo.errorToSpecId(all_errors[i]) },
+                .{ expected.id, actual_string },
             );
             return error.MismatchedParseErrors;
         };
     }
 }
 
-fn parseOutput(allocator: Allocator, outputs: anytype, double_escaped: bool) !std.ArrayList(Token) {
-    var tokens = try std.ArrayList(Token).initCapacity(allocator, outputs.items.len);
-    for (outputs.items) |output_obj| {
-        const output_array = output_obj.Array.items;
-        const token_type_str = output_array[0].String;
+fn parseOutput(allocator: Allocator, outputs: []const std.json.Value, double_escaped: bool) !std.ArrayList(Token) {
+    var tokens = try std.ArrayList(Token).initCapacity(allocator, outputs.len);
+    for (outputs) |output_obj| {
+        const output_array = output_obj.array.items;
+        const token_type_str = output_array[0].string;
 
         if (std.mem.eql(u8, token_type_str, "DOCTYPE")) {
             // ["DOCTYPE", name, public_id, system_id, correctness]
             try tokens.append(Token{
                 .doctype = .{
-                    .name = if (output_array[1] == .Null) null else try getString(output_array[1].String, allocator, double_escaped),
+                    .name = if (output_array[1] == .null) null else try getString(output_array[1].string, allocator, double_escaped),
                     // public_id and system_id are either strings or null.
-                    .public_identifier = if (output_array[2] == .Null) null else try getString(output_array[2].String, allocator, double_escaped),
-                    .system_identifier = if (output_array[3] == .Null) null else try getString(output_array[3].String, allocator, double_escaped),
+                    .public_identifier = if (output_array[2] == .null) null else try getString(output_array[2].string, allocator, double_escaped),
+                    .system_identifier = if (output_array[3] == .null) null else try getString(output_array[3].string, allocator, double_escaped),
                     // correctness is either true or false; true corresponds to the force-quirks flag being false, and vice-versa.
-                    .force_quirks = !output_array[4].Bool,
+                    .force_quirks = !output_array[4].bool,
                 },
             });
         } else if (std.mem.eql(u8, token_type_str, "StartTag")) {
             // ["StartTag", name, {attributes}*, true*]
             // ["StartTag", name, {attributes}]
-            const attributes_obj = output_array[2].Object;
+            const attributes_obj = output_array[2].object;
             var token = Token{
                 .start_tag = .{
-                    .name = try getString(output_array[1].String, allocator, double_escaped),
+                    .name = try getString(output_array[1].string, allocator, double_escaped),
                     // When the self-closing flag is set, the StartTag array has true as its fourth entry.
                     // When the flag is not set, the array has only three entries for backwards compatibility.
-                    .self_closing = if (output_array.len == 3) false else output_array[3].Bool,
+                    .self_closing = if (output_array.len == 3) false else output_array[3].bool,
                     .attributes = .{},
                 },
             };
@@ -261,7 +272,7 @@ fn parseOutput(allocator: Allocator, outputs: anytype, double_escaped: bool) !st
                 try token.start_tag.attributes.put(
                     allocator,
                     try getString(attribute_entry.key_ptr.*, allocator, double_escaped),
-                    try getString(attribute_entry.value_ptr.String, allocator, double_escaped),
+                    try getString(attribute_entry.value_ptr.string, allocator, double_escaped),
                 );
             }
             try tokens.append(token);
@@ -269,18 +280,18 @@ fn parseOutput(allocator: Allocator, outputs: anytype, double_escaped: bool) !st
             // ["EndTag", name]
             try tokens.append(Token{
                 .end_tag = .{
-                    .name = try getString(output_array[1].String, allocator, double_escaped),
+                    .name = try getString(output_array[1].string, allocator, double_escaped),
                 },
             });
         } else if (std.mem.eql(u8, token_type_str, "Comment")) {
             // ["Comment", data]
             try tokens.append(Token{
-                .comment = .{ .data = try getString(output_array[1].String, allocator, double_escaped) },
+                .comment = .{ .data = try getString(output_array[1].string, allocator, double_escaped) },
             });
         } else if (std.mem.eql(u8, token_type_str, "Character")) {
             // ["Character", data]
             // All adjacent character tokens are coalesced into a single ["Character", data] token.
-            const decoded = try getStringDecoded(output_array[1].String, allocator, double_escaped);
+            const decoded = try getStringDecoded(output_array[1].string, allocator, double_escaped);
             defer allocator.free(decoded);
             for (decoded) |c| {
                 try tokens.append(Token{ .character = .{ .data = c } });
@@ -290,10 +301,10 @@ fn parseOutput(allocator: Allocator, outputs: anytype, double_escaped: bool) !st
     return tokens;
 }
 
-pub fn parseErrors(allocator: Allocator, errors: anytype) !std.ArrayList(ErrorInfo) {
-    var error_infos = try std.ArrayList(ErrorInfo).initCapacity(allocator, errors.items.len);
-    for (errors.items) |error_obj| {
-        const err_string = error_obj.Object.get("code").?.String;
+fn parseErrors(allocator: Allocator, errors: []const std.json.Value) !std.ArrayList(ErrorInfo) {
+    var error_infos = try std.ArrayList(ErrorInfo).initCapacity(allocator, errors.len);
+    for (errors) |error_obj| {
+        const err_string = error_obj.object.get("code").?.string;
         error_infos.appendAssumeCapacity(ErrorInfo{
             .id = err_string,
         });
@@ -342,7 +353,7 @@ const ErrorInfo = struct {
     //line: usize,
     //column: usize,
 
-    pub fn errorToSpecId(err: ParseError) []const u8 {
+    fn errorToSpecId(err: ParseError) []const u8 {
         // there might be a cleverer way to do this but oh well
         return switch (err) {
             ParseError.AbruptClosingOfEmptyComment => "abrupt-closing-of-empty-comment",
@@ -409,7 +420,7 @@ fn getString(string: []const u8, allocator: Allocator, double_escaped: bool) ![]
     if (!double_escaped) {
         return allocator.dupe(u8, string);
     } else {
-        return doubleEscape(allocator, string);
+        return doubleEscape(u8, allocator, string);
     }
 }
 
@@ -423,86 +434,53 @@ fn getStringDecoded(string: []const u8, allocator: Allocator, double_escaped: bo
         }
         return list.toOwnedSlice();
     } else {
-        return decodeDoubleEscape(allocator, string);
+        return doubleEscape(u21, allocator, string);
     }
 }
 
-fn doubleEscape(allocator: Allocator, string: []const u8) ![]u8 {
-    var result = std.ArrayList(u8).init(allocator);
-    errdefer result.deinit();
-    var state: enum { Data, Backslash, Unicode } = .Data;
+fn doubleEscape(comptime Char: type, allocator: Allocator, string: []const u8) ![]Char {
+    var result = std.ArrayList(Char).init(allocator);
+    defer result.deinit();
 
+    var state: enum { Data, Backslash, Unicode } = .Data;
     var pos: usize = 0;
     while (pos < string.len) {
-        const codepoint_len = std.unicode.utf8ByteSequenceLength(string[pos]) catch unreachable;
         switch (state) {
             .Data => {
-                defer pos += codepoint_len;
                 switch (string[pos]) {
                     '\\' => state = .Backslash,
                     else => |c| try result.append(c),
                 }
+                pos += 1;
             },
             .Backslash => {
-                defer pos += codepoint_len;
                 switch (string[pos]) {
                     'u' => state = .Unicode,
                     else => |c| {
-                        try result.append('\\');
-                        try result.append(c);
+                        try result.appendSlice(&.{ '\\', c });
                         state = .Data;
                     },
                 }
+                pos += 1;
             },
             .Unicode => {
-                defer pos += 4;
                 const codepoint = std.fmt.parseUnsigned(u21, string[pos .. pos + 4], 16) catch unreachable;
-                var code_units: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(codepoint, &code_units) catch unreachable;
-                try result.appendSlice(code_units[0..len]);
+                switch (Char) {
+                    u8 => {
+                        var code_units: [4]u8 = undefined;
+                        const len = std.unicode.utf8Encode(codepoint, &code_units) catch unreachable;
+                        try result.appendSlice(code_units[0..len]);
+                    },
+                    u21 => {
+                        try result.append(codepoint);
+                    },
+                    else => unreachable,
+                }
                 state = .Data;
+                pos += 4;
             },
         }
     }
 
-    return result.toOwnedSlice();
-}
-
-fn decodeDoubleEscape(allocator: Allocator, string: []const u8) ![]u21 {
-    var result = std.ArrayList(u21).init(allocator);
-    errdefer result.deinit();
-    var state: enum { Data, Backslash, Unicode } = .Data;
-
-    var pos: usize = 0;
-    while (pos < string.len) {
-        const codepoint_len = std.unicode.utf8ByteSequenceLength(string[pos]) catch unreachable;
-        switch (state) {
-            .Data => {
-                defer pos += codepoint_len;
-                switch (string[pos]) {
-                    '\\' => state = .Backslash,
-                    else => |c| try result.append(c),
-                }
-            },
-            .Backslash => {
-                defer pos += codepoint_len;
-                switch (string[pos]) {
-                    'u' => state = .Unicode,
-                    else => |c| {
-                        try result.append('\\');
-                        try result.append(c);
-                        state = .Data;
-                    },
-                }
-            },
-            .Unicode => {
-                defer pos += 4;
-                const codepoint = std.fmt.parseUnsigned(u21, string[pos .. pos + 4], 16) catch unreachable;
-                try result.append(codepoint);
-                state = .Data;
-            },
-        }
-    }
-
-    return result.toOwnedSlice();
+    return try result.toOwnedSlice();
 }

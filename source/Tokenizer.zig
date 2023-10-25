@@ -374,7 +374,7 @@ const TagData = struct {
     }
 
     fn finishAttributeName(tag_data: *TagData, tokenizer: *Tokenizer) !void {
-        const attribute_name = tag_data.buffer.toOwnedSlice(tag_data.allocator);
+        const attribute_name = try tag_data.buffer.toOwnedSlice(tag_data.allocator);
         errdefer tag_data.allocator.free(attribute_name);
 
         const get_result = try tag_data.attributes.getOrPut(tag_data.allocator, attribute_name);
@@ -389,8 +389,8 @@ const TagData = struct {
         }
     }
 
-    fn finishAttributeValue(tag_data: *TagData) void {
-        const attribute_value = tag_data.buffer.toOwnedSlice(tag_data.allocator);
+    fn finishAttributeValue(tag_data: *TagData) !void {
+        const attribute_value = try tag_data.buffer.toOwnedSlice(tag_data.allocator);
         if (tag_data.current_attribute_value_result_location) |ptr| {
             ptr.* = attribute_value;
         } else {
@@ -401,7 +401,7 @@ const TagData = struct {
 };
 
 fn emitTag(tokenizer: *Tokenizer, tag_data: *TagData) !void {
-    const name = tag_data.name.toOwnedSlice(tag_data.allocator);
+    const name = try tag_data.name.toOwnedSlice(tag_data.allocator);
     errdefer tag_data.allocator.free(name);
 
     switch (tag_data.start_or_end) {
@@ -673,7 +673,7 @@ fn attributeValueQuoted(tokenizer: *Tokenizer, tag_data: *TagData, comptime quot
 
     while (try next(tokenizer)) |current_input_char| {
         switch (current_input_char) {
-            quote => break tag_data.finishAttributeValue(),
+            quote => break try tag_data.finishAttributeValue(),
             '&' => try characterReference(tokenizer, tag_data),
             0x00 => {
                 try tokenizer.parseError(.UnexpectedNullCharacter);
@@ -705,12 +705,12 @@ fn attributeValueQuoted(tokenizer: *Tokenizer, tag_data: *TagData, comptime quot
 fn attributeValueUnquoted(tokenizer: *Tokenizer, tag_data: *TagData) !?AttributeState {
     while (try next(tokenizer)) |current_input_char| switch (current_input_char) {
         '\t', '\n', 0x0C, ' ' => {
-            tag_data.finishAttributeValue();
+            try tag_data.finishAttributeValue();
             return AttributeState.BeforeName;
         },
         '&' => try characterReference(tokenizer, tag_data),
         '>' => {
-            tag_data.finishAttributeValue();
+            try tag_data.finishAttributeValue();
             return try attributeEnd(tokenizer, tag_data);
         },
         0x00 => {
@@ -1178,7 +1178,8 @@ fn bogusComment(tokenizer: *Tokenizer) !void {
 }
 
 fn emitComment(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !void {
-    const owned = comment_data.toOwnedSlice(tokenizer.allocator);
+    const owned = try comment_data.toOwnedSlice(tokenizer.allocator);
+    errdefer tokenizer.allocator.free(owned);
     try tokenizer.emitToken(Token{ .comment = .{ .data = owned } });
 }
 
@@ -1217,10 +1218,21 @@ fn doctype(tokenizer: *Tokenizer) !void {
 
     try doctypeStart(tokenizer, &doctype_data);
 
+    const name_owned = if (doctype_data.name) |*name| try name.toOwnedSlice(tokenizer.allocator) else null;
+    errdefer if (name_owned) |name| tokenizer.allocator.free(name);
+
+    const public_identifier_owned =
+        if (doctype_data.public_identifier) |*public_identifier| try public_identifier.toOwnedSlice(tokenizer.allocator) else null;
+    errdefer if (public_identifier_owned) |public_identifier| tokenizer.allocator.free(public_identifier);
+
+    const system_identifier_owned =
+        if (doctype_data.system_identifier) |*system_identifier| try system_identifier.toOwnedSlice(tokenizer.allocator) else null;
+    errdefer if (system_identifier_owned) |system_identifier| tokenizer.allocator.free(system_identifier);
+
     const doctype_token = Token{ .doctype = .{
-        .name = if (doctype_data.name) |*name| name.toOwnedSlice(tokenizer.allocator) else null,
-        .public_identifier = if (doctype_data.public_identifier) |*public_identifier| public_identifier.toOwnedSlice(tokenizer.allocator) else null,
-        .system_identifier = if (doctype_data.system_identifier) |*system_identifier| system_identifier.toOwnedSlice(tokenizer.allocator) else null,
+        .name = name_owned,
+        .public_identifier = public_identifier_owned,
+        .system_identifier = system_identifier_owned,
         .force_quirks = doctype_data.force_quirks,
     } };
     try tokenizer.emitToken(doctype_token);
@@ -1390,8 +1402,8 @@ fn doctypePublicOrSystemIdentifier(tokenizer: *Tokenizer, doctype_data: *Doctype
     while (try next(tokenizer)) |current_input_char| {
         if (current_input_char == quote) {
             const afterIdentifier = switch (public_or_system) {
-                .public => afterDOCTYPEPublicIdentifier,
-                .system => afterDOCTYPESystemIdentifier,
+                .public => &afterDOCTYPEPublicIdentifier,
+                .system => &afterDOCTYPESystemIdentifier,
             };
             return afterIdentifier(tokenizer, doctype_data);
         } else if (current_input_char == 0x00) {

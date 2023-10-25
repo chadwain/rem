@@ -346,7 +346,7 @@ pub const ElementType = enum {
         const svg_lowest = std.meta.fieldInfo(ElementType, .svg_svg).value;
         const svg_highest = std.meta.fieldInfo(ElementType, .svg_script).value;
 
-        const value = @enumToInt(self);
+        const value = @intFromEnum(self);
         if ((value >= html_lowest and value <= html_highest) or self == .custom_html) {
             return .html;
         } else if ((value >= mathml_lowest and value <= mathml_highest) or self == .some_other_mathml) {
@@ -767,8 +767,7 @@ pub const Element = struct {
 
     pub fn deinit(self: *Element, allocator: Allocator) void {
         const attr_slice = self.attributes.slice();
-        for (attr_slice.items(.key)) |key, index| {
-            const value = attr_slice.items(.value)[index];
+        for (attr_slice.items(.key), attr_slice.items(.value)) |key, value| {
             allocator.free(key.local_name);
             allocator.free(value);
         }
@@ -785,7 +784,7 @@ pub const Element = struct {
     }
 
     pub fn numAttributes(self: Element) u32 {
-        return @intCast(u32, self.attributes.len);
+        return @intCast(self.attributes.len);
     }
 
     pub fn appendAttribute(self: *Element, allocator: Allocator, key: ElementAttributesKey, value: []const u8) !void {
@@ -805,9 +804,9 @@ pub const Element = struct {
 
     pub fn getAttribute(self: Element, key: ElementAttributesKey) ?[]const u8 {
         const slice = self.attributes.slice();
-        for (slice.items(.key)) |k, index| {
+        for (slice.items(.key), slice.items(.value)) |k, v| {
             if (key.eql(k)) {
-                return slice.items(.value)[index];
+                return v;
             }
         }
         return null;
@@ -822,7 +821,7 @@ pub const Element = struct {
     }
 
     pub fn indexOfChild(self: *Element, child: ElementOrCharacterData) ?usize {
-        for (self.children.items) |c, i| {
+        for (self.children.items, 0..) |c, i| {
             if (std.meta.eql(child, c)) return i;
         } else return null;
     }
