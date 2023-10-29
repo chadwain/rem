@@ -34,7 +34,7 @@ pub fn build(b: *Build) void {
         rem_unit_tests_run_step.dependOn(&rem_unit_tests_run.step);
     }
 
-    const rem_module = b.createModule(.{ .source_file = .{ .path = "rem.zig" } });
+    const rem_module = b.addModule("rem", .{ .source_file = .{ .path = "rem.zig" } });
 
     {
         const html5lib_tokenizer_tests = b.addTest(.{
