@@ -121,12 +121,12 @@ fn runTestFile(file_path: []const u8) !void {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var contents = try std.fs.cwd().readFileAlloc(arena_allocator, file_path, std.math.maxInt(usize));
+    const contents = try std.fs.cwd().readFileAlloc(arena_allocator, file_path, std.math.maxInt(usize));
     defer arena_allocator.free(contents);
     var tree = try std.json.parseFromSlice(std.json.Value, arena_allocator, contents, .{});
     defer tree.deinit();
 
-    var tests = tree.value.object.get("tests").?.array;
+    const tests = tree.value.object.get("tests").?.array;
     var progress = Progress{};
     const prog_root = progress.start("", tests.items.len);
 
