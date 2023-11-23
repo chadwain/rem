@@ -11,12 +11,12 @@ const ComptimeStringMap = std.ComptimeStringMap;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
 const rem = @import("../rem.zig");
-const Token = @import("./token.zig").Token;
-const Tokenizer = @import("./Tokenizer.zig");
-const Parser = @import("./Parser.zig");
+const Token = @import("token.zig").Token;
+const Tokenizer = @import("Tokenizer.zig");
+const Parser = @import("Parser.zig");
 const ParseError = Parser.ParseError;
 
-const Dom = @import("./Dom.zig");
+const Dom = @import("Dom.zig");
 const Document = Dom.Document;
 const Element = Dom.Element;
 const ElementType = Dom.ElementType;
@@ -2929,7 +2929,7 @@ fn appropriateNodeInsertionLocationWithTarget(c: *TreeConstructor, target: *Elem
 
         // Steps 2.1 and 2.2
         while (index > 0) : (index -= 1) {
-            var node = c.open_elements.items[index - 1];
+            const node = c.open_elements.items[index - 1];
             if (node.element_type == .html_template) {
                 last_template = node;
                 if (last_table != null) break;

@@ -310,7 +310,7 @@ fn createTest(test_string: *[]const u8, allocator: Allocator) !Test {
     //var document: []const u8 = lines.rest();
     //std.debug.print("#document\n{s}\n", .{document});
 
-    var expected = parseDom(&lines, context_element_type, allocator) catch |err| switch (err) {
+    const expected = parseDom(&lines, context_element_type, allocator) catch |err| switch (err) {
         error.DomException => unreachable,
         else => |e| return e,
     };

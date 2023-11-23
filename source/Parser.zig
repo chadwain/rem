@@ -7,13 +7,13 @@
 //! It handles the execution and the passing of messages between the two objects.
 
 const rem = @import("../rem.zig");
-const Dom = @import("./Dom.zig");
+const Dom = @import("Dom.zig");
 const Document = Dom.Document;
 const Element = Dom.Element;
 
-const Token = @import("./token.zig").Token;
-const Tokenizer = @import("./Tokenizer.zig");
-const tree_construction = @import("./tree_construction.zig");
+const Token = @import("token.zig").Token;
+const Tokenizer = @import("Tokenizer.zig");
+const tree_construction = @import("tree_construction.zig");
 const TreeConstructor = tree_construction.TreeConstructor;
 
 const std = @import("std");

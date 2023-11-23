@@ -7,10 +7,10 @@
 
 const Tokenizer = @This();
 const rem = @import("../rem.zig");
-const named_characters = @import("./named_characters.zig");
-const Token = @import("./token.zig").Token;
+const named_characters = @import("named_characters.zig");
+const Token = @import("token.zig").Token;
 const Attributes = Token.StartTag.Attributes;
-const Parser = @import("./Parser.zig");
+const Parser = @import("Parser.zig");
 const ParseError = Parser.ParseError;
 
 const std = @import("std");
