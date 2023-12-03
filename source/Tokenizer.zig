@@ -125,7 +125,7 @@ pub fn setAdjustedCurrentNodeIsNotInHtmlNamespace(tokenizer: *Tokenizer, value: 
 
 pub fn moveTokens(tokenizer: *Tokenizer, dest: []Token) void {
     std.debug.assert(dest.len == tokenizer.tokens.items.len);
-    std.mem.copy(Token, dest, tokenizer.tokens.items);
+    @memcpy(dest, tokenizer.tokens.items);
     tokenizer.tokens.clearRetainingCapacity();
 }
 
