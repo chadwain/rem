@@ -148,9 +148,9 @@ pub const DocumentType = struct {
         index += publicId.len;
         result.systemId = strings[index .. index + systemId.len];
 
-        std.mem.copy(u8, result.name, name);
-        std.mem.copy(u8, result.publicId, publicId);
-        std.mem.copy(u8, result.systemId, systemId);
+        @memcpy(result.name, name);
+        @memcpy(result.publicId, publicId);
+        @memcpy(result.systemId, systemId);
 
         return result;
     }
