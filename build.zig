@@ -34,7 +34,7 @@ pub fn build(b: *Build) void {
         rem_unit_tests_run_step.dependOn(&rem_unit_tests_run.step);
     }
 
-    const rem_module = b.addModule("rem", .{ .source_file = .{ .path = "rem.zig" } });
+    const rem_module = b.addModule("rem", .{ .root_source_file = .{ .path = "rem.zig" } });
 
     {
         const html5lib_tokenizer_tests = b.addTest(.{
@@ -43,7 +43,7 @@ pub fn build(b: *Build) void {
             .target = target,
             .optimize = optimize,
         });
-        html5lib_tokenizer_tests.addModule("rem", rem_module);
+        html5lib_tokenizer_tests.root_module.addImport("rem", rem_module);
         b.installArtifact(html5lib_tokenizer_tests);
 
         const html5lib_tokenizer_tests_run = b.addRunArtifact(html5lib_tokenizer_tests);
@@ -63,7 +63,7 @@ pub fn build(b: *Build) void {
             .target = target,
             .optimize = optimize,
         });
-        html5lib_tree_construction_tests.addModule("rem", rem_module);
+        html5lib_tree_construction_tests.root_module.addImport("rem", rem_module);
         b.installArtifact(html5lib_tree_construction_tests);
 
         const html5lib_tree_construction_tests_run = b.addRunArtifact(html5lib_tree_construction_tests);
@@ -80,7 +80,7 @@ pub fn build(b: *Build) void {
             .target = target,
             .optimize = optimize,
         });
-        example.addModule("rem", rem_module);
+        example.root_module.addImport("rem", rem_module);
         b.installArtifact(example);
 
         const example_run = b.addRunArtifact(example);
