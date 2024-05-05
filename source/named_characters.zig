@@ -52,7 +52,7 @@ comptime {
 /// If the 1st field is null, then the current string does not match any named character references.
 /// Otherwise, there is a match, and the 2nd field may or may not be null.
 pub const Value = @Type(std.builtin.Type{ .Struct = .{
-    .layout = .Auto,
+    .layout = .auto,
     .fields = &.{
         .{
             .name = "0",
