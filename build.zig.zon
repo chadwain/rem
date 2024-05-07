@@ -1,0 +1,9 @@
+.{
+    .name = "rem",
+    .version = "0.3.0",
+    .paths = .{
+        "build.zig",
+        "rem.zig",
+        "source",
+    },
+}

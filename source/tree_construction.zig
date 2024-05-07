@@ -2878,7 +2878,7 @@ fn elemTypeEqlAny(element_type: ElementType, compare_to: []const ElementType) bo
 }
 
 fn parseError(c: *TreeConstructor, err: ParseError) !void {
-    const parser = @fieldParentPtr(Parser, "constructor", c);
+    const parser: *Parser = @fieldParentPtr("constructor", c);
     try parser.parseError(err);
 }
 
