@@ -112,6 +112,8 @@ test "unicode chars problematic" {
 //     try runTestFile("test/html5lib-tests/tokenizer/xmlViolation.test");
 // }
 
+var may_prog_root: ?std.Progress.Node = null;
+
 fn runTestFile(file_path: []const u8) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -127,8 +129,11 @@ fn runTestFile(file_path: []const u8) !void {
     defer tree.deinit();
 
     const tests = tree.value.object.get("tests").?.array;
-    var progress = Progress{};
-    const prog_root = progress.start("", tests.items.len);
+    if (may_prog_root == null) {
+        may_prog_root = Progress.start(.{ .root_name = "", .estimated_total_items = tests.items.len });
+    }
+
+    const prog_root = may_prog_root.?;
 
     for (tests.items) |test_obj| {
         const description = test_obj.object.get("description").?.string;
@@ -146,7 +151,6 @@ fn runTestFile(file_path: []const u8) !void {
         }
 
         var prog_task = prog_root.start(description, num_states);
-        prog_task.activate();
 
         const double_escaped = if (test_obj.object.get("doubleEscaped")) |de| de.bool else false;
         const input_raw = test_obj.object.get("input").?.string;
@@ -313,7 +317,7 @@ fn parseErrors(allocator: Allocator, errors: []const std.json.Value) !std.ArrayL
 }
 
 fn parseInitialState(str: []const u8) TokenizerState {
-    const map = std.ComptimeStringMap(TokenizerState, .{
+    const map = std.StaticStringMap(TokenizerState).initComptime(.{
         .{ "Data state", TokenizerState.Data },
         .{ "PLAINTEXT state", TokenizerState.PLAINTEXT },
         .{ "RCDATA state", TokenizerState.RCDATA },
