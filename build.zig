@@ -12,7 +12,7 @@ pub fn build(b: *Build) void {
 
     const rem_lib = b.addStaticLibrary(.{
         .name = "rem",
-        .root_source_file = .{ .path = "rem.zig" },
+        .root_source_file = b.path("rem.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -21,7 +21,7 @@ pub fn build(b: *Build) void {
     {
         const rem_unit_tests = b.addTest(.{
             .name = "rem-unit-tests",
-            .root_source_file = .{ .path = "rem.zig" },
+            .root_source_file = b.path("rem.zig"),
             .target = target,
             .optimize = optimize,
         });
@@ -34,12 +34,12 @@ pub fn build(b: *Build) void {
         rem_unit_tests_run_step.dependOn(&rem_unit_tests_run.step);
     }
 
-    const rem_module = b.addModule("rem", .{ .root_source_file = .{ .path = "rem.zig" } });
+    const rem_module = b.addModule("rem", .{ .root_source_file = b.path("rem.zig") });
 
     {
         const html5lib_tokenizer_tests = b.addTest(.{
             .name = "html5lib-tokenizer-tests",
-            .root_source_file = .{ .path = "test/html5lib-test-tokenizer.zig" },
+            .root_source_file = b.path("test/html5lib-test-tokenizer.zig"),
             .target = target,
             .optimize = optimize,
         });
@@ -59,7 +59,7 @@ pub fn build(b: *Build) void {
     {
         const html5lib_tree_construction_tests = b.addTest(.{
             .name = "html5lib-tree-construction-tests",
-            .root_source_file = .{ .path = "test/html5lib-test-tree-construction.zig" },
+            .root_source_file = b.path("test/html5lib-test-tree-construction.zig"),
             .target = target,
             .optimize = optimize,
         });
@@ -76,7 +76,7 @@ pub fn build(b: *Build) void {
     {
         const example = b.addExecutable(.{
             .name = "example",
-            .root_source_file = .{ .path = "./example.zig" },
+            .root_source_file = b.path("./example.zig"),
             .target = target,
             .optimize = optimize,
         });
@@ -93,7 +93,7 @@ pub fn build(b: *Build) void {
         const output_path = b.pathFromRoot("source/named_characters.zig");
         const generate_named_characters = b.addExecutable(.{
             .name = "generate-named-characters",
-            .root_source_file = .{ .path = "tools/generate_named_characters.zig" },
+            .root_source_file = b.path("tools/generate_named_characters.zig"),
             .target = target,
             .optimize = .Debug,
         });
