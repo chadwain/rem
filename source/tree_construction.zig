@@ -7,7 +7,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
-const ComptimeStringMap = std.ComptimeStringMap;
+const StaticStringMap = std.StaticStringMap;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
 const rem = @import("../rem.zig");
@@ -2579,7 +2579,7 @@ fn foreignContentEndTagBrP(c: *TreeConstructor, token: Token) !void {
 }
 
 fn foreignContentStartTagAnythingElse(c: *TreeConstructor, start_tag: Token.StartTag, token_element_type: ElementType) !void {
-    const foreign_content_change_svg_tag_name_map = ComptimeStringMap([]const u8, .{
+    const foreign_content_change_svg_tag_name_map = StaticStringMap([]const u8).initComptime(.{
         .{ "altglyph", "altGlyph" },
         .{ "altglyphdef", "altGlyphDef" },
         .{ "altglyphitem", "altGlyphItem" },
@@ -3081,7 +3081,7 @@ fn createAnElementForTheToken(
 
 const AdjustAttributes = enum { dont_adjust, adjust_mathml_attributes, adjust_svg_attributes };
 
-const adjust_foreign_attributes_map = ComptimeStringMap(ElementAttributesKey, .{
+const adjust_foreign_attributes_map = StaticStringMap(ElementAttributesKey).initComptime(.{
     .{ "xlink:actuate", .{ .prefix = .xlink, .local_name = "actuate", .namespace = .xlink } },
     .{ "xlink:arcrole", .{ .prefix = .xlink, .local_name = "arcrole", .namespace = .xlink } },
     .{ "xlink:href", .{ .prefix = .xlink, .local_name = "href", .namespace = .xlink } },
@@ -3121,7 +3121,7 @@ fn appendAttributesAdjustMathMlForeign(dom: *Dom, element: *Element, attributes:
 /// Appends the attributes from the token to the Element, while also doing the
 /// "adjust SVG attributes" and "adjust foreign attributes" algorithms.
 fn appendAttributesAdjustSvgForeign(dom: *Dom, element: *Element, attributes: *Token.StartTag.Attributes.Iterator) !void {
-    const adjust_svg_attributes_map = ComptimeStringMap([]const u8, .{
+    const adjust_svg_attributes_map = StaticStringMap([]const u8).initComptime(.{
         .{ "attributename", "attributeName" },
         .{ "attributetype", "attributeType" },
         .{ "basefrequency", "baseFrequency" },

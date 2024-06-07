@@ -8,7 +8,7 @@ const Dom = @import("../Dom.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
-const ComptimeStringMap = std.ComptimeStringMap;
+const StaticStringMap = std.StaticStringMap;
 const MultiArrayList = std.MultiArrayList;
 
 pub const Document = struct {
@@ -360,7 +360,7 @@ pub const ElementType = enum {
 
     const html_map = html_map: {
         @setEvalBranchQuota(5000);
-        break :html_map ComptimeStringMap(ElementType, .{
+        break :html_map StaticStringMap(ElementType).initComptime(.{
             .{ "a", .html_a },
             .{ "abbr", .html_abbr },
             .{ "address", .html_address },
@@ -505,7 +505,7 @@ pub const ElementType = enum {
         });
     };
 
-    const mathml_map = ComptimeStringMap(ElementType, .{
+    const mathml_map = StaticStringMap(ElementType).initComptime(.{
         .{ "math", .mathml_math },
         .{ "mi", .mathml_mi },
         .{ "mo", .mathml_mo },
@@ -515,7 +515,7 @@ pub const ElementType = enum {
         .{ "annotation-xml", .mathml_annotation_xml },
     });
 
-    const svg_map = ComptimeStringMap(ElementType, .{
+    const svg_map = StaticStringMap(ElementType).initComptime(.{
         .{ "svg", .svg_svg },
         .{ "foreignObject", .svg_foreign_object },
         .{ "desc", .svg_desc },
