@@ -95,7 +95,7 @@ pub const LastStartTag = enum {
     xmp,
 
     pub fn fromString(string: []const u8) ?LastStartTag {
-        const map = std.ComptimeStringMap(LastStartTag, .{
+        const map = std.StaticStringMap(LastStartTag).initComptime(.{
             .{ "iframe", .iframe },
             .{ "noembed", .noembed },
             .{ "noframes", .noframes },
