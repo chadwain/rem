@@ -95,21 +95,4 @@ pub fn build(b: *std.Build) void {
         const example_run_step = b.step("example", "Run an example program");
         example_run_step.dependOn(&example_run.step);
     }
-
-    {
-        const json_data = b.pathFromRoot("tools/character_reference_data.json");
-        const output_path = b.pathFromRoot("source/named_characters.zig");
-        const generate_named_characters = b.addExecutable(.{
-            .name = "generate-named-characters",
-            .root_source_file = b.path("tools/generate_named_characters.zig"),
-            .target = target,
-            .optimize = .Debug,
-        });
-
-        const generate_named_characters_run = b.addRunArtifact(generate_named_characters);
-        generate_named_characters_run.addArgs(&.{ json_data, output_path });
-
-        const generate_named_characters_run_step = b.step("generate-named-characters", "Generate the named character reference data");
-        generate_named_characters_run_step.dependOn(&generate_named_characters_run.step);
-    }
 }
