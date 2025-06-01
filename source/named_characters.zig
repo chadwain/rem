@@ -51,27 +51,29 @@ comptime {
 
 /// If the 1st field is null, then the current string does not match any named character references.
 /// Otherwise, there is a match, and the 2nd field may or may not be null.
-pub const Value = @Type(std.builtin.Type{ .Struct = .{
-    .layout = .auto,
-    .fields = &.{
-        .{
-            .name = "0",
-            .type = ?u21,
-            .default_value = @as(*const anyopaque, &@as(?u21, null)),
-            .is_comptime = false,
-            .alignment = @alignOf(?u21),
+pub const Value = @Type(std.builtin.Type{
+    .@"struct" = .{
+        .layout = .auto,
+        .fields = &.{
+            .{
+                .name = "0",
+                .type = ?u21,
+                .default_value_ptr = @as(*const anyopaque, &@as(?u21, null)),
+                .is_comptime = true,
+                .alignment = @alignOf(?u21),
+            },
+            .{
+                .name = "1",
+                .type = ?u21,
+                .default_value_ptr = @as(*const anyopaque, &@as(?u21, null)),
+                .is_comptime = true,
+                .alignment = @alignOf(?u21),
+            },
         },
-        .{
-            .name = "1",
-            .type = ?u21,
-            .default_value = @as(*const anyopaque, &@as(?u21, null)),
-            .is_comptime = false,
-            .alignment = @alignOf(?u21),
-        },
+        .decls = &.{},
+        .is_tuple = true,
     },
-    .decls = &.{},
-    .is_tuple = true,
-} });
+});
 
 const entries = [9854]u16{
     2,     210,   586,   826,   1822,  3330,  3914,  4158,  4586,  4894,  5394,  5506,  5634,  7350,  7538,  9798,  10322, 10734, 10794, 11986,

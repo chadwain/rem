@@ -59,7 +59,7 @@ pub fn run(tokenizer: *Tokenizer) !void {
         .CDATASection => try cDataSection(tokenizer),
         .PLAINTEXT => try plainText(tokenizer),
         .ScriptData => try scriptData(tokenizer),
-        .Eof => try eof(tokenizer),
+        .Eof => try sendEof(tokenizer),
     }
 }
 
@@ -297,7 +297,7 @@ fn adjustedCurrentNodeIsNotInHtmlNamespace(tokenizer: *Tokenizer) bool {
     return tokenizer.adjusted_current_node_is_not_in_html_namespace;
 }
 
-fn eof(tokenizer: *Tokenizer) !void {
+fn sendEof(tokenizer: *Tokenizer) !void {
     try tokenizer.emitToken(.eof);
     tokenizer.eof = true;
 }
