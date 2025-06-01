@@ -535,7 +535,7 @@ fn inHead(c: *TreeConstructor, token: Token) !void {
         },
         .end_tag => |end_tag| {
             if (strEql(end_tag.name, "head")) {
-                const current_node = c.open_elements.pop();
+                const current_node = c.open_elements.pop().?;
                 assert(current_node.element_type == .html_head);
                 changeTo(c, .AfterHead);
             } else if (strEqlAny(end_tag.name, &.{ "body", "html", "br" })) {
@@ -658,7 +658,7 @@ fn inHeadEndTagTemplate(c: *TreeConstructor) !bool {
         if (currentNode(c).element_type != .html_template) {
             try parseError(c, .TreeConstructionError);
         }
-        while (c.open_elements.pop().element_type != .html_template) {}
+        while (c.open_elements.pop().?.element_type != .html_template) {}
         clearListOfActiveFormattingElementsUpToLastMarker(c);
         _ = c.template_insertion_modes.pop();
         resetInsertionModeAppropriately(c);
@@ -667,7 +667,7 @@ fn inHeadEndTagTemplate(c: *TreeConstructor) !bool {
 }
 
 fn inHeadAnythingElse(c: *TreeConstructor) void {
-    const current_node = c.open_elements.pop();
+    const current_node = c.open_elements.pop().?;
     assert(current_node.element_type == .html_head);
     reprocessIn(c, .AfterHead);
 }
@@ -725,7 +725,7 @@ fn inHeadNoscript(c: *TreeConstructor, token: Token) !void {
 
 fn inHeadNoscriptAnythingElse(c: *TreeConstructor) !void {
     try parseError(c, .TreeConstructionError);
-    assert(c.open_elements.pop().element_type == .html_noscript);
+    assert(c.open_elements.pop().?.element_type == .html_noscript);
     assert(currentNode(c).element_type == .html_head);
     reprocessIn(c, .InHead);
 }
@@ -941,7 +941,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                             if (currentNode(c).element_type != .html_li) {
                                 try parseError(c, .TreeConstructionError);
                             }
-                            while (c.open_elements.pop().element_type != .html_li) {}
+                            while (c.open_elements.pop().?.element_type != .html_li) {}
                             break;
                         } else if (isSpecialElementButNotAddressDivP(node.element_type)) {
                             break;
@@ -970,7 +970,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                             if (currentNode(c).element_type != dd_or_dt) {
                                 try parseError(c, .TreeConstructionError);
                             }
-                            while (c.open_elements.pop().element_type != dd_or_dt) {}
+                            while (c.open_elements.pop().?.element_type != dd_or_dt) {}
                             break;
                         } else if (isSpecialElementButNotAddressDivP(node.element_type)) {
                             break;
@@ -1000,7 +1000,7 @@ fn inBody(c: *TreeConstructor, token: Token) !void {
                         try parseError(c, .TreeConstructionError);
                         generateImpliedEndTags(c, null);
                         // NOTE: The index of the button element, which is found in hasElementInScope, can be used here
-                        while (c.open_elements.pop().element_type != .html_button) {}
+                        while (c.open_elements.pop().?.element_type != .html_button) {}
                     }
                     try reconstructActiveFormattingElements(c);
                     _ = try insertHtmlElementForTheToken(c, start_tag, token_element_type);
@@ -1524,7 +1524,7 @@ fn text(c: *TreeConstructor, token: Token) !void {
         },
         .eof => {
             try parseError(c, .TreeConstructionError);
-            const current_node = c.open_elements.pop();
+            const current_node = c.open_elements.pop().?;
             if (current_node.element_type == .html_script and c.scripting) {
                 @panic("TODO Text eof, current node is a script, scripting is enabled");
             }
@@ -1535,7 +1535,7 @@ fn text(c: *TreeConstructor, token: Token) !void {
                 if (c.scripting) {
                     @panic("TODO Text end tag script, scripting is enabled");
                 }
-                assert(c.open_elements.pop().element_type == .html_script);
+                assert(c.open_elements.pop().?.element_type == .html_script);
                 changeToOriginalInsertionMode(c);
             } else {
                 _ = c.open_elements.pop();
@@ -1987,7 +1987,7 @@ fn inRowEndTagTr(c: *TreeConstructor) !bool {
         return false;
     } else {
         clearTheStackBackToATableRowContext(c);
-        assert(c.open_elements.pop().element_type == .html_tr);
+        assert(c.open_elements.pop().?.element_type == .html_tr);
         changeTo(c, .InTableBody);
         return true;
     }
@@ -3082,17 +3082,17 @@ fn createAnElementForTheToken(
 const AdjustAttributes = enum { dont_adjust, adjust_mathml_attributes, adjust_svg_attributes };
 
 const adjust_foreign_attributes_map = StaticStringMap(ElementAttributesKey).initComptime(.{
-    .{ "xlink:actuate", .{ .prefix = .xlink, .local_name = "actuate", .namespace = .xlink } },
-    .{ "xlink:arcrole", .{ .prefix = .xlink, .local_name = "arcrole", .namespace = .xlink } },
-    .{ "xlink:href", .{ .prefix = .xlink, .local_name = "href", .namespace = .xlink } },
-    .{ "xlink:role", .{ .prefix = .xlink, .local_name = "role", .namespace = .xlink } },
-    .{ "xlink:show", .{ .prefix = .xlink, .local_name = "show", .namespace = .xlink } },
-    .{ "xlink:title", .{ .prefix = .xlink, .local_name = "title", .namespace = .xlink } },
-    .{ "xlink:type", .{ .prefix = .xlink, .local_name = "type", .namespace = .xlink } },
-    .{ "xml:lang", .{ .prefix = .xml, .local_name = "lang", .namespace = .xml } },
-    .{ "xml:space", .{ .prefix = .xml, .local_name = "space", .namespace = .xml } },
-    .{ "xmlns", .{ .prefix = .none, .local_name = "xmlns", .namespace = .xmlns } },
-    .{ "xmlns:xlink", .{ .prefix = .xmlns, .local_name = "xlink", .namespace = .xmlns } },
+    .{ "xlink:actuate", ElementAttributesKey{ .prefix = .xlink, .local_name = "actuate", .namespace = .xlink } },
+    .{ "xlink:arcrole", ElementAttributesKey{ .prefix = .xlink, .local_name = "arcrole", .namespace = .xlink } },
+    .{ "xlink:href", ElementAttributesKey{ .prefix = .xlink, .local_name = "href", .namespace = .xlink } },
+    .{ "xlink:role", ElementAttributesKey{ .prefix = .xlink, .local_name = "role", .namespace = .xlink } },
+    .{ "xlink:show", ElementAttributesKey{ .prefix = .xlink, .local_name = "show", .namespace = .xlink } },
+    .{ "xlink:title", ElementAttributesKey{ .prefix = .xlink, .local_name = "title", .namespace = .xlink } },
+    .{ "xlink:type", ElementAttributesKey{ .prefix = .xlink, .local_name = "type", .namespace = .xlink } },
+    .{ "xml:lang", ElementAttributesKey{ .prefix = .xml, .local_name = "lang", .namespace = .xml } },
+    .{ "xml:space", ElementAttributesKey{ .prefix = .xml, .local_name = "space", .namespace = .xml } },
+    .{ "xmlns", ElementAttributesKey{ .prefix = .none, .local_name = "xmlns", .namespace = .xmlns } },
+    .{ "xmlns:xlink", ElementAttributesKey{ .prefix = .xmlns, .local_name = "xlink", .namespace = .xmlns } },
 });
 
 /// Appends the attributes from the token to the Element.
@@ -3281,8 +3281,8 @@ fn removeFromStackOfOpenElements(c: *TreeConstructor, element: *Element) void {
 
 fn popUntilElementTypeHasBeenPopped(c: *TreeConstructor, element_type: anytype) void {
     switch (@TypeOf(element_type)) {
-        ElementType => while (c.open_elements.pop().element_type != element_type) {},
-        []const ElementType => while (!elemTypeEqlAny(c.open_elements.pop().element_type, element_type)) {},
+        ElementType => while (c.open_elements.pop().?.element_type != element_type) {},
+        []const ElementType => while (!elemTypeEqlAny(c.open_elements.pop().?.element_type, element_type)) {},
         else => |T| @compileError("Expected " ++ @typeName(ElementType) ++ " or " ++ @typeName([]const ElementType) ++ ", found '" ++ @typeName(T) ++ "'"),
     }
 }
@@ -4003,7 +4003,7 @@ fn generateImpliedEndTags(c: *TreeConstructor, exception: anytype) void {
     while (std.mem.indexOfScalar(ElementType, list, node.element_type)) |_| {
         const Exception = @TypeOf(exception);
         const should_pop: bool = switch (@typeInfo(Exception)) {
-            .Null => true,
+            .null => true,
             else => if (Exception == []const u8)
                 !strEql(exception, node.localName(c.dom))
             else if (Exception == ElementType)
@@ -4054,7 +4054,7 @@ fn closePElement(c: *TreeConstructor) !void {
     if (currentNode(c).element_type != .html_p) {
         try parseError(c, .TreeConstructionError);
     }
-    while (c.open_elements.pop().element_type != .html_p) {}
+    while (c.open_elements.pop().?.element_type != .html_p) {}
 }
 
 fn isMathMlTextIntegrationPoint(element: *Element) bool {

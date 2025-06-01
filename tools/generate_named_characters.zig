@@ -245,14 +245,14 @@ fn render(root: *const Node, arena: Allocator) ![]u8 {
         \\        .{
         \\            .name = "0",
         \\            .type = ?u21,
-        \\            .default_value_ptr = @as(*const anyopaque, &@as(?u21, null)),
+        \\            .default_value_ptr = null,
         \\            .is_comptime = false,
         \\            .alignment = @alignOf(?u21),
         \\        },
         \\        .{
         \\            .name = "1",
         \\            .type = ?u21,
-        \\            .default_value_ptr = @as(*const anyopaque, &@as(?u21, null)),
+        \\            .default_value_ptr = null,
         \\            .is_comptime = false,
         \\            .alignment = @alignOf(?u21),
         \\        },

@@ -128,7 +128,7 @@ pub fn printDocument(writer: anytype, document: *const Document, dom: *const Dom
     }
 
     while (node_stack.items.len > 0) {
-        const item = node_stack.pop();
+        const item = node_stack.pop().?;
         var len = item.depth;
         while (len > 0) : (len -= 1) {
             try std.fmt.format(writer, "  ", .{});

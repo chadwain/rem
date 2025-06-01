@@ -191,7 +191,7 @@ fn runTestFile(file_path: []const u8, scripting: bool) !void {
 
     const allocator = std.testing.allocator;
 
-    const contents = try std.fs.cwd().readFileAlloc(allocator, file_path, 1 << 24);
+    const contents: []const u8 = try std.fs.cwd().readFileAlloc(allocator, file_path, 1 << 24);
     defer allocator.free(contents);
 
     var tests = contents;
@@ -578,7 +578,7 @@ fn deeplyCompareElements(allocator: Allocator, element1: *const Element, element
     try stack.append(.{ .e1 = element1, .e2 = element2 });
 
     while (stack.items.len > 0) {
-        const pair = stack.pop();
+        const pair = stack.pop().?;
 
         try expectEqualElements(pair.e1, pair.e2);
         try expectEqual(pair.e1.children.items.len, pair.e2.children.items.len);

@@ -336,6 +336,7 @@ pub const ElementType = enum {
     some_other_svg,
 
     pub fn namespace(self: ElementType) Namespace {
+        @setEvalBranchQuota(5000);
         // TODO: Some metaprogramming to make this less fragile.
         const html_lowest = std.meta.fieldInfo(ElementType, .html_a).value;
         const html_highest = std.meta.fieldInfo(ElementType, .html_xmp).value;
