@@ -27,6 +27,11 @@ Clone the repository like this:
 git clone --recursive --config core.autocrlf=false https://github.com/chadwain/rem.git
 ```
 
+**Using the Zig Package Manager**
+```
+zig fetch --save https://github.com/chadwain/rem/archive/refs/heads/master.tar.gz
+```
+
 There are no dependencies other than a Zig compiler. Note that this library is only compatible with Zig version 0.11.0 or newer.
 
 ## Use the code
@@ -47,7 +52,7 @@ pub fn main() !void {
     const decoded_input = &rem.util.utf8DecodeStringComptime(input);
 
     // Create the DOM in which the parsed Document will be created.
-    var dom = rem.dom.Dom{ .allocator = allocator };
+    var dom = rem.Dom{ .allocator = allocator };
     defer dom.deinit();
 
     // Create the HTML parser.

@@ -1,6 +1,8 @@
 .{
-    .name = "rem",
+    .name = .rem,
     .version = "0.3.0",
+    .minimum_zig_version = "0.14.1",
+    .fingerprint = 0x83bde72b9431762b,
     .paths = .{
         "build.zig",
         "rem.zig",

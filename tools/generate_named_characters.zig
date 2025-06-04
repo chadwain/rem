@@ -157,7 +157,7 @@ fn render(root: *const Node, arena: Allocator) ![]u8 {
     try entries.append(.{ .has_value = false, .has_children = false, .index_of_children = undefined });
 
     while (stack.items.len > 0) {
-        const stack_item = stack.pop();
+        const stack_item = stack.pop().?;
         const stack_len = stack.items.len;
 
         const main_index = stack_item.main_index;
@@ -239,20 +239,20 @@ fn render(root: *const Node, arena: Allocator) ![]u8 {
         \\
         \\/// If the 1st field is null, then the current string does not match any named character references.
         \\/// Otherwise, there is a match, and the 2nd field may or may not be null.
-        \\pub const Value = @Type(std.builtin.Type{ .Struct = .{
-        \\    .layout = .Auto,
+        \\pub const Value = @Type(std.builtin.Type{ .@"struct" = .{
+        \\    .layout = .auto,
         \\    .fields = &.{
         \\        .{
         \\            .name = "0",
         \\            .type = ?u21,
-        \\            .default_value = @as(*const anyopaque, &@as(?u21, null)),
+        \\            .default_value_ptr = null,
         \\            .is_comptime = false,
         \\            .alignment = @alignOf(?u21),
         \\        },
         \\        .{
         \\            .name = "1",
         \\            .type = ?u21,
-        \\            .default_value = @as(*const anyopaque, &@as(?u21, null)),
+        \\            .default_value_ptr = null,
         \\            .is_comptime = false,
         \\            .alignment = @alignOf(?u21),
         \\        },

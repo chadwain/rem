@@ -15,7 +15,7 @@ pub const Document = struct {
     doctype: ?*DocumentType = null,
     element: ?*Element = null,
     cdata: ArrayListUnmanaged(*CharacterData) = .{},
-    cdata_endpoints: [3]Endpoints = .{.{ .begin = 0, .end = 0 }} ** 3,
+    cdata_endpoints: [3]Endpoints = .{Endpoints{ .begin = 0, .end = 0 }} ** 3,
     cdata_current_endpoint: u2 = 0,
     quirks_mode: QuirksMode = .no_quirks,
 
@@ -336,6 +336,7 @@ pub const ElementType = enum {
     some_other_svg,
 
     pub fn namespace(self: ElementType) Namespace {
+        @setEvalBranchQuota(5000);
         // TODO: Some metaprogramming to make this less fragile.
         const html_lowest = std.meta.fieldInfo(ElementType, .html_a).value;
         const html_highest = std.meta.fieldInfo(ElementType, .html_xmp).value;
@@ -358,7 +359,7 @@ pub const ElementType = enum {
         }
     }
 
-    const html_map = html_map: {
+    const html_map_blk = html_map: {
         @setEvalBranchQuota(5000);
         break :html_map StaticStringMap(ElementType).initComptime(.{
             .{ "a", .html_a },
@@ -525,7 +526,7 @@ pub const ElementType = enum {
 
     /// Get an HTML element's ElementType from its tag name.
     pub fn fromStringHtml(tag_name: []const u8) ?ElementType {
-        return html_map.get(tag_name);
+        return html_map_blk.get(tag_name);
     }
 
     /// Get a MathML element's ElementType from its tag name.
