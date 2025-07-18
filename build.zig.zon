@@ -1,6 +1,12 @@
 .{
     .name = .rem,
     .version = "0.3.0",
+    .dependencies = .{
+        .named_character_references = .{
+            .url = "git+https://github.com/squeek502/named-character-references.git#ff84f2ef5199e0a5091d13d44c13f51ac9433e3d",
+            .hash = "named_character_references-0.1.0-dTxagvKDBQBIUZJON6GwaPomhxlrp77NJS_ekr77AFdN",
+        },
+    },
     .minimum_zig_version = "0.14.1",
     .fingerprint = 0x83bde72b9431762b,
     .paths = .{

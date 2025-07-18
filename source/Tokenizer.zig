@@ -7,7 +7,7 @@
 
 const Tokenizer = @This();
 const rem = @import("../rem.zig");
-const named_characters = @import("named_characters.zig");
+const named_characters = @import("named_character_references");
 const Token = @import("token.zig").Token;
 const Attributes = Token.StartTag.Attributes;
 const Parser = @import("Parser.zig");
@@ -778,78 +778,55 @@ fn characterReference(tokenizer: *Tokenizer, tag_data: ?*TagData) !void {
 }
 
 fn namedCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *usize) !void {
-    const result = try findNamedCharacterReference(tokenizer, num_consumed_chars);
-    const match_found = result.chars[0] != null;
-    if (match_found) {
-        const dont_emit_chars = if (tag_data != null and !result.ends_with_semicolon)
-            switch (peekIgnoreEof(tokenizer)) {
-                '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
-                else => false,
-            }
-        else
-            false;
-
-        if (dont_emit_chars) {
-            return flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
-        } else {
-            if (!result.ends_with_semicolon) {
-                try tokenizer.parseError(.MissingSemicolonAfterCharacterReference);
-            }
-            try characterReferenceEmitCharacter(tokenizer, tag_data, result.chars[0].?);
-            if (result.chars[1]) |second| try characterReferenceEmitCharacter(tokenizer, tag_data, second);
-        }
-    } else {
-        try flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
-        return ambiguousAmpersand(tokenizer, tag_data);
-    }
-}
-
-const FindNamedCharacterReferenceResult = struct {
-    chars: named_characters.Value,
-    ends_with_semicolon: bool,
-};
-
-fn findNamedCharacterReference(tokenizer: *Tokenizer, num_consumed_chars: *usize) !FindNamedCharacterReferenceResult {
-    var last_index_with_value = named_characters.root_index;
-    var ends_with_semicolon: bool = false;
-
-    var entry = named_characters.root_index.entry();
-    var num_pending_chars: usize = 0;
+    var matcher = named_characters.Matcher{};
 
     while (true) {
         const character = nextNoErrorCheck(tokenizer) orelse {
             undo(tokenizer);
             break;
         };
-        num_pending_chars += 1;
-        const child_index = entry.findChild(character) orelse break;
-        entry = child_index.entry();
-
-        if (entry.has_children) {
-            if (entry.has_value) {
-                // Partial match found.
-                num_consumed_chars.* += num_pending_chars;
-                num_pending_chars = 0;
-                last_index_with_value = child_index;
-                ends_with_semicolon = character == ';';
-            }
-        } else {
-            // Complete match found.
-            num_consumed_chars.* += num_pending_chars;
-            num_pending_chars = 0;
-            last_index_with_value = child_index;
-            ends_with_semicolon = character == ';';
-            break;
+        switch (matcher.tryConsumeCodePoint(character)) {
+            .consume_and_continue => {
+                num_consumed_chars.* += 1;
+                continue;
+            },
+            .consume_and_end => {
+                num_consumed_chars.* += 1;
+                break;
+            },
+            .dont_consume_and_end => {
+                undo(tokenizer);
+                break;
+            },
         }
     }
 
-    while (num_pending_chars > 0) : (num_pending_chars -= 1) {
+    num_consumed_chars.* -= matcher.overconsumed_code_points;
+    for (0..matcher.overconsumed_code_points) |_| {
         undo(tokenizer);
     }
 
-    // There is no need to check the consumed characters for errors (controls, surrogates, noncharacters)
-    // beacuse we've just determined that they form a valid character reference.
-    return FindNamedCharacterReferenceResult{ .chars = last_index_with_value.value(), .ends_with_semicolon = ends_with_semicolon };
+    if (matcher.getCodepoints()) |codepoints| {
+        const dont_emit_chars = if (tag_data != null and !matcher.ends_with_semicolon)
+            switch (peekIgnoreEof(tokenizer)) {
+                '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
+                else => false,
+            }
+        else
+            false;
+        if (dont_emit_chars) {
+            return flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
+        }
+
+        if (!matcher.ends_with_semicolon) {
+            try tokenizer.parseError(.MissingSemicolonAfterCharacterReference);
+        }
+        try characterReferenceEmitCharacter(tokenizer, tag_data, codepoints.first);
+        if (codepoints.second.asInt()) |second| try characterReferenceEmitCharacter(tokenizer, tag_data, second);
+    } else {
+        try flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
+        return ambiguousAmpersand(tokenizer, tag_data);
+    }
 }
 
 fn ambiguousAmpersand(tokenizer: *Tokenizer, tag_data: ?*TagData) !void {
