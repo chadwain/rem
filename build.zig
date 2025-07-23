@@ -9,12 +9,19 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const target = b.standardTargetOptions(.{});
 
+    const named_character_references = b.dependency("named_character_references", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const named_character_references_mod = named_character_references.module("named_character_references");
+
     const rem_lib = b.addStaticLibrary(.{
         .name = "rem",
         .root_source_file = b.path("rem.zig"),
         .target = target,
         .optimize = optimize,
     });
+    rem_lib.root_module.addImport("named_character_references", named_character_references_mod);
     b.installArtifact(rem_lib);
 
     {
@@ -24,6 +31,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        rem_unit_tests.root_module.addImport("named_character_references", named_character_references_mod);
         b.installArtifact(rem_unit_tests);
 
         const rem_unit_tests_run = b.addRunArtifact(rem_unit_tests);
@@ -34,6 +42,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const rem_module = b.addModule("rem", .{ .root_source_file = b.path("rem.zig") });
+    rem_module.addImport("named_character_references", named_character_references_mod);
 
     {
         const html5lib_tokenizer_tests = b.addTest(.{
@@ -85,22 +94,5 @@ pub fn build(b: *std.Build) void {
         const example_run = b.addRunArtifact(example);
         const example_run_step = b.step("example", "Run an example program");
         example_run_step.dependOn(&example_run.step);
-    }
-
-    {
-        const json_data = b.pathFromRoot("tools/character_reference_data.json");
-        const output_path = b.pathFromRoot("source/named_characters.zig");
-        const generate_named_characters = b.addExecutable(.{
-            .name = "generate-named-characters",
-            .root_source_file = b.path("tools/generate_named_characters.zig"),
-            .target = target,
-            .optimize = .Debug,
-        });
-
-        const generate_named_characters_run = b.addRunArtifact(generate_named_characters);
-        generate_named_characters_run.addArgs(&.{ json_data, output_path });
-
-        const generate_named_characters_run_step = b.step("generate-named-characters", "Generate the named character reference data");
-        generate_named_characters_run_step.dependOn(&generate_named_characters_run.step);
     }
 }
