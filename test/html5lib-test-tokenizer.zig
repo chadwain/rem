@@ -413,10 +413,8 @@ const ErrorInfo = struct {
         };
     }
 
-    pub fn format(value: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt;
-        _ = options;
-        try std.fmt.format(writer, "{s}", .{value.id});
+    pub fn format(value: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("s", .{value.id});
     }
 };
 

@@ -44,13 +44,13 @@ pub const DocumentFormatter = struct {
     dom: *const Dom,
     allocator: Allocator,
 
-    pub fn print(self: DocumentFormatter, writer: anytype) !void {
-        try std.fmt.format(writer, "Document: {s}\n", .{@tagName(self.document.quirks_mode)});
+    pub fn print(self: DocumentFormatter, writer: *std.Io.Writer) !void {
+        try writer.print("Document: {t}\n", .{self.document.quirks_mode});
 
         try printDocumentCdatas(writer, self.document, 0);
 
         if (self.document.doctype) |doctype| {
-            try std.fmt.format(writer, "  DocumentType: name={s} publicId={s} systemId={s}\n", .{ doctype.name, doctype.publicId, doctype.systemId });
+            try writer.print("  DocumentType: name={s} publicId={s} systemId={s}\n", .{ doctype.name, doctype.publicId, doctype.systemId });
         }
 
         try printDocumentCdatas(writer, self.document, 1);
@@ -70,14 +70,14 @@ pub const DocumentFormatter = struct {
             const item = node_stack.pop();
             var len = item.depth;
             while (len > 0) : (len -= 1) {
-                try std.fmt.format(writer, "  ", .{});
+                try writer.print("  ", .{});
             }
             switch (item.node) {
                 .element => |element| {
-                    try std.fmt.format(writer, "Element: type={s} local_name={s} namespace={s} attributes=[", .{
-                        @tagName(element.element_type),
+                    try writer.print("Element: type={t} local_name={s} namespace={t} attributes=[", .{
+                        element.element_type,
                         element.localName(self.dom),
-                        @tagName(element.namespace()),
+                        element.namespace(),
                     });
                     const num_attributes = element.numAttributes();
                     if (num_attributes > 0) {
@@ -88,13 +88,13 @@ pub const DocumentFormatter = struct {
                             const key = attribute_slice.items(.key)[i];
                             const value = attribute_slice.items(.value)[i];
                             if (key.prefix == .none) {
-                                try std.fmt.format(writer, "\"{s}\"=\"{}\" ", .{ key.local_name, std.zig.fmtEscapes(value) });
+                                try writer.print("\"{s}\"=\"{f}\" ", .{ key.local_name, std.zig.fmtString(value) });
                             } else {
-                                try std.fmt.format(writer, "\"{s}:{s}\"=\"{}\" ", .{ @tagName(key.prefix), key.local_name, std.zig.fmtEscapes(value) });
+                                try writer.print("\"{t}:{s}\"=\"{f}\" ", .{ key.prefix, key.local_name, std.zig.fmtString(value) });
                             }
                         }
                     }
-                    try std.fmt.format(writer, "]\n", .{});
+                    try writer.print("]\n", .{});
 
                     // Add children to stack
                     var num_children = element.children.items.len;
@@ -113,19 +113,19 @@ pub const DocumentFormatter = struct {
         try printDocumentCdatas(writer, self.document, 2);
     }
 
-    fn printDocumentCdatas(writer: anytype, document: *const Document, endpoint_index: u2) !void {
+    fn printDocumentCdatas(writer: *std.Io.Writer, document: *const Document, endpoint_index: u2) !void {
         const endpoint = document.cdata_endpoints[endpoint_index];
         for (endpoint.sliceOf(document.cdata.items)) |cdata| {
             try printCdata(writer, cdata);
         }
     }
 
-    fn printCdata(writer: anytype, cdata: *const CharacterData) !void {
+    fn printCdata(writer: *std.Io.Writer, cdata: *const CharacterData) !void {
         const interface = switch (cdata.interface) {
             .text => "Text",
             .comment => "Comment",
         };
-        try std.fmt.format(writer, "{s}: \"{}\"\n", .{ interface, std.zig.fmtEscapes(cdata.data.items) });
+        try writer.print("{s}: \"{f}\"\n", .{ interface, std.zig.fmtString(cdata.data.items) });
     }
 };
 
