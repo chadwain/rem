@@ -15,7 +15,6 @@ const ParseError = Parser.ParseError;
 
 const std = @import("std");
 const ArrayList = std.ArrayList;
-const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const Allocator = std.mem.Allocator;
 
 const REPLACEMENT_CHARACTER = '\u{FFFD}';
@@ -26,7 +25,7 @@ eof: bool = false,
 last_start_tag: LastStartTag,
 adjusted_current_node_is_not_in_html_namespace: bool = false,
 parser: *Parser,
-tokens: ArrayListUnmanaged(Token) = .{},
+tokens: ArrayList(Token) = .empty,
 allocator: Allocator,
 
 pub fn init(parser: *Parser, state: State, last_start_tag: ?LastStartTag) Tokenizer {
@@ -336,10 +335,10 @@ fn markupDeclarationOpen(tokenizer: *Tokenizer) !void {
 }
 
 const TagData = struct {
-    name: ArrayListUnmanaged(u8) = .{},
-    attributes: Attributes = .{},
+    name: ArrayList(u8) = .empty,
+    attributes: Attributes = .empty,
     current_attribute_value_result_location: ?*[]const u8 = undefined,
-    buffer: ArrayListUnmanaged(u8) = .{},
+    buffer: ArrayList(u8) = .empty,
     self_closing: bool = false,
     start_or_end: StartOrEnd,
     allocator: Allocator,
@@ -1010,7 +1009,7 @@ const CommentState = enum {
 };
 
 fn comment(tokenizer: *Tokenizer) !void {
-    var comment_data = ArrayListUnmanaged(u8){};
+    var comment_data: ArrayList(u8) = .empty;
     defer comment_data.deinit(tokenizer.allocator);
 
     var next_state: ?CommentState = try commentStart(tokenizer, &comment_data);
@@ -1025,7 +1024,7 @@ fn comment(tokenizer: *Tokenizer) !void {
     try tokenizer.emitComment(&comment_data);
 }
 
-fn commentStart(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
+fn commentStart(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !?CommentState {
     switch (nextIgnoreEofNoErrorCheck(tokenizer)) {
         '-' => {
             // CommentStartDash
@@ -1047,7 +1046,7 @@ fn commentStart(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?
     }
 }
 
-fn commentNormal(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
+fn commentNormal(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !?CommentState {
     while (try next(tokenizer)) |current_input_char| switch (current_input_char) {
         '<' => {
             try comment_data.append(tokenizer.allocator, '<');
@@ -1095,7 +1094,7 @@ fn commentNormal(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !
     }
 }
 
-fn commentEndDash(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
+fn commentEndDash(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !?CommentState {
     switch (nextNoErrorCheck(tokenizer) orelse return try eofInComment(tokenizer)) {
         '-' => return CommentState.End,
         else => {
@@ -1106,7 +1105,7 @@ fn commentEndDash(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) 
     }
 }
 
-fn commentEnd(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
+fn commentEnd(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !?CommentState {
     while (nextNoErrorCheck(tokenizer)) |current_input_char| switch (current_input_char) {
         '>' => return null,
         '!' => return try commentEndBang(tokenizer, comment_data),
@@ -1121,7 +1120,7 @@ fn commentEnd(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?Co
     }
 }
 
-fn commentEndBang(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !?CommentState {
+fn commentEndBang(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !?CommentState {
     switch (nextNoErrorCheck(tokenizer) orelse return try eofInComment(tokenizer)) {
         '-' => {
             try comment_data.appendSlice(tokenizer.allocator, "--!");
@@ -1137,7 +1136,7 @@ fn commentEndBang(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) 
 }
 
 fn bogusComment(tokenizer: *Tokenizer) !void {
-    var comment_data = ArrayListUnmanaged(u8){};
+    var comment_data: ArrayList(u8) = .empty;
     defer comment_data.deinit(tokenizer.allocator);
 
     while (try next(tokenizer)) |char| switch (char) {
@@ -1154,7 +1153,7 @@ fn bogusComment(tokenizer: *Tokenizer) !void {
     try tokenizer.emitComment(&comment_data);
 }
 
-fn emitComment(tokenizer: *Tokenizer, comment_data: *ArrayListUnmanaged(u8)) !void {
+fn emitComment(tokenizer: *Tokenizer, comment_data: *ArrayList(u8)) !void {
     const owned = try comment_data.toOwnedSlice(tokenizer.allocator);
     errdefer tokenizer.allocator.free(owned);
     try tokenizer.emitToken(Token{ .comment = .{ .data = owned } });
@@ -1177,9 +1176,9 @@ fn incorrectlyClosedComment(tokenizer: *Tokenizer) !?CommentState {
 }
 
 const DoctypeData = struct {
-    name: ?ArrayListUnmanaged(u8) = null,
-    public_identifier: ?ArrayListUnmanaged(u8) = null,
-    system_identifier: ?ArrayListUnmanaged(u8) = null,
+    name: ?ArrayList(u8) = null,
+    public_identifier: ?ArrayList(u8) = null,
+    system_identifier: ?ArrayList(u8) = null,
     force_quirks: bool = false,
 
     fn deinit(doctype_data: *DoctypeData, allocator: Allocator) void {
@@ -1251,7 +1250,7 @@ fn beforeDoctypeName(tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
 }
 
 fn doctypeName(tokenizer: *Tokenizer, doctype_data: *DoctypeData) !void {
-    doctype_data.name = ArrayListUnmanaged(u8){};
+    doctype_data.name = .empty;
     const doctype_name_data = &doctype_data.name.?;
 
     while (try next(tokenizer)) |current_input_char| {
@@ -1373,7 +1372,7 @@ fn doctypePublicOrSystemIdentifier(tokenizer: *Tokenizer, doctype_data: *Doctype
         .public => &doctype_data.public_identifier,
         .system => &doctype_data.system_identifier,
     };
-    identifier_data_optional.* = ArrayListUnmanaged(u8){};
+    identifier_data_optional.* = .empty;
     const identifier_data = &identifier_data_optional.*.?;
 
     while (try next(tokenizer)) |current_input_char| {
@@ -1763,7 +1762,7 @@ fn cDataSection(tokenizer: *Tokenizer) !void {
     }
 }
 
-fn appendChar(list: *ArrayListUnmanaged(u8), allocator: Allocator, character: u21) !void {
+fn appendChar(list: *ArrayList(u8), allocator: Allocator, character: u21) !void {
     var code_units: [4]u8 = undefined;
     const len = try std.unicode.utf8Encode(character, &code_units);
     try list.appendSlice(allocator, code_units[0..len]);

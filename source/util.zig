@@ -6,7 +6,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const ArrayList = std.ArrayList;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
 const rem = @import("../rem.zig");
@@ -120,7 +120,7 @@ pub fn printDocument(writer: anytype, document: *const Document, dom: *const Dom
         element: *const Element,
         cdata: *const CharacterData,
     };
-    var node_stack = ArrayListUnmanaged(struct { node: ConstElementOrCharacterData, depth: usize }){};
+    var node_stack: ArrayList(struct { node: ConstElementOrCharacterData, depth: usize }) = .empty;
     defer node_stack.deinit(allocator);
 
     if (document.element) |document_element| {

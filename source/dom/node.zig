@@ -7,14 +7,14 @@ const Dom = @import("../Dom.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const ArrayList = std.ArrayList;
 const StaticStringMap = std.StaticStringMap;
 const MultiArrayList = std.MultiArrayList;
 
 pub const Document = struct {
     doctype: ?*DocumentType = null,
     element: ?*Element = null,
-    cdata: ArrayListUnmanaged(*CharacterData) = .{},
+    cdata: ArrayList(*CharacterData) = .empty,
     cdata_endpoints: [3]Endpoints = .{Endpoints{ .begin = 0, .end = 0 }} ** 3,
     cdata_current_endpoint: u2 = 0,
     quirks_mode: QuirksMode = .no_quirks,
@@ -59,7 +59,7 @@ pub const DocumentFormatter = struct {
             element: *const Element,
             cdata: *const CharacterData,
         };
-        var node_stack = ArrayListUnmanaged(struct { node: ConstElementOrCharacterData, depth: usize }){};
+        var node_stack: ArrayList(struct { node: ConstElementOrCharacterData, depth: usize }) = .empty;
         defer node_stack.deinit(self.allocator);
 
         if (self.document.element) |document_element| {
@@ -764,7 +764,7 @@ pub const Element = struct {
     element_type: ElementType,
     parent: ?ParentNode,
     attributes: ElementAttributes,
-    children: ArrayListUnmanaged(ElementOrCharacterData),
+    children: ArrayList(ElementOrCharacterData),
 
     pub fn deinit(self: *Element, allocator: Allocator) void {
         const attr_slice = self.attributes.slice();
@@ -842,7 +842,7 @@ pub const CharacterDataInterface = enum {
 };
 
 pub const CharacterData = struct {
-    data: ArrayListUnmanaged(u8) = .{},
+    data: ArrayList(u8) = .empty,
     interface: CharacterDataInterface,
 
     pub fn init(allocator: Allocator, data: []const u8, interface: CharacterDataInterface) !CharacterData {

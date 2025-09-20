@@ -6,7 +6,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const ArrayList = std.ArrayList;
 const StaticStringMap = std.StaticStringMap;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
@@ -38,18 +38,18 @@ pub const TreeConstructor = struct {
     insertion_mode: InsertionMode = .Initial,
     original_insertion_mode: InsertionMode = undefined,
 
-    open_elements: ArrayListUnmanaged(*Element) = .{},
-    template_insertion_modes: ArrayListUnmanaged(InsertionMode) = .{},
+    open_elements: ArrayList(*Element) = .empty,
+    template_insertion_modes: ArrayList(InsertionMode) = .empty,
 
-    active_formatting_elements: ArrayListUnmanaged(FormattingElement) = .{},
+    active_formatting_elements: ArrayList(FormattingElement) = .empty,
     // TODO: Somehow make it so that tag attributes do not need to be copied
-    formatting_element_tag_attributes: ArrayListUnmanaged(Token.StartTag.Attributes) = .{},
+    formatting_element_tag_attributes: ArrayList(Token.StartTag.Attributes) = .empty,
     index_of_last_marker: ?usize = null,
 
     head_element_pointer: ?*Element = null,
     form_element_pointer: ?*Element = null,
 
-    pending_table_character_tokens: ArrayListUnmanaged(Token.Character) = .{},
+    pending_table_character_tokens: ArrayList(Token.Character) = .empty,
     pending_table_chars_contains_non_whitespace: bool = false,
 
     parser_cannot_change_the_mode: bool = false,
@@ -3631,7 +3631,7 @@ fn adoptionAgencyAlgorithm(c: *TreeConstructor, element_type: ElementType) !void
         );
         // Step 4.16
         // TODO: This needs to go through the DOM API
-        std.mem.swap(ArrayListUnmanaged(ElementOrCharacterData), &furthest_block.children, &new_element.children);
+        std.mem.swap(ArrayList(ElementOrCharacterData), &furthest_block.children, &new_element.children);
 
         // Step 4.17
         try Dom.mutation.elementAppend(c.dom, furthest_block, .{ .element = new_element }, .Suppress);
