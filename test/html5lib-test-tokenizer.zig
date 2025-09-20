@@ -156,16 +156,16 @@ fn runTestFile(file_path: []const u8) !void {
         const input_raw = test_obj.object.get("input").?.string;
         const input = try getStringDecoded(input_raw, arena_allocator, double_escaped);
         defer arena_allocator.free(input);
-        const expected_tokens = try parseOutput(arena_allocator, test_obj.object.get("output").?.array.items, double_escaped);
-        defer expected_tokens.deinit();
-        const expected_errors = blk: {
+        var expected_tokens = try parseOutput(arena_allocator, test_obj.object.get("output").?.array.items, double_escaped);
+        defer expected_tokens.deinit(arena_allocator);
+        var expected_errors = blk: {
             if (test_obj.object.get("errors")) |errors_obj| {
                 break :blk try parseErrors(arena_allocator, errors_obj.array.items);
             } else {
-                break :blk std.ArrayList(ErrorInfo).init(arena_allocator);
+                break :blk ArrayList(ErrorInfo).empty;
             }
         };
-        defer expected_errors.deinit();
+        defer expected_errors.deinit(arena_allocator);
         const last_start_tag = blk: {
             const string = if (test_obj.object.get("lastStartTag")) |lastStartTagObj| lastStartTagObj.string else break :blk null;
             break :blk LastStartTag.fromString(string) orelse std.debug.panic("Unrecognized value for last_start_tag_name: \"{s}\"", .{string});
@@ -193,16 +193,16 @@ fn runTest(
     initial_state: TokenizerState,
     last_start_tag: ?LastStartTag,
 ) !void {
-    var all_tokens = ArrayList(Token).init(allocator);
+    var all_tokens: ArrayList(Token) = .empty;
     defer {
         for (all_tokens.items) |*t| t.deinit(allocator);
-        all_tokens.deinit();
+        all_tokens.deinit(allocator);
     }
 
     var parser = try Parser.initTokenizerOnly(input, allocator, .report, initial_state, last_start_tag);
     defer parser.deinitTokenizerOnly();
 
-    try parser.runTokenizerOnly(&all_tokens);
+    try parser.runTokenizerOnly(allocator, &all_tokens);
 
     try std.testing.expect(all_tokens.items[all_tokens.items.len - 1] == .eof);
     std.testing.expectEqual(expected_tokens.len, all_tokens.items.len - 1) catch {
@@ -240,15 +240,15 @@ fn runTest(
     }
 }
 
-fn parseOutput(allocator: Allocator, outputs: []const std.json.Value, double_escaped: bool) !std.ArrayList(Token) {
-    var tokens = try std.ArrayList(Token).initCapacity(allocator, outputs.len);
+fn parseOutput(allocator: Allocator, outputs: []const std.json.Value, double_escaped: bool) !ArrayList(Token) {
+    var tokens = try ArrayList(Token).initCapacity(allocator, outputs.len);
     for (outputs) |output_obj| {
         const output_array = output_obj.array.items;
         const token_type_str = output_array[0].string;
 
         if (std.mem.eql(u8, token_type_str, "DOCTYPE")) {
             // ["DOCTYPE", name, public_id, system_id, correctness]
-            try tokens.append(Token{
+            try tokens.append(allocator, Token{
                 .doctype = .{
                     .name = if (output_array[1] == .null) null else try getString(output_array[1].string, allocator, double_escaped),
                     // public_id and system_id are either strings or null.
@@ -279,17 +279,17 @@ fn parseOutput(allocator: Allocator, outputs: []const std.json.Value, double_esc
                     try getString(attribute_entry.value_ptr.string, allocator, double_escaped),
                 );
             }
-            try tokens.append(token);
+            try tokens.append(allocator, token);
         } else if (std.mem.eql(u8, token_type_str, "EndTag")) {
             // ["EndTag", name]
-            try tokens.append(Token{
+            try tokens.append(allocator, Token{
                 .end_tag = .{
                     .name = try getString(output_array[1].string, allocator, double_escaped),
                 },
             });
         } else if (std.mem.eql(u8, token_type_str, "Comment")) {
             // ["Comment", data]
-            try tokens.append(Token{
+            try tokens.append(allocator, Token{
                 .comment = .{ .data = try getString(output_array[1].string, allocator, double_escaped) },
             });
         } else if (std.mem.eql(u8, token_type_str, "Character")) {
@@ -298,15 +298,15 @@ fn parseOutput(allocator: Allocator, outputs: []const std.json.Value, double_esc
             const decoded = try getStringDecoded(output_array[1].string, allocator, double_escaped);
             defer allocator.free(decoded);
             for (decoded) |c| {
-                try tokens.append(Token{ .character = .{ .data = c } });
+                try tokens.append(allocator, Token{ .character = .{ .data = c } });
             }
         }
     }
     return tokens;
 }
 
-fn parseErrors(allocator: Allocator, errors: []const std.json.Value) !std.ArrayList(ErrorInfo) {
-    var error_infos = try std.ArrayList(ErrorInfo).initCapacity(allocator, errors.len);
+fn parseErrors(allocator: Allocator, errors: []const std.json.Value) !ArrayList(ErrorInfo) {
+    var error_infos = try ArrayList(ErrorInfo).initCapacity(allocator, errors.len);
     for (errors) |error_obj| {
         const err_string = error_obj.object.get("code").?.string;
         error_infos.appendAssumeCapacity(ErrorInfo{
@@ -431,20 +431,20 @@ fn getString(string: []const u8, allocator: Allocator, double_escaped: bool) ![]
 fn getStringDecoded(string: []const u8, allocator: Allocator, double_escaped: bool) ![]u21 {
     if (!double_escaped) {
         var it = (try std.unicode.Utf8View.init(string)).iterator();
-        var list = std.ArrayList(u21).init(allocator);
-        errdefer list.deinit();
+        var list: ArrayList(u21) = .empty;
+        errdefer list.deinit(allocator);
         while (it.nextCodepoint()) |cp| {
-            try list.append(cp);
+            try list.append(allocator, cp);
         }
-        return list.toOwnedSlice();
+        return list.toOwnedSlice(allocator);
     } else {
         return doubleEscape(u21, allocator, string);
     }
 }
 
 fn doubleEscape(comptime Char: type, allocator: Allocator, string: []const u8) ![]Char {
-    var result = std.ArrayList(Char).init(allocator);
-    defer result.deinit();
+    var result: ArrayList(Char) = .empty;
+    defer result.deinit(allocator);
 
     var state: enum { Data, Backslash, Unicode } = .Data;
     var pos: usize = 0;
@@ -453,7 +453,7 @@ fn doubleEscape(comptime Char: type, allocator: Allocator, string: []const u8) !
             .Data => {
                 switch (string[pos]) {
                     '\\' => state = .Backslash,
-                    else => |c| try result.append(c),
+                    else => |c| try result.append(allocator, c),
                 }
                 pos += 1;
             },
@@ -461,7 +461,7 @@ fn doubleEscape(comptime Char: type, allocator: Allocator, string: []const u8) !
                 switch (string[pos]) {
                     'u' => state = .Unicode,
                     else => |c| {
-                        try result.appendSlice(&.{ '\\', c });
+                        try result.appendSlice(allocator, &.{ '\\', c });
                         state = .Data;
                     },
                 }
@@ -473,10 +473,10 @@ fn doubleEscape(comptime Char: type, allocator: Allocator, string: []const u8) !
                     u8 => {
                         var code_units: [4]u8 = undefined;
                         const len = std.unicode.utf8Encode(codepoint, &code_units) catch unreachable;
-                        try result.appendSlice(code_units[0..len]);
+                        try result.appendSlice(allocator, code_units[0..len]);
                     },
                     u21 => {
-                        try result.append(codepoint);
+                        try result.append(allocator, codepoint);
                     },
                     else => unreachable,
                 }
@@ -486,5 +486,5 @@ fn doubleEscape(comptime Char: type, allocator: Allocator, string: []const u8) !
         }
     }
 
-    return try result.toOwnedSlice();
+    return try result.toOwnedSlice(allocator);
 }

@@ -327,8 +327,8 @@ fn createTest(test_string: *[]const u8, allocator: Allocator) !Test {
 }
 
 fn parseDom(lines: *std.mem.SplitIterator(u8, .scalar), context_element_type: ?ElementType, allocator: Allocator) !Expected {
-    var stack = ArrayList(*Element).init(allocator);
-    defer stack.deinit();
+    var stack: ArrayList(*Element) = .empty;
+    defer stack.deinit(allocator);
 
     var dom = Dom{ .allocator = allocator };
     errdefer dom.deinit();
@@ -442,7 +442,7 @@ fn parseDom(lines: *std.mem.SplitIterator(u8, .scalar), context_element_type: ?E
             } else {
                 try Dom.mutation.elementAppend(&dom, stack.items[stack.items.len - 1], .{ .element = element }, .Suppress);
             }
-            try stack.append(element);
+            try stack.append(allocator, element);
         } else if (data[0] == '"') {
             // text
             var text: []const u8 = data[0..0];
@@ -470,7 +470,7 @@ fn parseDom(lines: *std.mem.SplitIterator(u8, .scalar), context_element_type: ?E
             // This is done just so we can continue reading the rest of the tree.
             if (possible_error == null) possible_error = error.TemplateContents;
             const dummy_element = try dom.makeElement(.html_template);
-            try stack.append(dummy_element);
+            try stack.append(allocator, dummy_element);
         } else {
             // attribute
             try parseAttribute(&dom, &stack, data, depth);
@@ -509,16 +509,16 @@ fn parseAttribute(dom: *Dom, stack: *ArrayList(*Element), data: []const u8, dept
 
 fn runTest(t: Test, allocator: Allocator, scripting: bool) !void {
     const input = input: {
-        var list = ArrayList(u21).init(allocator);
-        errdefer list.deinit();
+        var list: ArrayList(u21) = .empty;
+        errdefer list.deinit(allocator);
         var i: usize = 0;
         while (i < t.input.len) {
             const len = std.unicode.utf8ByteSequenceLength(t.input[i]) catch unreachable;
             const value = std.unicode.utf8Decode(t.input[i .. i + len]) catch unreachable;
-            try list.append(value);
+            try list.append(allocator, value);
             i += len;
         }
-        break :input try list.toOwnedSlice();
+        break :input try list.toOwnedSlice(allocator);
     };
     defer allocator.free(input);
 
@@ -573,9 +573,9 @@ fn deeplyCompareElements(allocator: Allocator, element1: *const Element, element
         e2: *const Element,
     };
 
-    var stack = ArrayList(ElementPair).init(allocator);
-    defer stack.deinit();
-    try stack.append(.{ .e1 = element1, .e2 = element2 });
+    var stack: ArrayList(ElementPair) = .empty;
+    defer stack.deinit(allocator);
+    try stack.append(allocator, .{ .e1 = element1, .e2 = element2 });
 
     while (stack.items.len > 0) {
         const pair = stack.pop().?;
@@ -589,7 +589,7 @@ fn deeplyCompareElements(allocator: Allocator, element1: *const Element, element
             switch (e1_child) {
                 .element => {
                     try expect(e2_child == .element);
-                    try stack.append(.{ .e1 = e1_child.element, .e2 = e2_child.element });
+                    try stack.append(allocator, .{ .e1 = e1_child.element, .e2 = e2_child.element });
                 },
                 .cdata => {
                     try expect(e2_child == .cdata);

@@ -19,7 +19,7 @@ const TreeConstructor = tree_construction.TreeConstructor;
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const ArrayList = std.ArrayList;
 
 input_stream: InputStream,
 tokenizer_initial_state: Tokenizer.State,
@@ -104,7 +104,7 @@ pub const OnError = enum {
 pub const ErrorHandler = union(OnError) {
     ignore,
     abort: ?ParseError,
-    report: ArrayListUnmanaged(ParseError),
+    report: ArrayList(ParseError),
 
     fn init(on_error: OnError) ErrorHandler {
         return switch (on_error) {
@@ -299,7 +299,7 @@ pub fn initTokenizerOnly(
     };
 }
 
-pub fn runTokenizerOnly(self: *Self, token_sink: *std.ArrayList(Token)) !void {
+pub fn runTokenizerOnly(self: *Self, allocator: Allocator, token_sink: *ArrayList(Token)) !void {
     var tokenizer = Tokenizer.init(self, self.tokenizer_initial_state, self.tokenizer_initial_last_start_tag);
     defer tokenizer.deinit();
     while (!tokenizer.eof) {
@@ -312,7 +312,7 @@ pub fn runTokenizerOnly(self: *Self, token_sink: *std.ArrayList(Token)) !void {
         };
 
         const old_len = token_sink.items.len;
-        try token_sink.resize(old_len + tokenizer.tokens.items.len);
+        try token_sink.resize(allocator, old_len + tokenizer.tokens.items.len);
         tokenizer.moveTokens(token_sink.items[old_len..]);
     }
 }
