@@ -314,8 +314,11 @@ fn createTest(test_string: *[]const u8, allocator: Allocator) !Test {
         error.DomException => unreachable,
         else => |e| return e,
     };
-    // var stderr = std.io.getStdErr().writer();
+    // var buffer: [1024]u8 = undefined;
+    // var stderr_writer = std.fs.File.stderr().writer(&buffer);
+    // const stderr = &stderr_writer.interface;
     // rem.util.printDocument(stderr, expected.document, &expected.dom, allocator) catch panic("", .{});
+    // try stdout.flush();
 
     return Test{
         .input = data,

@@ -32,7 +32,7 @@ git clone --recursive --config core.autocrlf=false https://github.com/chadwain/r
 zig fetch --save https://github.com/chadwain/rem/archive/refs/heads/master.tar.gz
 ```
 
-There are no dependencies other than a Zig compiler. Note that this library is only compatible with Zig version 0.11.0 or newer.
+There are no dependencies other than a Zig compiler. Note that this library is only compatible with Zig version 0.15.1 or newer.
 
 ## Use the code
 Here's an example of using the parser. You can see the output of this program by running `zig build example`.
@@ -68,9 +68,12 @@ pub fn main() !void {
     std.debug.assert(errors.len == 0);
 
     // We can now print the resulting Document to the console.
-    const stdout = std.io.getStdOut().writer();
+    var buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&buffer);
+    const stdout = &stdout_writer.interface;
     const document = parser.getDocument();
     try rem.util.printDocument(stdout, document, &dom, allocator);
+    try stdout.flush();
 }
 ```
 
