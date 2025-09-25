@@ -33,7 +33,10 @@ pub fn main() !void {
     std.debug.assert(errors.len == 0);
 
     // We can now print the resulting Document to the console.
-    const stdout = std.io.getStdOut().writer();
+    var buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&buffer);
+    const stdout = &stdout_writer.interface;
     const document = parser.getDocument();
     try rem.util.printDocument(stdout, document, &dom, allocator);
+    try stdout.flush();
 }

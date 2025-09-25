@@ -7,7 +7,7 @@
             .hash = "named_character_references-0.1.0-dTxagvKDBQBIUZJON6GwaPomhxlrp77NJS_ekr77AFdN",
         },
     },
-    .minimum_zig_version = "0.14.1",
+    .minimum_zig_version = "0.15.1",
     .fingerprint = 0x83bde72b9431762b,
     .paths = .{
         "build.zig",

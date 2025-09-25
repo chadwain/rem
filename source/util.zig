@@ -6,7 +6,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const ArrayList = std.ArrayList;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 
 const rem = @import("../rem.zig");
@@ -105,13 +105,13 @@ pub fn utf8DecodeStringComptime(comptime string: []const u8) [utf8DecodeStringCo
     return result;
 }
 
-pub fn printDocument(writer: anytype, document: *const Document, dom: *const Dom, allocator: Allocator) !void {
-    try std.fmt.format(writer, "Document: {s}\n", .{@tagName(document.quirks_mode)});
+pub fn printDocument(writer: *std.Io.Writer, document: *const Document, dom: *const Dom, allocator: Allocator) !void {
+    try writer.print("Document: {t}\n", .{document.quirks_mode});
 
     try printDocumentCdatas(writer, document, 0);
 
     if (document.doctype) |doctype| {
-        try std.fmt.format(writer, "  DocumentType: name={s} publicId={s} systemId={s}\n", .{ doctype.name, doctype.publicId, doctype.systemId });
+        try writer.print("  DocumentType: name={s} publicId={s} systemId={s}\n", .{ doctype.name, doctype.publicId, doctype.systemId });
     }
 
     try printDocumentCdatas(writer, document, 1);
@@ -120,7 +120,7 @@ pub fn printDocument(writer: anytype, document: *const Document, dom: *const Dom
         element: *const Element,
         cdata: *const CharacterData,
     };
-    var node_stack = ArrayListUnmanaged(struct { node: ConstElementOrCharacterData, depth: usize }){};
+    var node_stack: ArrayList(struct { node: ConstElementOrCharacterData, depth: usize }) = .empty;
     defer node_stack.deinit(allocator);
 
     if (document.element) |document_element| {
@@ -131,11 +131,11 @@ pub fn printDocument(writer: anytype, document: *const Document, dom: *const Dom
         const item = node_stack.pop().?;
         var len = item.depth;
         while (len > 0) : (len -= 1) {
-            try std.fmt.format(writer, "  ", .{});
+            try writer.print("  ", .{});
         }
         switch (item.node) {
             .element => |element| {
-                try std.fmt.format(writer, "Element: type={s} local_name={s} namespace={s} attributes=[", .{
+                try writer.print("Element: type={s} local_name={s} namespace={s} attributes=[", .{
                     @tagName(element.element_type),
                     element.localName(dom),
                     @tagName(element.namespace()),
@@ -149,13 +149,13 @@ pub fn printDocument(writer: anytype, document: *const Document, dom: *const Dom
                         const key = attribute_slice.items(.key)[i];
                         const value = attribute_slice.items(.value)[i];
                         if (key.prefix == .none) {
-                            try std.fmt.format(writer, "\"{s}\"=\"{s}\" ", .{ key.local_name, value });
+                            try writer.print("\"{s}\"=\"{s}\" ", .{ key.local_name, value });
                         } else {
-                            try std.fmt.format(writer, "\"{s}:{s}\"=\"{s}\" ", .{ @tagName(key.prefix), key.local_name, value });
+                            try writer.print("\"{s}:{s}\"=\"{s}\" ", .{ @tagName(key.prefix), key.local_name, value });
                         }
                     }
                 }
-                try std.fmt.format(writer, "]\n", .{});
+                try writer.print("]\n", .{});
 
                 // Add children to stack
                 var num_children = element.children.items.len;
@@ -174,17 +174,17 @@ pub fn printDocument(writer: anytype, document: *const Document, dom: *const Dom
     try printDocumentCdatas(writer, document, 2);
 }
 
-fn printDocumentCdatas(writer: anytype, document: *const Document, endpoint_index: u2) !void {
+fn printDocumentCdatas(writer: *std.Io.Writer, document: *const Document, endpoint_index: u2) !void {
     const endpoint = document.cdata_endpoints[endpoint_index];
     for (endpoint.sliceOf(document.cdata.items)) |cdata| {
         try printCdata(writer, cdata);
     }
 }
 
-fn printCdata(writer: anytype, cdata: *const CharacterData) !void {
+fn printCdata(writer: *std.Io.Writer, cdata: *const CharacterData) !void {
     const interface = switch (cdata.interface) {
         .text => "Text",
         .comment => "Comment",
     };
-    try std.fmt.format(writer, "{s}: \"{}\"\n", .{ interface, std.zig.fmtEscapes(cdata.data.items) });
+    try writer.print("{s}: \"{f}\"\n", .{ interface, std.zig.fmtString(cdata.data.items) });
 }

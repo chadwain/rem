@@ -26,7 +26,7 @@ pub const mutation = @import("dom/mutation.zig");
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const ArrayList = std.ArrayList;
 const StaticStringMap = std.StaticStringMap;
 const MultiArrayList = std.MultiArrayList;
 const AutoHashMapUnmanaged = std.AutoHashMapUnmanaged;
@@ -40,10 +40,10 @@ local_names: AutoHashMapUnmanaged(*const Element, []const u8) = .{},
 /// This does not take precedence if finding if an element is an HTML integration point could be done by other means.
 html_integration_points: AutoHashMapUnmanaged(*const Element, void) = .{},
 
-all_documents: ArrayListUnmanaged(*Document) = .{},
-all_elements: ArrayListUnmanaged(*Element) = .{},
-all_cdatas: ArrayListUnmanaged(*CharacterData) = .{},
-all_doctypes: ArrayListUnmanaged(*DocumentType) = .{},
+all_documents: ArrayList(*Document) = .empty,
+all_elements: ArrayList(*Element) = .empty,
+all_cdatas: ArrayList(*CharacterData) = .empty,
+all_doctypes: ArrayList(*DocumentType) = .empty,
 
 pub fn deinit(self: *Dom) void {
     for (self.all_elements.items) |item| {

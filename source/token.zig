@@ -105,10 +105,7 @@ pub const Token = union(enum) {
         }
     }
 
-    pub fn format(value: Token, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt;
-        _ = options;
-
+    pub fn format(value: Token, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (value) {
             .doctype => |d| {
                 try writer.writeAll("DOCTYPE (");
